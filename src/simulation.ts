@@ -39,6 +39,8 @@ export function step(grid: Grid): void {
             updateSprinkler(grid, x, y);
           } else if (id === MaterialId.Dirt) {
             updateDirt(grid, x, y);
+          } else if (id === MaterialId.Grass) {
+            updateGrass(grid, x, y);
           } else if (id === MaterialId.Flower) {
             updateFlower(grid, x, y);
           }
@@ -394,6 +396,74 @@ function updateDirt(grid: Grid, x: number, y: number): void {
   // Slowly lose moisture over time (evaporation)
   if (moisture > 0 && Math.random() < DIRT_DRY_CHANCE) {
     grid.setVx(x, y, moisture - 1);
+  }
+
+  // Wet dirt can sprout grass on its top surface
+  if (moisture >= 4 && Math.random() < GRASS_SPROUT_CHANCE) {
+    const above = grid.get(x, y - 1);
+    // Only on exposed top surface (air or water above, no existing grass)
+    if (above === MaterialId.Empty || above === MaterialId.Water) {
+      // Check this is actually the surface — dirt above means we're buried
+      if (grid.get(x, y - 1) !== MaterialId.Dirt) {
+        grid.set(x, y, MaterialId.Grass);
+        grid.markUpdated(x, y);
+        // Preserve moisture — grass inherits it
+        grid.setVx(x, y, 0);
+      }
+    }
+  }
+}
+
+// Per-step chance wet surface dirt converts to grass.
+const GRASS_SPROUT_CHANCE = 0.0004;
+
+/** Grass can creep down into adjacent dirt (1-2 layers) and dies without moisture nearby. */
+function updateGrass(grid: Grid, x: number, y: number): void {
+  // Creep downward: convert dirt directly below into grass (max 2 deep)
+  if (Math.random() < 0.001) {
+    const below = grid.get(x, y + 1);
+    if (below === MaterialId.Dirt && grid.getVx(x, y + 1) > 0) {
+      // Count how deep this grass layer already is
+      let depth = 0;
+      for (let dy = 0; dy <= 2; dy++) {
+        if (grid.get(x, y - dy) === MaterialId.Grass) depth++;
+        else break;
+      }
+      if (depth < 2) {
+        grid.set(x, y + 1, MaterialId.Grass);
+        grid.markUpdated(x, y + 1);
+      }
+    }
+  }
+
+  // Die if no adjacent dirt has moisture and no adjacent grass is near moist dirt
+  if (Math.random() < 0.002) {
+    let hasMoisture = false;
+    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const nid = grid.get(nx, ny);
+      if (nid === MaterialId.Dirt && grid.getVx(nx, ny) > 0) {
+        hasMoisture = true;
+        break;
+      }
+      // Adjacent grass counts if it's touching moist dirt
+      if (nid === MaterialId.Grass) {
+        for (const [ddx, ddy] of ORTHOGONAL_NEIGHBORS) {
+          const nnid = grid.get(nx + ddx, ny + ddy);
+          if (nnid === MaterialId.Dirt && grid.getVx(nx + ddx, ny + ddy) > 0) {
+            hasMoisture = true;
+            break;
+          }
+        }
+        if (hasMoisture) break;
+      }
+    }
+    if (!hasMoisture) {
+      grid.set(x, y, MaterialId.Dirt);
+      grid.setVx(x, y, 0);
+      grid.markUpdated(x, y);
+    }
   }
 }
 

@@ -22,18 +22,73 @@ const canvas = document.querySelector<HTMLCanvasElement>("#sim-canvas")!;
 const renderer = new Renderer(canvas, grid, CELL_SIZE);
 attachInput(canvas, grid, CELL_SIZE);
 
-// Garden shears SVG cursor (32×32, hotspot at 6,2)
-const SHEARS_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-  <!-- Blades -->
-  <path d="M6 2 L16 14 L18 12 L8 0 Z" fill="#c0c0c0" stroke="#333" stroke-width="0.5"/>
-  <path d="M22 2 L12 14 L10 12 L20 0 Z" fill="#d0d0d0" stroke="#333" stroke-width="0.5"/>
-  <!-- Pivot -->
-  <circle cx="14" cy="13" r="2" fill="#888" stroke="#333" stroke-width="0.5"/>
-  <!-- Handles -->
-  <path d="M12 15 Q8 22 6 28 Q5 30 7 30 Q10 30 12 24 Q13 20 14 16 Z" fill="#e07040" stroke="#333" stroke-width="0.5"/>
-  <path d="M16 15 Q20 22 22 28 Q23 30 21 30 Q18 30 16 24 Q15 20 14 16 Z" fill="#d06030" stroke="#333" stroke-width="0.5"/>
-</svg>`;
-const shearsCursor = `url("data:image/svg+xml,${encodeURIComponent(SHEARS_SVG)}") 6 2, pointer`;
+// Generate a garden shears cursor as a PNG data URL via an offscreen canvas
+function buildShearsCursor(): string {
+  const size = 32;
+  const c = document.createElement("canvas");
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext("2d")!;
+
+  // Blades
+  ctx.fillStyle = "#c0c0c0";
+  ctx.strokeStyle = "#333";
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(8, 1);
+  ctx.lineTo(16, 13);
+  ctx.lineTo(14, 15);
+  ctx.lineTo(6, 3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = "#d4d4d4";
+  ctx.beginPath();
+  ctx.moveTo(22, 1);
+  ctx.lineTo(14, 13);
+  ctx.lineTo(16, 15);
+  ctx.lineTo(24, 3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Pivot screw
+  ctx.fillStyle = "#777";
+  ctx.beginPath();
+  ctx.arc(15, 14, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Left handle
+  ctx.fillStyle = "#d06030";
+  ctx.beginPath();
+  ctx.moveTo(13, 16);
+  ctx.quadraticCurveTo(9, 22, 7, 28);
+  ctx.quadraticCurveTo(6, 31, 8, 31);
+  ctx.quadraticCurveTo(11, 30, 13, 24);
+  ctx.lineTo(15, 17);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Right handle
+  ctx.fillStyle = "#c05020";
+  ctx.beginPath();
+  ctx.moveTo(17, 16);
+  ctx.quadraticCurveTo(21, 22, 23, 28);
+  ctx.quadraticCurveTo(24, 31, 22, 31);
+  ctx.quadraticCurveTo(19, 30, 17, 24);
+  ctx.lineTo(15, 17);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  return c.toDataURL("image/png");
+}
+
+const shearsDataUrl = buildShearsCursor();
+const shearsCursor = `url(${shearsDataUrl}) 6 2, crosshair`;
 
 function loop(): void {
   if (!state.paused) {

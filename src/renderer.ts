@@ -129,6 +129,84 @@ export class Renderer {
     );
 
     this.drawObjectOutlines(grid);
+    this.drawFaucetDials(grid);
+  }
+
+  /** Draws a small flow-state dial on each faucet body. */
+  private drawFaucetDials(grid: Grid): void {
+    const cs = this.cellSize;
+    const ids = grid.ids;
+    const visited = new Uint8Array(grid.width * grid.height);
+
+    for (let y = 0; y < grid.height; y++) {
+      for (let x = 0; x < grid.width; x++) {
+        const idx = y * grid.width + x;
+        if (visited[idx]) continue;
+        if ((ids[idx] as MaterialId) !== MaterialId.Faucet) continue;
+
+        // Flood-fill to find this faucet's bounding box
+        let minX = x, maxX = x, minY = y, maxY = y;
+        const queue: [number, number][] = [[x, y]];
+        visited[idx] = 1;
+        let flowState = grid.vx[idx];
+        while (queue.length > 0) {
+          const [cx, cy] = queue.shift()!;
+          if (cx < minX) minX = cx;
+          if (cx > maxX) maxX = cx;
+          if (cy < minY) minY = cy;
+          if (cy > maxY) maxY = cy;
+          for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+            const nx = cx + dx;
+            const ny = cy + dy;
+            if (!grid.inBounds(nx, ny)) continue;
+            const ni = ny * grid.width + nx;
+            if (visited[ni]) continue;
+            if ((ids[ni] as MaterialId) === MaterialId.Faucet) {
+              visited[ni] = 1;
+              queue.push([nx, ny]);
+            }
+          }
+        }
+
+        // Draw dial at center of faucet body
+        const centerX = ((minX + maxX + 1) / 2) * cs;
+        const centerY = ((minY + maxY + 1) / 2) * cs;
+        const radius = Math.min((maxX - minX + 1), (maxY - minY + 1)) * cs * 0.28;
+
+        this.ctx.save();
+
+        // Dial background
+        this.ctx.fillStyle = "#1a1a2a";
+        this.ctx.strokeStyle = "#555";
+        this.ctx.lineWidth = 1;
+        this.ctx.beginPath();
+        this.ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        this.ctx.fill();
+        this.ctx.stroke();
+
+        // Dial needle — points to position based on state (0=left, 1=up, 2=right)
+        const needleAngle = -Math.PI / 2 + (flowState - 1) * (Math.PI / 3);
+        const needleLen = radius * 0.7;
+        const colors = ["#888", "#4091eb", "#40d8eb"];
+        this.ctx.strokeStyle = colors[flowState] ?? "#888";
+        this.ctx.lineWidth = 2;
+        this.ctx.beginPath();
+        this.ctx.moveTo(centerX, centerY);
+        this.ctx.lineTo(
+          centerX + Math.cos(needleAngle) * needleLen,
+          centerY + Math.sin(needleAngle) * needleLen,
+        );
+        this.ctx.stroke();
+
+        // Center dot
+        this.ctx.fillStyle = "#aaa";
+        this.ctx.beginPath();
+        this.ctx.arc(centerX, centerY, 1.5, 0, Math.PI * 2);
+        this.ctx.fill();
+
+        this.ctx.restore();
+      }
+    }
   }
 
   /** Traces a contrasting border around the edges of any placed-object regions (e.g. wood, stone). */

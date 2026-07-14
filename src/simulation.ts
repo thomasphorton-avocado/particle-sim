@@ -198,16 +198,17 @@ function bloom(grid: Grid, x: number, y: number): void {
   }
 }
 
-// Per-step chance each faucet cell tries to emit water below itself.
-// Only the bottom-center cells of a faucet actually produce water, giving
-// a narrow stream from the spout rather than a sheet across the whole body.
-const FAUCET_EMIT_CHANCE = 0.15;
+// Faucet flow states stored in vx: 0=off, 1=low, 2=high
+const FAUCET_EMIT_CHANCES = [0, 0.15, 0.30];
 
 /** Emits water below this faucet cell if it's at the bottom edge of the faucet body. */
 function updateFaucet(grid: Grid, x: number, y: number): void {
+  const flowState = grid.getVx(x, y);
+  if (flowState <= 0) return;
   // Only emit from cells whose neighbor below isn't also faucet (bottom edge)
   if (grid.get(x, y + 1) === MaterialId.Faucet) return;
-  if (Math.random() >= FAUCET_EMIT_CHANCE) return;
+  const chance = FAUCET_EMIT_CHANCES[flowState] ?? 0;
+  if (Math.random() >= chance) return;
   if (grid.get(x, y + 1) === MaterialId.Empty) {
     grid.set(x, y + 1, MaterialId.Water);
     grid.markUpdated(x, y + 1);

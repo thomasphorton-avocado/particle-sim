@@ -54,16 +54,14 @@ function loop(): void {
     canvas.style.cursor = "";
   }
 
-  // Snip animation: close then re-open over ~300ms, then clear
+  // Snip animation: close over ~150ms, then clear
   if (state.snip) {
-    const SNIP_DURATION = 300;
+    const SNIP_DURATION = 150;
     const elapsed = performance.now() - state.snip.startTime;
     if (elapsed >= SNIP_DURATION) {
       state.snip = null;
     } else {
-      const t = elapsed / SNIP_DURATION;
-      // 0→0.5: close (openness 1→0), 0.5→1: open (openness 0→1)
-      const openness = t < 0.5 ? 1 - t * 2 : (t - 0.5) * 2;
+      const openness = 1 - elapsed / SNIP_DURATION;
       canvas.style.cursor = "none";
       renderer.drawShears(state.snip.px, state.snip.py, openness);
     }

@@ -379,6 +379,8 @@ const DIRT_MAX_MOISTURE = 12;
 const DIRT_WICK_CHANCE = 0.04;
 // Per-step chance wet dirt loses 1 moisture to evaporation.
 const DIRT_DRY_CHANCE = 0.0025;
+// Reduced evaporation rate when dirt is adjacent to grass.
+const DIRT_DRY_CHANCE_GRASSED = 0.0008;
 
 /** Absorbs adjacent water and wicks moisture to neighboring dry dirt. */
 function updateDirt(grid: Grid, x: number, y: number): void {
@@ -417,9 +419,18 @@ function updateDirt(grid: Grid, x: number, y: number): void {
     }
   }
 
-  // Slowly lose moisture over time (evaporation)
-  if (moisture > 0 && Math.random() < DIRT_DRY_CHANCE) {
-    grid.setVx(x, y, moisture - 1);
+  // Slowly lose moisture over time (evaporation) — grass cover slows it
+  if (moisture > 0) {
+    let dryChance = DIRT_DRY_CHANCE;
+    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+      if (grid.get(x + dx, y + dy) === MaterialId.Grass) {
+        dryChance = DIRT_DRY_CHANCE_GRASSED;
+        break;
+      }
+    }
+    if (Math.random() < dryChance) {
+      grid.setVx(x, y, moisture - 1);
+    }
   }
 
   // Wet dirt can sprout grass on its top surface

@@ -9,6 +9,7 @@ export const MaterialId = {
   Stem: 7,
   Flower: 8,
   Drain: 9,
+  Faucet: 10,
 } as const;
 export type MaterialId = (typeof MaterialId)[keyof typeof MaterialId];
 
@@ -138,6 +139,15 @@ export const MATERIALS: Record<MaterialId, Material> = {
     phase: MaterialPhase.Solid,
     density: Infinity,
     placement: { kind: "object", shape: "rect", width: 32, height: 6 },
+  },
+  [MaterialId.Faucet]: {
+    id: MaterialId.Faucet,
+    name: "Faucet",
+    color: [110, 120, 140],
+    colorVariance: 8,
+    phase: MaterialPhase.Solid,
+    density: Infinity,
+    placement: { kind: "object", shape: "rect", width: 10, height: 6 },
   },
 };
 

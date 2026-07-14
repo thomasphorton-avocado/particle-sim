@@ -9,6 +9,7 @@ const PALETTE: MaterialId[] = [
   MaterialId.Stone,
   MaterialId.Wood,
   MaterialId.Seed,
+  MaterialId.Faucet,
   MaterialId.Drain,
   MaterialId.Empty,
 ];

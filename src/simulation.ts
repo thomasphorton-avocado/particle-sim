@@ -33,6 +33,8 @@ export function step(grid: Grid): void {
         case MaterialPhase.Solid:
           if (id === MaterialId.Stem) {
             updateStemGrowth(grid, x, y);
+          } else if (id === MaterialId.Faucet) {
+            updateFaucet(grid, x, y);
           }
           break;
         // Gas (empty) cells never act on their own.
@@ -193,6 +195,22 @@ function bloom(grid: Grid, x: number, y: number): void {
   ];
   for (const [dx, dy] of outer) {
     place(x + dx, y + dy, 15 + ((Math.random() * 10) | 0));
+  }
+}
+
+// Per-step chance each faucet cell tries to emit water below itself.
+// Only the bottom-center cells of a faucet actually produce water, giving
+// a narrow stream from the spout rather than a sheet across the whole body.
+const FAUCET_EMIT_CHANCE = 0.15;
+
+/** Emits water below this faucet cell if it's at the bottom edge of the faucet body. */
+function updateFaucet(grid: Grid, x: number, y: number): void {
+  // Only emit from cells whose neighbor below isn't also faucet (bottom edge)
+  if (grid.get(x, y + 1) === MaterialId.Faucet) return;
+  if (Math.random() >= FAUCET_EMIT_CHANCE) return;
+  if (grid.get(x, y + 1) === MaterialId.Empty) {
+    grid.set(x, y + 1, MaterialId.Water);
+    grid.markUpdated(x, y + 1);
   }
 }
 

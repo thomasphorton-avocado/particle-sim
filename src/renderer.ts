@@ -73,7 +73,7 @@ export class Renderer {
     const wrap = gridW + 60;
     for (let i = 0; i < CLOUD_COUNT; i++) {
       const puffs: CloudPuff[] = [];
-      const puffCount = 4 + Math.floor(Math.random() * 3);
+      const puffCount = 8 + Math.floor(Math.random() * 5);
       for (let p = 0; p < puffCount; p++) {
         puffs.push({
           dx: (Math.random() - 0.5) * 24,

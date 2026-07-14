@@ -35,6 +35,8 @@ export function step(grid: Grid): void {
             updateStemGrowth(grid, x, y);
           } else if (id === MaterialId.Faucet) {
             updateFaucet(grid, x, y);
+          } else if (id === MaterialId.Dirt) {
+            updateDirt(grid, x, y);
           }
           break;
         // Gas (empty) cells never act on their own.
@@ -212,6 +214,49 @@ function updateFaucet(grid: Grid, x: number, y: number): void {
   if (grid.get(x, y + 1) === MaterialId.Empty) {
     grid.set(x, y + 1, MaterialId.Water);
     grid.markUpdated(x, y + 1);
+  }
+}
+
+// Dirt moisture: vx stores moisture level 0 (dry) to DIRT_MAX_MOISTURE (saturated).
+const DIRT_MAX_MOISTURE = 8;
+// Per-step chance wet dirt wicks moisture to an adjacent dry dirt cell.
+const DIRT_WICK_CHANCE = 0.06;
+
+/** Absorbs adjacent water and wicks moisture to neighboring dry dirt. */
+function updateDirt(grid: Grid, x: number, y: number): void {
+  const moisture = grid.getVx(x, y);
+
+  // Absorb adjacent water — dirt soaks it up and gains max moisture
+  if (moisture < DIRT_MAX_MOISTURE) {
+    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (grid.get(nx, ny) === MaterialId.Water) {
+        grid.set(nx, ny, MaterialId.Empty);
+        grid.markUpdated(nx, ny);
+        grid.setVx(x, y, DIRT_MAX_MOISTURE);
+        return;
+      }
+    }
+  }
+
+  // Wick moisture to adjacent dry dirt (with diminishing strength)
+  if (moisture > 1 && Math.random() < DIRT_WICK_CHANCE) {
+    // Pick a random neighbor order to avoid directional bias
+    const dirs = [...ORTHOGONAL_NEIGHBORS];
+    for (let i = dirs.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
+    }
+    for (const [dx, dy] of dirs) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (grid.get(nx, ny) === MaterialId.Dirt && grid.getVx(nx, ny) === 0) {
+        grid.setVx(nx, ny, moisture - 1);
+        grid.markUpdated(nx, ny);
+        return;
+      }
+    }
   }
 }
 

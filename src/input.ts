@@ -107,8 +107,9 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     // Clicking a faucet cycles its flow state
     if (cycleFaucet(pos.x, pos.y)) return;
     // Clicking a bloomed flower harvests it instead of painting
-    if (harvestFlowerCluster(grid, pos.x, pos.y)) {
-      state.inventory.flowers++;
+    const harvested = harvestFlowerCluster(grid, pos.x, pos.y);
+    if (harvested > 0) {
+      state.inventory.flowers += harvested;
       if (state.hoverPixel) {
         state.snip = { px: state.hoverPixel.x, py: state.hoverPixel.y, startTime: performance.now() };
       }

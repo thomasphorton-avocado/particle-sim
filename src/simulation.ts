@@ -162,25 +162,37 @@ function updateStemGrowth(grid: Grid, x: number, y: number): void {
 
 /** Turns a stem tip into a small flower head, in a random color from FLOWER_PALETTE. */
 function bloom(grid: Grid, x: number, y: number): void {
-  // Stored in `vx` (unused by Flower cells otherwise) so every cell of this
-  // bloom shares one color instead of each cell picking independently.
   const colorVariant = Math.floor(Math.random() * FLOWER_PALETTE.length);
 
-  grid.set(x, y, MaterialId.Flower);
+  const place = (px: number, py: number, shade?: number) => {
+    if (grid.get(px, py) === MaterialId.Empty) {
+      grid.set(px, py, MaterialId.Flower, shade);
+      grid.setVx(px, py, colorVariant);
+    }
+  };
+
+  // Center — dark pistil
+  grid.set(x, y, MaterialId.Flower, -40);
   grid.setVx(x, y, colorVariant);
 
-  const petals: [number, number][] = [
-    [-1, 0],
-    [1, 0],
-    [0, -1],
-    [-1, -1],
-    [1, -1],
+  // Inner ring — standard brightness
+  const inner: [number, number][] = [
+    [-1, 0], [1, 0], [0, -1],
+    [-1, -1], [1, -1],
   ];
-  for (const [dx, dy] of petals) {
-    if (grid.get(x + dx, y + dy) === MaterialId.Empty) {
-      grid.set(x + dx, y + dy, MaterialId.Flower);
-      grid.setVx(x + dx, y + dy, colorVariant);
-    }
+  for (const [dx, dy] of inner) {
+    place(x + dx, y + dy, ((Math.random() * 10) | 0) - 5);
+  }
+
+  // Outer petals — lighter tips for a softer edge
+  const outer: [number, number][] = [
+    [0, -2],
+    [-2, -1], [2, -1],
+    [-2, 0], [2, 0],
+    [-1, 1], [1, 1],
+  ];
+  for (const [dx, dy] of outer) {
+    place(x + dx, y + dy, 15 + ((Math.random() * 10) | 0));
   }
 }
 

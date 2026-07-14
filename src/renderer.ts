@@ -135,9 +135,17 @@ export class Renderer {
       const color = id === MaterialId.Flower ? FLOWER_PALETTE[grid.vx[i]] : material.color;
       // Wet dirt gets progressively darker based on moisture (vx 0-8)
       const wetOffset = id === MaterialId.Dirt ? -(grid.vx[i] * 5) : 0;
-      data[o] = clamp(color[0] + shade + wetOffset);
-      data[o + 1] = clamp(color[1] + shade + wetOffset);
-      data[o + 2] = clamp(color[2] + shade + wetOffset);
+      // Darken bottom edge of dirt (where dirt meets non-dirt/non-grass below)
+      let edgeOffset = 0;
+      if ((id === MaterialId.Dirt || id === MaterialId.Grass) && i + grid.width < grid.ids.length) {
+        const belowId = grid.ids[i + grid.width] as MaterialId;
+        if (belowId !== MaterialId.Dirt && belowId !== MaterialId.Grass) {
+          edgeOffset = -40;
+        }
+      }
+      data[o] = clamp(color[0] + shade + wetOffset + edgeOffset);
+      data[o + 1] = clamp(color[1] + shade + wetOffset + edgeOffset);
+      data[o + 2] = clamp(color[2] + shade + wetOffset + edgeOffset);
       data[o + 3] = id === MaterialId.Empty ? 0 : 255;
     }
     this.bufferCtx.clearRect(0, 0, this.buffer.width, this.buffer.height);

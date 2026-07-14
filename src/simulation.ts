@@ -449,8 +449,8 @@ function updateDirt(grid: Grid, x: number, y: number): void {
   // Wet dirt can sprout grass on its top surface
   if (moisture >= 4 && Math.random() < GRASS_SPROUT_CHANCE) {
     const above = grid.get(x, y - 1);
-    // Only on exposed top surface (air or water above, no existing grass)
-    if (above === MaterialId.Empty || above === MaterialId.Water) {
+    // Only on exposed top surface (air above, not submerged)
+    if (above === MaterialId.Empty) {
       // Check this is actually the surface — dirt above means we're buried
       if (grid.get(x, y - 1) !== MaterialId.Dirt) {
         grid.set(x, y, MaterialId.Grass);

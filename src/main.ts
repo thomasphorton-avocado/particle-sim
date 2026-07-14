@@ -22,6 +22,19 @@ const canvas = document.querySelector<HTMLCanvasElement>("#sim-canvas")!;
 const renderer = new Renderer(canvas, grid, CELL_SIZE);
 attachInput(canvas, grid, CELL_SIZE);
 
+// Garden shears SVG cursor (32×32, hotspot at 6,2)
+const SHEARS_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- Blades -->
+  <path d="M6 2 L16 14 L18 12 L8 0 Z" fill="#c0c0c0" stroke="#333" stroke-width="0.5"/>
+  <path d="M22 2 L12 14 L10 12 L20 0 Z" fill="#d0d0d0" stroke="#333" stroke-width="0.5"/>
+  <!-- Pivot -->
+  <circle cx="14" cy="13" r="2" fill="#888" stroke="#333" stroke-width="0.5"/>
+  <!-- Handles -->
+  <path d="M12 15 Q8 22 6 28 Q5 30 7 30 Q10 30 12 24 Q13 20 14 16 Z" fill="#e07040" stroke="#333" stroke-width="0.5"/>
+  <path d="M16 15 Q20 22 22 28 Q23 30 21 30 Q18 30 16 24 Q15 20 14 16 Z" fill="#d06030" stroke="#333" stroke-width="0.5"/>
+</svg>`;
+const shearsCursor = `url("data:image/svg+xml,${encodeURIComponent(SHEARS_SVG)}") 6 2, pointer`;
+
 function loop(): void {
   if (!state.paused) {
     step(grid);
@@ -46,6 +59,9 @@ function loop(): void {
   }
   if (hoveredCluster) {
     renderer.drawClusterOutline(grid, hoveredCluster);
+    canvas.style.cursor = shearsCursor;
+  } else {
+    canvas.style.cursor = "";
   }
 
   const material = MATERIALS[state.selectedMaterial];

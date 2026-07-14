@@ -1,0 +1,120 @@
+:root {
+  --bg: #16171d;
+  --panel: #1f2028;
+  --text: #e5e4e7;
+  --text-dim: #9ca3af;
+  --border: #2e303a;
+  --accent: #c084fc;
+  color-scheme: dark;
+  font: 16px/1.4 system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#app {
+  max-width: 1650px;
+  margin: 0 auto;
+  padding: 16px 20px 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+h1 {
+  font-size: 28px;
+  font-weight: 600;
+  margin: 8px 0 16px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.material-group,
+.action-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.material-btn {
+  --swatch: #888;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #262832;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.material-btn::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--swatch);
+  display: inline-block;
+}
+
+.material-btn:hover {
+  border-color: var(--accent);
+}
+
+.material-btn.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.brush-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.brush-group.disabled {
+  opacity: 0.4;
+}
+
+.action-group button {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #262832;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.action-group button:hover {
+  border-color: var(--accent);
+}
+
+#sim-canvas {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-width: 100%;
+  touch-action: none;
+  background: #241b4e;
+  cursor: crosshair;
+}

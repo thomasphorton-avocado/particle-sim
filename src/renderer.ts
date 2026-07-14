@@ -3,15 +3,15 @@ import { FLOWER_PALETTE, MATERIALS, MaterialId } from "./materials";
 import type { ObjectPlacement } from "./materials";
 
 interface CloudPuff {
-  dx: number;
+  dx: number; // offset in grid cells
   dy: number;
-  r: number;
+  r: number;  // radius in grid cells
 }
 
 interface Cloud {
-  baseX: number;
-  y: number;
-  speed: number;
+  baseX: number; // in grid cells
+  y: number;     // in grid cells
+  speed: number; // grid cells per second
   opacity: number;
   puffs: CloudPuff[];
 }
@@ -30,6 +30,8 @@ export class Renderer {
   private bufferCtx: CanvasRenderingContext2D;
   private imageData: ImageData;
   private clouds: Cloud[];
+  private cloudBuffer: HTMLCanvasElement;
+  private cloudBufCtx: CanvasRenderingContext2D;
 
   constructor(canvas: HTMLCanvasElement, grid: Grid, cellSize: number) {
     const ctx = canvas.getContext("2d");
@@ -49,25 +51,33 @@ export class Renderer {
     this.bufferCtx = bufferCtx;
     this.imageData = this.bufferCtx.createImageData(grid.width, grid.height);
 
-    this.clouds = this.generateClouds(canvas.width, canvas.height);
+    this.cloudBuffer = document.createElement("canvas");
+    this.cloudBuffer.width = grid.width;
+    this.cloudBuffer.height = grid.height;
+    const cloudCtx = this.cloudBuffer.getContext("2d");
+    if (!cloudCtx) throw new Error("2D context unavailable");
+    this.cloudBufCtx = cloudCtx;
+
+    this.clouds = this.generateClouds(grid.width, grid.height);
   }
 
-  private generateClouds(width: number, height: number): Cloud[] {
+  private generateClouds(gridW: number, gridH: number): Cloud[] {
     const clouds: Cloud[] = [];
+    const wrap = gridW + 60;
     for (let i = 0; i < CLOUD_COUNT; i++) {
       const puffs: CloudPuff[] = [];
       const puffCount = 4 + Math.floor(Math.random() * 3);
       for (let p = 0; p < puffCount; p++) {
         puffs.push({
-          dx: (Math.random() - 0.5) * 120,
-          dy: (Math.random() - 0.5) * 20,
-          r: 22 + Math.random() * 26,
+          dx: (Math.random() - 0.5) * 24,
+          dy: (Math.random() - 0.5) * 4,
+          r: 4 + Math.random() * 6,
         });
       }
       clouds.push({
-        baseX: Math.random() * (width + 300) - 150,
-        y: height * (0.06 + Math.random() * 0.32),
-        speed: 3 + Math.random() * 5,
+        baseX: Math.random() * wrap - 30,
+        y: gridH * (0.06 + Math.random() * 0.32),
+        speed: 0.6 + Math.random() * 1.0,
         opacity: 0.5 + Math.random() * 0.35,
         puffs,
       });
@@ -75,8 +85,7 @@ export class Renderer {
     return clouds;
   }
 
-  /** Paints a dusk sky gradient with soft drifting clouds — deliberately warm so it reads
-   * distinctly from the blue water rather than blending into it. */
+  /** Paints a dusk sky gradient with pixelated drifting clouds. */
   private drawBackground(): void {
     const { width, height } = this.ctx.canvas;
     const gradient = this.ctx.createLinearGradient(0, 0, 0, height);
@@ -86,42 +95,63 @@ export class Renderer {
     this.ctx.fillStyle = gradient;
     this.ctx.fillRect(0, 0, width, height);
 
-    const t = performance.now() / 1000;
-    const wrap = width + 300;
-    this.ctx.save();
-    for (const cloud of this.clouds) {
-      const x = (((cloud.baseX + t * cloud.speed) % wrap) + wrap) % wrap - 150;
+    // Render clouds at grid resolution into the low-res buffer
+    const gw = this.cloudBuffer.width;
+    const gh = this.cloudBuffer.height;
+    const cctx = this.cloudBufCtx;
+    cctx.clearRect(0, 0, gw, gh);
 
-      // Bottom shadow layer — shifted down, darker and wider
-      this.ctx.fillStyle = `rgba(60, 40, 60, ${cloud.opacity * 0.25})`;
-      this.ctx.beginPath();
+    const t = performance.now() / 1000;
+    const wrap = gw + 60;
+
+    for (const cloud of this.clouds) {
+      const cx = (((cloud.baseX + t * cloud.speed) % wrap) + wrap) % wrap - 30;
+
+      // Bottom shadow — shifted down, darker
+      cctx.fillStyle = `rgba(60, 40, 60, ${cloud.opacity * 0.3})`;
       for (const puff of cloud.puffs) {
-        const sr = puff.r * 1.05;
-        this.ctx.moveTo(x + puff.dx + sr, cloud.y + puff.dy + 6);
-        this.ctx.arc(x + puff.dx, cloud.y + puff.dy + 6, sr, 0, Math.PI * 2);
+        this.fillPixelCircle(cctx, cx + puff.dx, cloud.y + puff.dy + 1.5, puff.r * 1.05, gw, gh);
       }
-      this.ctx.fill();
 
       // Main cloud body
-      this.ctx.fillStyle = `rgba(255, 248, 240, ${cloud.opacity})`;
-      this.ctx.beginPath();
+      cctx.fillStyle = `rgba(255, 248, 240, ${cloud.opacity})`;
       for (const puff of cloud.puffs) {
-        this.ctx.moveTo(x + puff.dx + puff.r, cloud.y + puff.dy);
-        this.ctx.arc(x + puff.dx, cloud.y + puff.dy, puff.r, 0, Math.PI * 2);
+        this.fillPixelCircle(cctx, cx + puff.dx, cloud.y + puff.dy, puff.r, gw, gh);
       }
-      this.ctx.fill();
 
       // Top highlight — shifted up, smaller, brighter
-      this.ctx.fillStyle = `rgba(255, 255, 255, ${cloud.opacity * 0.35})`;
-      this.ctx.beginPath();
+      cctx.fillStyle = `rgba(255, 255, 255, ${cloud.opacity * 0.35})`;
       for (const puff of cloud.puffs) {
-        const hr = puff.r * 0.65;
-        this.ctx.moveTo(x + puff.dx - 2 + hr, cloud.y + puff.dy - 5);
-        this.ctx.arc(x + puff.dx - 2, cloud.y + puff.dy - 5, hr, 0, Math.PI * 2);
+        this.fillPixelCircle(cctx, cx + puff.dx, cloud.y + puff.dy - 1, puff.r * 0.6, gw, gh);
       }
-      this.ctx.fill();
     }
-    this.ctx.restore();
+
+    // Blit the cloud buffer scaled up with nearest-neighbor
+    this.ctx.drawImage(this.cloudBuffer, 0, 0, width, height);
+  }
+
+  /** Fills a circle as discrete pixel rects at grid resolution. */
+  private fillPixelCircle(
+    ctx: CanvasRenderingContext2D,
+    cx: number, cy: number, r: number,
+    gw: number, gh: number,
+  ): void {
+    const r2 = r * r;
+    const x0 = Math.floor(cx - r);
+    const x1 = Math.ceil(cx + r);
+    const y0 = Math.floor(cy - r);
+    const y1 = Math.ceil(cy + r);
+    for (let py = y0; py <= y1; py++) {
+      if (py < 0 || py >= gh) continue;
+      for (let px = x0; px <= x1; px++) {
+        if (px < 0 || px >= gw) continue;
+        const dx = px + 0.5 - cx;
+        const dy = py + 0.5 - cy;
+        if (dx * dx + dy * dy <= r2) {
+          ctx.fillRect(px, py, 1, 1);
+        }
+      }
+    }
   }
 
   draw(grid: Grid): void {

@@ -463,7 +463,7 @@ function updateDirt(grid: Grid, x: number, y: number): void {
 }
 
 // Per-step chance wet surface dirt converts to grass.
-const GRASS_SPROUT_CHANCE = 0.0006;
+const GRASS_SPROUT_CHANCE = 0.001;
 
 /** Grass can creep down into adjacent dirt (1-2 layers) and dies without moisture nearby. */
 function updateGrass(grid: Grid, x: number, y: number): void {

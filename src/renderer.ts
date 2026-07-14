@@ -216,6 +216,8 @@ export class Renderer {
     ctx.save();
     ctx.translate(px, py);
     ctx.scale(1.5, 1.5);
+    // Offset so the sprite center aligns with the mouse position
+    ctx.translate(-8, -17.5);
 
     // Blades
     ctx.fillStyle = "#c0c0c0";

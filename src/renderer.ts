@@ -210,8 +210,9 @@ export class Renderer {
     this.ctx.restore();
   }
 
-  /** Draws a garden shears sprite at the given canvas-pixel position. */
-  drawShears(px: number, py: number): void {
+  /** Draws a garden shears sprite at the given canvas-pixel position.
+   *  @param openness 0 = blades closed, 1 = fully open (default). */
+  drawShears(px: number, py: number, openness: number = 1): void {
     const ctx = this.ctx;
     ctx.save();
     ctx.translate(px, py);
@@ -219,33 +220,50 @@ export class Renderer {
     // Offset so the sprite top-center aligns with the mouse position
     ctx.translate(-8, 0);
 
-    // Blades
-    ctx.fillStyle = "#c0c0c0";
+    const pivotX = 8;
+    const pivotY = 17;
+    // Each blade rotates up to ~0.25 rad from center; openness controls spread
+    const bladeAngle = openness * 0.25;
+
     ctx.strokeStyle = "#222";
     ctx.lineWidth = 1;
+
+    // Left blade (rotated clockwise when open)
+    ctx.save();
+    ctx.translate(pivotX, pivotY);
+    ctx.rotate(-bladeAngle);
+    ctx.translate(-pivotX, -pivotY);
+    ctx.fillStyle = "#c0c0c0";
     ctx.beginPath();
-    ctx.moveTo(0, 0);
+    ctx.moveTo(4, 0);
     ctx.lineTo(10, 16);
     ctx.lineTo(7, 18);
-    ctx.lineTo(-2, 3);
+    ctx.lineTo(2, 3);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
+    ctx.restore();
 
+    // Right blade (rotated counter-clockwise when open)
+    ctx.save();
+    ctx.translate(pivotX, pivotY);
+    ctx.rotate(bladeAngle);
+    ctx.translate(-pivotX, -pivotY);
     ctx.fillStyle = "#ddd";
     ctx.beginPath();
-    ctx.moveTo(16, 0);
+    ctx.moveTo(12, 0);
     ctx.lineTo(6, 16);
     ctx.lineTo(9, 18);
-    ctx.lineTo(18, 3);
+    ctx.lineTo(14, 3);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
+    ctx.restore();
 
     // Pivot
     ctx.fillStyle = "#666";
     ctx.beginPath();
-    ctx.arc(8, 17, 2.5, 0, Math.PI * 2);
+    ctx.arc(pivotX, pivotY, 2.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
 

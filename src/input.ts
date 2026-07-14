@@ -72,6 +72,9 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     // Clicking a bloomed flower harvests it instead of painting
     if (harvestFlowerCluster(grid, pos.x, pos.y)) {
       state.inventory.flowers++;
+      if (state.hoverPixel) {
+        state.snip = { px: state.hoverPixel.x, py: state.hoverPixel.y, startTime: performance.now() };
+      }
       return;
     }
     if (MATERIALS[state.selectedMaterial].placement.kind === "object") {

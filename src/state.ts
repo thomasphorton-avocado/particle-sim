@@ -4,6 +4,12 @@ export interface Inventory {
   flowers: number;
 }
 
+export interface SnipAnimation {
+  px: number;
+  py: number;
+  startTime: number;
+}
+
 export interface SimState {
   selectedMaterial: MaterialId;
   brushSize: number;
@@ -13,6 +19,8 @@ export interface SimState {
   /** Raw pixel position on the canvas element, for drawing custom cursors. */
   hoverPixel: { x: number; y: number } | null;
   inventory: Inventory;
+  /** Active snip animation, if any. */
+  snip: SnipAnimation | null;
 }
 
 export const state: SimState = {
@@ -22,4 +30,5 @@ export const state: SimState = {
   hover: null,
   hoverPixel: null,
   inventory: { flowers: 0 },
+  snip: null,
 };

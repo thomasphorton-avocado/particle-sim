@@ -76,9 +76,9 @@ export class Renderer {
       const puffCount = 8 + Math.floor(Math.random() * 5);
       for (let p = 0; p < puffCount; p++) {
         puffs.push({
-          dx: (Math.random() - 0.5) * 24,
-          dy: (Math.random() - 0.5) * 4,
-          r: 4 + Math.random() * 6,
+          dx: (Math.random() - 0.5) * 30,
+          dy: (Math.random() - 0.5) * 5,
+          r: 5 + Math.random() * 7.5,
           phaseX: Math.random() * Math.PI * 2,
           phaseY: Math.random() * Math.PI * 2,
           phaseR: Math.random() * Math.PI * 2,
@@ -121,12 +121,12 @@ export class Renderer {
       const cx = (((cloud.baseX + t * cloud.speed) % wrap) + wrap) % wrap - 30;
 
       // Bottom shadow — shifted down, darker
-      cctx.fillStyle = `rgba(60, 40, 60, ${cloud.opacity * 0.3})`;
+      cctx.fillStyle = `rgba(40, 25, 50, ${cloud.opacity * 0.45})`;
       for (const puff of cloud.puffs) {
         const ax = puff.dx + Math.sin(t * puff.freqX + puff.phaseX) * 1.5;
         const ay = puff.dy + Math.sin(t * puff.freqY + puff.phaseY) * 0.8;
         const ar = puff.r + Math.sin(t * puff.freqR + puff.phaseR) * 1.0;
-        this.fillPixelCircle(cctx, cx + ax, cloud.y + ay + 1.5, ar * 1.05, gw, gh);
+        this.fillPixelCircle(cctx, cx + ax, cloud.y + ay + 2.5, ar * 1.1, gw, gh);
       }
 
       // Main cloud body

@@ -37,21 +37,49 @@ export function findFlowerCluster(grid: Grid, startX: number, startY: number): S
 
 /**
  * Harvests a flower cluster: removes all Flower and Stem cells connected to
- * the clicked position. Returns true if something was harvested.
+ * the clicked position. Returns the number of distinct blooms harvested (0 if none).
  */
-export function harvestFlowerCluster(grid: Grid, startX: number, startY: number): boolean {
+export function harvestFlowerCluster(grid: Grid, startX: number, startY: number): number {
   const cluster = findFlowerCluster(grid, startX, startY);
-  if (!cluster) return false;
+  if (!cluster) return 0;
 
-  // Only harvest if the cluster contains at least one flower (don't harvest bare stems)
-  let hasFlower = false;
+  // Count distinct blooms: each bloom has a contiguous group of flower cells
+  // that share a stem. We count by finding separate flower-only connected
+  // components within the cluster (stems separate distinct blooms).
+  const flowerIndices = new Set<number>();
   for (const idx of cluster) {
     if ((grid.ids[idx] as MaterialId) === MaterialId.Flower) {
-      hasFlower = true;
-      break;
+      flowerIndices.add(idx);
     }
   }
-  if (!hasFlower) return false;
+  if (flowerIndices.size === 0) return 0;
+
+  let bloomCount = 0;
+  const visited = new Set<number>();
+  for (const idx of flowerIndices) {
+    if (visited.has(idx)) continue;
+    bloomCount++;
+    // BFS within flower cells that share the same color variant (vx)
+    // Each bloom assigns one color to all its cells, so this separates
+    // overlapping blooms that happen to touch.
+    const colorVariant = grid.vx[idx];
+    const q = [idx];
+    visited.add(idx);
+    while (q.length > 0) {
+      const cur = q.shift()!;
+      const cx = cur % grid.width;
+      const cy = (cur - cx) / grid.width;
+      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+        const nx = cx + dx;
+        const ny = cy + dy;
+        const k = ny * grid.width + nx;
+        if (flowerIndices.has(k) && !visited.has(k) && grid.vx[k] === colorVariant) {
+          visited.add(k);
+          q.push(k);
+        }
+      }
+    }
+  }
 
   for (const idx of cluster) {
     const x = idx % grid.width;
@@ -59,5 +87,5 @@ export function harvestFlowerCluster(grid: Grid, startX: number, startY: number)
     grid.set(x, y, MaterialId.Empty);
   }
 
-  return true;
+  return bloomCount;
 }

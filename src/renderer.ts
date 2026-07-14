@@ -91,11 +91,33 @@ export class Renderer {
     this.ctx.save();
     for (const cloud of this.clouds) {
       const x = (((cloud.baseX + t * cloud.speed) % wrap) + wrap) % wrap - 150;
+
+      // Bottom shadow layer — shifted down, darker and wider
+      this.ctx.fillStyle = `rgba(60, 40, 60, ${cloud.opacity * 0.25})`;
+      this.ctx.beginPath();
+      for (const puff of cloud.puffs) {
+        const sr = puff.r * 1.05;
+        this.ctx.moveTo(x + puff.dx + sr, cloud.y + puff.dy + 6);
+        this.ctx.arc(x + puff.dx, cloud.y + puff.dy + 6, sr, 0, Math.PI * 2);
+      }
+      this.ctx.fill();
+
+      // Main cloud body
       this.ctx.fillStyle = `rgba(255, 248, 240, ${cloud.opacity})`;
       this.ctx.beginPath();
       for (const puff of cloud.puffs) {
         this.ctx.moveTo(x + puff.dx + puff.r, cloud.y + puff.dy);
         this.ctx.arc(x + puff.dx, cloud.y + puff.dy, puff.r, 0, Math.PI * 2);
+      }
+      this.ctx.fill();
+
+      // Top highlight — shifted up, smaller, brighter
+      this.ctx.fillStyle = `rgba(255, 255, 255, ${cloud.opacity * 0.35})`;
+      this.ctx.beginPath();
+      for (const puff of cloud.puffs) {
+        const hr = puff.r * 0.65;
+        this.ctx.moveTo(x + puff.dx - 2 + hr, cloud.y + puff.dy - 5);
+        this.ctx.arc(x + puff.dx - 2, cloud.y + puff.dy - 5, hr, 0, Math.PI * 2);
       }
       this.ctx.fill();
     }
@@ -111,9 +133,11 @@ export class Renderer {
       const o = i * 4;
       // Flowers store their randomly-chosen bloom color's palette index in `vx`.
       const color = id === MaterialId.Flower ? FLOWER_PALETTE[grid.vx[i]] : material.color;
-      data[o] = clamp(color[0] + shade);
-      data[o + 1] = clamp(color[1] + shade);
-      data[o + 2] = clamp(color[2] + shade);
+      // Wet dirt gets progressively darker based on moisture (vx 0-8)
+      const wetOffset = id === MaterialId.Dirt ? -(grid.vx[i] * 5) : 0;
+      data[o] = clamp(color[0] + shade + wetOffset);
+      data[o + 1] = clamp(color[1] + shade + wetOffset);
+      data[o + 2] = clamp(color[2] + shade + wetOffset);
       data[o + 3] = id === MaterialId.Empty ? 0 : 255;
     }
     this.bufferCtx.clearRect(0, 0, this.buffer.width, this.buffer.height);
@@ -129,6 +153,84 @@ export class Renderer {
     );
 
     this.drawObjectOutlines(grid);
+    this.drawFaucetDials(grid);
+  }
+
+  /** Draws a small flow-state dial on each faucet body. */
+  private drawFaucetDials(grid: Grid): void {
+    const cs = this.cellSize;
+    const ids = grid.ids;
+    const visited = new Uint8Array(grid.width * grid.height);
+
+    for (let y = 0; y < grid.height; y++) {
+      for (let x = 0; x < grid.width; x++) {
+        const idx = y * grid.width + x;
+        if (visited[idx]) continue;
+        if ((ids[idx] as MaterialId) !== MaterialId.Faucet) continue;
+
+        // Flood-fill to find this faucet's bounding box
+        let minX = x, maxX = x, minY = y, maxY = y;
+        const queue: [number, number][] = [[x, y]];
+        visited[idx] = 1;
+        let flowState = grid.vx[idx];
+        while (queue.length > 0) {
+          const [cx, cy] = queue.shift()!;
+          if (cx < minX) minX = cx;
+          if (cx > maxX) maxX = cx;
+          if (cy < minY) minY = cy;
+          if (cy > maxY) maxY = cy;
+          for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+            const nx = cx + dx;
+            const ny = cy + dy;
+            if (!grid.inBounds(nx, ny)) continue;
+            const ni = ny * grid.width + nx;
+            if (visited[ni]) continue;
+            if ((ids[ni] as MaterialId) === MaterialId.Faucet) {
+              visited[ni] = 1;
+              queue.push([nx, ny]);
+            }
+          }
+        }
+
+        // Draw dial at center of faucet body
+        const centerX = ((minX + maxX + 1) / 2) * cs;
+        const centerY = ((minY + maxY + 1) / 2) * cs;
+        const radius = Math.min((maxX - minX + 1), (maxY - minY + 1)) * cs * 0.28;
+
+        this.ctx.save();
+
+        // Dial background
+        this.ctx.fillStyle = "#1a1a2a";
+        this.ctx.strokeStyle = "#555";
+        this.ctx.lineWidth = 1;
+        this.ctx.beginPath();
+        this.ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        this.ctx.fill();
+        this.ctx.stroke();
+
+        // Dial needle — points to position based on state (0=left, 1=up, 2=right)
+        const needleAngle = -Math.PI / 2 + (flowState - 1) * (Math.PI / 3);
+        const needleLen = radius * 0.7;
+        const colors = ["#888", "#4091eb", "#40d8eb"];
+        this.ctx.strokeStyle = colors[flowState] ?? "#888";
+        this.ctx.lineWidth = 2;
+        this.ctx.beginPath();
+        this.ctx.moveTo(centerX, centerY);
+        this.ctx.lineTo(
+          centerX + Math.cos(needleAngle) * needleLen,
+          centerY + Math.sin(needleAngle) * needleLen,
+        );
+        this.ctx.stroke();
+
+        // Center dot
+        this.ctx.fillStyle = "#aaa";
+        this.ctx.beginPath();
+        this.ctx.arc(centerX, centerY, 1.5, 0, Math.PI * 2);
+        this.ctx.fill();
+
+        this.ctx.restore();
+      }
+    }
   }
 
   /** Traces a contrasting border around the edges of any placed-object regions (e.g. wood, stone). */

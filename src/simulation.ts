@@ -33,6 +33,16 @@ export function step(grid: Grid): void {
         case MaterialPhase.Solid:
           if (id === MaterialId.Stem) {
             updateStemGrowth(grid, x, y);
+          } else if (id === MaterialId.Faucet) {
+            updateFaucet(grid, x, y);
+          } else if (id === MaterialId.Sprinkler) {
+            updateSprinkler(grid, x, y);
+          } else if (id === MaterialId.Dirt) {
+            updateDirt(grid, x, y);
+          } else if (id === MaterialId.Grass) {
+            updateGrass(grid, x, y);
+          } else if (id === MaterialId.Flower) {
+            updateFlower(grid, x, y);
           }
           break;
         // Gas (empty) cells never act on their own.
@@ -55,11 +65,11 @@ function canDisplace(target: MaterialId, movingDensity: number): boolean {
 const MAX_STEM_SKIP = 8;
 
 /**
- * Walks from (x, y) in direction (dx, dy), skipping over any stem cells in the
- * way, and returns the first non-stem cell found. Stems are thin plant growth
- * and shouldn't dam up liquid, but liquid should never actually displace them.
+ * Walks from (x, y) in direction (dx, dy), skipping over any permeable cells
+ * in the way, and returns the first non-permeable cell found. Permeable solids
+ * shouldn't dam up liquid, but liquid should never actually displace them.
  */
-function skipStems(
+function skipPlants(
   grid: Grid,
   x: number,
   y: number,
@@ -70,7 +80,7 @@ function skipStems(
   let cy = y + dy;
   for (let i = 0; i < MAX_STEM_SKIP; i++) {
     const id = grid.get(cx, cy);
-    if (id !== MaterialId.Stem) return { x: cx, y: cy, id };
+    if (!MATERIALS[id].permeable) return { x: cx, y: cy, id };
     cx += dx;
     cy += dy;
   }
@@ -125,26 +135,136 @@ const SEED_GERMINATION_NEIGHBORS: [number, number][] = [
   [1, 0],
 ];
 
-/** Falls like sand; once settled, sprouts into a growing stem if touching water. */
+// Per-step chance a settled seed despawns if it can't germinate.
+// ~0.003 gives an average lifespan of ~330 steps (~5-6 seconds at 60fps).
+const SEED_DESPAWN_CHANCE = 0.003;
+
+/** Falls like sand; once settled, sprouts in wet dirt or eventually despawns. */
 function updateSeed(grid: Grid, x: number, y: number, density: number): void {
   if (tryFallPowder(grid, x, y, density)) return;
 
+  // Seeds can push through grass — replace the grass cell below
+  const below = grid.get(x, y + 1);
+  if (below === MaterialId.Grass) {
+    moveCell(grid, x, y, x, y + 1);
+    // The grass cell is now at (x, y) — overwrite it with empty
+    grid.set(x, y, MaterialId.Empty);
+    grid.markUpdated(x, y);
+    return;
+  }
+
+  // Check for adjacent wet dirt (or wet dirt through grass) to germinate
   for (const [dx, dy] of SEED_GERMINATION_NEIGHBORS) {
-    if (grid.get(x + dx, y + dy) === MaterialId.Water) {
-      grid.set(x + dx, y + dy, MaterialId.Empty);
+    const nx = x + dx;
+    const ny = y + dy;
+    const nid = grid.get(nx, ny);
+    if (nid === MaterialId.Dirt && grid.getVx(nx, ny) > 0) {
       grid.set(x, y, MaterialId.Stem);
       grid.setVx(x, y, randomStemBudget());
       grid.markUpdated(x, y);
       return;
     }
+    // Grass sitting on wet dirt also counts
+    if (nid === MaterialId.Grass) {
+      for (const [ddx, ddy] of ORTHOGONAL_NEIGHBORS) {
+        const nnx = nx + ddx;
+        const nny = ny + ddy;
+        if (grid.get(nnx, nny) === MaterialId.Dirt && grid.getVx(nnx, nny) > 0) {
+          grid.set(x, y, MaterialId.Stem);
+          grid.setVx(x, y, randomStemBudget());
+          grid.markUpdated(x, y);
+          return;
+        }
+      }
+    }
+  }
+
+  // Despawn if sitting without wet dirt for too long
+  if (Math.random() < SEED_DESPAWN_CHANCE) {
+    grid.set(x, y, MaterialId.Empty);
+    grid.markUpdated(x, y);
   }
 }
+
+/** BFS through connected stem/flower cells to find reachable dirt with moisture. */
+function drainNearbyDirt(grid: Grid, x: number, y: number): boolean {
+  // Direct neighbors first (fast path)
+  for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (grid.get(nx, ny) === MaterialId.Dirt && grid.getVx(nx, ny) > 0) {
+      grid.setVx(nx, ny, grid.getVx(nx, ny) - 1);
+      return true;
+    }
+  }
+  // Walk through connected plant cells to reach distant dirt
+  const visited = new Set<number>();
+  const queue: number[] = [];
+  const key = (cx: number, cy: number) => cy * grid.width + cx;
+  const k0 = key(x, y);
+  visited.add(k0);
+  // Seed with adjacent stem/flower neighbors
+  for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+    const nx = x + dx;
+    const ny = y + dy;
+    const id = grid.get(nx, ny);
+    if (id === MaterialId.Stem || id === MaterialId.Flower) {
+      const k = key(nx, ny);
+      if (!visited.has(k)) {
+        visited.add(k);
+        queue.push(k);
+      }
+    }
+  }
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    const cx = cur % grid.width;
+    const cy = (cur - cx) / grid.width;
+    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+      const nx = cx + dx;
+      const ny = cy + dy;
+      if (!grid.inBounds(nx, ny)) continue;
+      const k = key(nx, ny);
+      if (visited.has(k)) continue;
+      const id = grid.get(nx, ny);
+      if (id === MaterialId.Dirt && grid.getVx(nx, ny) > 0) {
+        grid.setVx(nx, ny, grid.getVx(nx, ny) - 1);
+        return true;
+      }
+      if (id === MaterialId.Stem || id === MaterialId.Flower) {
+        visited.add(k);
+        queue.push(k);
+      }
+    }
+  }
+  return false;
+}
+
+// Per-step chance an established (non-growing) stem or flower cell tries to
+// consume moisture from adjacent dirt to stay alive.
+const PLANT_THIRST_CHANCE = 0.002;
+// Per-step chance a thirsty plant cell (no moisture available) withers and dies.
+const PLANT_WITHER_CHANCE = 0.005;
 
 /** Grows a stem upward one segment at a time until its budget runs out, then blooms. */
 function updateStemGrowth(grid: Grid, x: number, y: number): void {
   const budget = grid.getVx(x, y);
-  if (budget <= 0) return;
+
+  // Non-growing stem: occasionally consume moisture or wither
+  if (budget <= 0) {
+    if (Math.random() < PLANT_THIRST_CHANCE) {
+      if (!drainNearbyDirt(grid, x, y) && Math.random() < PLANT_WITHER_CHANCE / PLANT_THIRST_CHANCE) {
+        grid.set(x, y, MaterialId.Empty);
+        grid.markUpdated(x, y);
+      }
+    }
+    return;
+  }
+
   if (Math.random() >= STEM_GROW_CHANCE) return;
+
+  // Growing stem consumes moisture to grow
+  if (!drainNearbyDirt(grid, x, y)) return;
 
   const above = grid.get(x, y - 1);
   const canGrowInto = above === MaterialId.Empty || above === MaterialId.Water;
@@ -162,24 +282,236 @@ function updateStemGrowth(grid: Grid, x: number, y: number): void {
 
 /** Turns a stem tip into a small flower head, in a random color from FLOWER_PALETTE. */
 function bloom(grid: Grid, x: number, y: number): void {
-  // Stored in `vx` (unused by Flower cells otherwise) so every cell of this
-  // bloom shares one color instead of each cell picking independently.
   const colorVariant = Math.floor(Math.random() * FLOWER_PALETTE.length);
 
-  grid.set(x, y, MaterialId.Flower);
+  const place = (px: number, py: number, shade?: number) => {
+    if (grid.get(px, py) === MaterialId.Empty) {
+      grid.set(px, py, MaterialId.Flower, shade);
+      grid.setVx(px, py, colorVariant);
+    }
+  };
+
+  // Center — dark pistil
+  grid.set(x, y, MaterialId.Flower, -40);
   grid.setVx(x, y, colorVariant);
 
-  const petals: [number, number][] = [
-    [-1, 0],
-    [1, 0],
-    [0, -1],
-    [-1, -1],
-    [1, -1],
+  // Inner ring — standard brightness
+  const inner: [number, number][] = [
+    [-1, 0], [1, 0], [0, -1],
+    [-1, -1], [1, -1],
   ];
-  for (const [dx, dy] of petals) {
-    if (grid.get(x + dx, y + dy) === MaterialId.Empty) {
-      grid.set(x + dx, y + dy, MaterialId.Flower);
-      grid.setVx(x + dx, y + dy, colorVariant);
+  for (const [dx, dy] of inner) {
+    place(x + dx, y + dy, ((Math.random() * 10) | 0) - 5);
+  }
+
+  // Outer petals — lighter tips for a softer edge
+  const outer: [number, number][] = [
+    [0, -2],
+    [-2, -1], [2, -1],
+    [-2, 0], [2, 0],
+    [-1, 1], [1, 1],
+  ];
+  for (const [dx, dy] of outer) {
+    place(x + dx, y + dy, 15 + ((Math.random() * 10) | 0));
+  }
+}
+
+/** Flower cells occasionally consume moisture from nearby dirt or wither. */
+function updateFlower(grid: Grid, x: number, y: number): void {
+  if (Math.random() >= PLANT_THIRST_CHANCE) return;
+  if (!drainNearbyDirt(grid, x, y) && Math.random() < PLANT_WITHER_CHANCE / PLANT_THIRST_CHANCE) {
+    grid.set(x, y, MaterialId.Empty);
+    grid.markUpdated(x, y);
+  }
+}
+
+// Faucet flow states stored in vx: 0=off, 1=low, 2=high
+const FAUCET_EMIT_CHANCES = [0, 0.15, 0.30];
+
+/** Emits water below this faucet cell if it's at the bottom edge of the faucet body. */
+function updateFaucet(grid: Grid, x: number, y: number): void {
+  const flowState = grid.getVx(x, y);
+  if (flowState <= 0) return;
+  // Only emit from cells whose neighbor below isn't also faucet (bottom edge)
+  if (grid.get(x, y + 1) === MaterialId.Faucet) return;
+  const chance = FAUCET_EMIT_CHANCES[flowState] ?? 0;
+  if (Math.random() >= chance) return;
+  if (grid.get(x, y + 1) === MaterialId.Empty) {
+    grid.set(x, y + 1, MaterialId.Water);
+    grid.markUpdated(x, y + 1);
+  }
+}
+
+// Per-step chance a sprinkler top-edge cell emits a water droplet.
+const SPRINKLER_EMIT_CHANCE = 0.04;
+
+/** Emits water droplets upward in a parabolic arc from the top edge. */
+function updateSprinkler(grid: Grid, x: number, y: number): void {
+  // Only act from the top edge
+  if (grid.get(x, y - 1) === MaterialId.Sprinkler) return;
+  if (Math.random() >= SPRINKLER_EMIT_CHANCE) return;
+
+  // Simulate a point along a parabolic arc:
+  // Pick a random "time" along the trajectory
+  const dir = Math.random() < 0.5 ? -1 : 1;
+  const t = Math.random(); // 0..1 along trajectory
+  const range = 8 + Math.floor(Math.random() * 16); // 8-23 cells horizontal
+  const peakHeight = 6 + Math.floor(range * 0.3);   // arc peak scales with range
+
+  const dx = Math.floor(t * range) * dir;
+  // Parabolic height: peaks at t=0.3 (biased upward near source)
+  const dy = -Math.floor(peakHeight * 4 * t * (1 - t));
+
+  const tx = x + dx;
+  const ty = y + dy;
+
+  if (grid.inBounds(tx, ty) && grid.get(tx, ty) === MaterialId.Empty) {
+    grid.set(tx, ty, MaterialId.Water);
+    // Give a small drift in spray direction so it flows outward
+    grid.setVx(tx, ty, dir);
+    grid.markUpdated(tx, ty);
+  }
+}
+
+// Dirt moisture: vx stores moisture level 0 (dry) to DIRT_MAX_MOISTURE (saturated).
+const DIRT_MAX_MOISTURE = 12;
+// Per-step chance wet dirt wicks moisture to an adjacent dry dirt cell.
+const DIRT_WICK_CHANCE = 0.04;
+// Per-step chance wet dirt loses 1 moisture to evaporation.
+const DIRT_DRY_CHANCE = 0.0025;
+// Reduced evaporation rate when dirt is adjacent to grass.
+const DIRT_DRY_CHANCE_GRASSED = 0.0008;
+
+/** Absorbs adjacent water and wicks moisture to neighboring dry dirt. */
+function updateDirt(grid: Grid, x: number, y: number): void {
+  const moisture = grid.getVx(x, y);
+
+  // Absorb adjacent water — dirt soaks it up and gains max moisture
+  // Also looks through grass layers for water (grass is permeable)
+  if (moisture < DIRT_MAX_MOISTURE) {
+    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const nid = grid.get(nx, ny);
+      if (nid === MaterialId.Water) {
+        grid.set(nx, ny, MaterialId.Empty);
+        grid.markUpdated(nx, ny);
+        grid.setVx(x, y, DIRT_MAX_MOISTURE);
+        return;
+      }
+      // Check through grass: if neighbor is grass, look one cell further
+      if (nid === MaterialId.Grass) {
+        const fx = nx + dx;
+        const fy = ny + dy;
+        if (grid.get(fx, fy) === MaterialId.Water) {
+          grid.set(fx, fy, MaterialId.Empty);
+          grid.markUpdated(fx, fy);
+          grid.setVx(x, y, DIRT_MAX_MOISTURE);
+          return;
+        }
+      }
+    }
+  }
+
+  // Wick moisture to adjacent dry dirt (source loses 1, neighbor gains source-1)
+  if (moisture > 2 && Math.random() < DIRT_WICK_CHANCE) {
+    const dirs = [...ORTHOGONAL_NEIGHBORS];
+    for (let i = dirs.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
+    }
+    for (const [dx, dy] of dirs) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (grid.get(nx, ny) === MaterialId.Dirt && grid.getVx(nx, ny) === 0) {
+        grid.setVx(nx, ny, moisture - 2);
+        grid.setVx(x, y, moisture - 1);
+        grid.markUpdated(nx, ny);
+        return;
+      }
+    }
+  }
+
+  // Slowly lose moisture over time (evaporation) — grass cover slows it
+  if (moisture > 0) {
+    let dryChance = DIRT_DRY_CHANCE;
+    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+      if (grid.get(x + dx, y + dy) === MaterialId.Grass) {
+        dryChance = DIRT_DRY_CHANCE_GRASSED;
+        break;
+      }
+    }
+    if (Math.random() < dryChance) {
+      grid.setVx(x, y, moisture - 1);
+    }
+  }
+
+  // Wet dirt can sprout grass on its top surface
+  if (moisture >= 4 && Math.random() < GRASS_SPROUT_CHANCE) {
+    const above = grid.get(x, y - 1);
+    // Only on exposed top surface — block if standing water (water stacked 2+ deep)
+    if (above === MaterialId.Empty ||
+        (above === MaterialId.Water && grid.get(x, y - 2) !== MaterialId.Water)) {
+      // Check this is actually the surface — dirt above means we're buried
+      if (grid.get(x, y - 1) !== MaterialId.Dirt) {
+        grid.set(x, y, MaterialId.Grass);
+        grid.markUpdated(x, y);
+        // Preserve moisture — grass inherits it
+        grid.setVx(x, y, 0);
+      }
+    }
+  }
+}
+
+// Per-step chance wet surface dirt converts to grass.
+const GRASS_SPROUT_CHANCE = 0.001;
+
+/** Grass can creep down into adjacent dirt (1-2 layers) and dies without moisture nearby. */
+function updateGrass(grid: Grid, x: number, y: number): void {
+  // Creep downward: convert dirt directly below into grass (max 2 deep)
+  if (Math.random() < 0.001) {
+    const below = grid.get(x, y + 1);
+    if (below === MaterialId.Dirt && grid.getVx(x, y + 1) > 0) {
+      // Count how deep this grass layer already is
+      let depth = 0;
+      for (let dy = 0; dy <= 2; dy++) {
+        if (grid.get(x, y - dy) === MaterialId.Grass) depth++;
+        else break;
+      }
+      if (depth < 2) {
+        grid.set(x, y + 1, MaterialId.Grass);
+        grid.markUpdated(x, y + 1);
+      }
+    }
+  }
+
+  // Die if no adjacent dirt has moisture and no adjacent grass is near moist dirt
+  if (Math.random() < 0.002) {
+    let hasMoisture = false;
+    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const nid = grid.get(nx, ny);
+      if (nid === MaterialId.Dirt && grid.getVx(nx, ny) > 0) {
+        hasMoisture = true;
+        break;
+      }
+      // Adjacent grass counts if it's touching moist dirt
+      if (nid === MaterialId.Grass) {
+        for (const [ddx, ddy] of ORTHOGONAL_NEIGHBORS) {
+          const nnid = grid.get(nx + ddx, ny + ddy);
+          if (nnid === MaterialId.Dirt && grid.getVx(nx + ddx, ny + ddy) > 0) {
+            hasMoisture = true;
+            break;
+          }
+        }
+        if (hasMoisture) break;
+      }
+    }
+    if (!hasMoisture) {
+      grid.set(x, y, MaterialId.Dirt);
+      grid.setVx(x, y, 0);
+      grid.markUpdated(x, y);
     }
   }
 }
@@ -233,7 +565,7 @@ function updateLiquid(
     }
   }
 
-  const below = skipStems(grid, x, y, 0, 1);
+  const below = skipPlants(grid, x, y, 0, 1);
   if (canDisplace(below.id, density)) {
     const vx = grid.getVx(x, y);
     const driftDir = vx !== 0 ? (vx > 0 ? 1 : -1) : randDir();
@@ -241,7 +573,7 @@ function updateLiquid(
     // (inertia from spreading along a ledge before it dropped), plus rare
     // random turbulence, instead of always snapping straight down.
     if ((vx !== 0 && Math.random() < DRIFT_APPLY_CHANCE) || Math.random() < FALL_TURBULENCE_CHANCE) {
-      const diag = skipStems(grid, x, y, driftDir, 1);
+      const diag = skipPlants(grid, x, y, driftDir, 1);
       if (canDisplace(diag.id, density)) {
         moveCell(grid, x, y, diag.x, diag.y);
         grid.setVx(diag.x, diag.y, Math.random() < DRIFT_DECAY_CHANCE ? 0 : driftDir);
@@ -255,7 +587,7 @@ function updateLiquid(
 
   const dir = randDir();
   for (const dx of [dir, -dir] as const) {
-    const diag = skipStems(grid, x, y, dx, 1);
+    const diag = skipPlants(grid, x, y, dx, 1);
     if (canDisplace(diag.id, density)) {
       moveCell(grid, x, y, diag.x, diag.y);
       // Decayed like the other fall-related writes, so a diagonal drop doesn't
@@ -274,7 +606,7 @@ function updateLiquid(
       const target = grid.get(x + dx * step, y);
       if (target === MaterialId.Empty) {
         farthest = step;
-      } else if (target === MaterialId.Stem) {
+      } else if (MATERIALS[target].permeable) {
         continue;
       } else {
         break;

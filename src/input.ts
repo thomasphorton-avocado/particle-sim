@@ -63,15 +63,53 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
         const y = gy + dy;
         if (!grid.inBounds(x, y)) continue;
         grid.set(x, y, state.selectedMaterial);
+        // Faucets start on low flow
+        if (state.selectedMaterial === MaterialId.Faucet) {
+          grid.setVx(x, y, 1);
+        }
       }
     }
   };
 
+  /** Flood-fill all connected faucet cells and cycle their flow state. */
+  const cycleFaucet = (gx: number, gy: number): boolean => {
+    if (grid.get(gx, gy) !== MaterialId.Faucet) return false;
+    const visited = new Set<number>();
+    const queue: [number, number][] = [[gx, gy]];
+    const key = (x: number, y: number) => y * grid.width + x;
+    visited.add(key(gx, gy));
+    const cells: [number, number][] = [];
+    while (queue.length > 0) {
+      const [x, y] = queue.shift()!;
+      cells.push([x, y]);
+      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (!grid.inBounds(nx, ny)) continue;
+        const k = key(nx, ny);
+        if (visited.has(k)) continue;
+        if (grid.get(nx, ny) === MaterialId.Faucet) {
+          visited.add(k);
+          queue.push([nx, ny]);
+        }
+      }
+    }
+    const current = grid.getVx(gx, gy);
+    const next = (current + 1) % 3;
+    for (const [x, y] of cells) {
+      grid.setVx(x, y, next);
+    }
+    return true;
+  };
+
   const start = (clientX: number, clientY: number) => {
     const pos = toGrid(clientX, clientY);
+    // Clicking a faucet cycles its flow state
+    if (cycleFaucet(pos.x, pos.y)) return;
     // Clicking a bloomed flower harvests it instead of painting
-    if (harvestFlowerCluster(grid, pos.x, pos.y)) {
-      state.inventory.flowers++;
+    const harvested = harvestFlowerCluster(grid, pos.x, pos.y);
+    if (harvested > 0) {
+      state.inventory.flowers += harvested;
       if (state.hoverPixel) {
         state.snip = { px: state.hoverPixel.x, py: state.hoverPixel.y, startTime: performance.now() };
       }

@@ -5,10 +5,13 @@ import { state } from "./state";
 const PALETTE: MaterialId[] = [
   MaterialId.Sand,
   MaterialId.Water,
+  MaterialId.Dirt,
   MaterialId.Wall,
   MaterialId.Stone,
   MaterialId.Wood,
   MaterialId.Seed,
+  MaterialId.Faucet,
+  MaterialId.Sprinkler,
   MaterialId.Drain,
   MaterialId.Empty,
 ];

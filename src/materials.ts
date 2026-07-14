@@ -9,6 +9,10 @@ export const MaterialId = {
   Stem: 7,
   Flower: 8,
   Drain: 9,
+  Faucet: 10,
+  Dirt: 11,
+  Sprinkler: 12,
+  Grass: 13,
 } as const;
 export type MaterialId = (typeof MaterialId)[keyof typeof MaterialId];
 
@@ -44,6 +48,8 @@ export interface Material {
   density: number;
   /** Liquids: how many cells sideways it may try to flow per step. */
   flowRate?: number;
+  /** If true, liquid flows through this cell as if it were empty. */
+  permeable?: boolean;
   placement: Placement;
 }
 
@@ -119,6 +125,7 @@ export const MATERIALS: Record<MaterialId, Material> = {
     colorVariance: 10,
     phase: MaterialPhase.Solid,
     density: Infinity,
+    permeable: true,
     placement: { kind: "brush" },
   },
   [MaterialId.Flower]: {
@@ -128,6 +135,7 @@ export const MATERIALS: Record<MaterialId, Material> = {
     colorVariance: 18,
     phase: MaterialPhase.Solid,
     density: Infinity,
+    permeable: true,
     placement: { kind: "brush" },
   },
   [MaterialId.Drain]: {
@@ -138,6 +146,44 @@ export const MATERIALS: Record<MaterialId, Material> = {
     phase: MaterialPhase.Solid,
     density: Infinity,
     placement: { kind: "object", shape: "rect", width: 32, height: 6 },
+  },
+  [MaterialId.Faucet]: {
+    id: MaterialId.Faucet,
+    name: "Faucet",
+    color: [110, 120, 140],
+    colorVariance: 8,
+    phase: MaterialPhase.Solid,
+    density: Infinity,
+    placement: { kind: "object", shape: "rect", width: 10, height: 6 },
+  },
+  [MaterialId.Dirt]: {
+    id: MaterialId.Dirt,
+    name: "Dirt",
+    color: [155, 118, 83],
+    colorVariance: 10,
+    phase: MaterialPhase.Solid,
+    density: Infinity,
+    placement: { kind: "brush" },
+  },
+  [MaterialId.Sprinkler]: {
+    id: MaterialId.Sprinkler,
+    name: "Sprinkler",
+    color: [80, 160, 100],
+    colorVariance: 8,
+    phase: MaterialPhase.Solid,
+    density: Infinity,
+    placement: { kind: "object", shape: "rect", width: 6, height: 4 },
+    permeable: true,
+  },
+  [MaterialId.Grass]: {
+    id: MaterialId.Grass,
+    name: "Grass",
+    color: [62, 140, 50],
+    colorVariance: 15,
+    phase: MaterialPhase.Solid,
+    density: Infinity,
+    placement: { kind: "brush" },
+    permeable: true,
   },
 };
 

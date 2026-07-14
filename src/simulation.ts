@@ -129,18 +129,30 @@ const SEED_GERMINATION_NEIGHBORS: [number, number][] = [
   [1, 0],
 ];
 
-/** Falls like sand; once settled, sprouts into a growing stem if touching water. */
+// Per-step chance a settled seed despawns if it can't germinate.
+// ~0.003 gives an average lifespan of ~330 steps (~5-6 seconds at 60fps).
+const SEED_DESPAWN_CHANCE = 0.003;
+
+/** Falls like sand; once settled, sprouts in wet dirt or eventually despawns. */
 function updateSeed(grid: Grid, x: number, y: number, density: number): void {
   if (tryFallPowder(grid, x, y, density)) return;
 
+  // Check for adjacent wet dirt to germinate
   for (const [dx, dy] of SEED_GERMINATION_NEIGHBORS) {
-    if (grid.get(x + dx, y + dy) === MaterialId.Water) {
-      grid.set(x + dx, y + dy, MaterialId.Empty);
+    const nx = x + dx;
+    const ny = y + dy;
+    if (grid.get(nx, ny) === MaterialId.Dirt && grid.getVx(nx, ny) > 0) {
       grid.set(x, y, MaterialId.Stem);
       grid.setVx(x, y, randomStemBudget());
       grid.markUpdated(x, y);
       return;
     }
+  }
+
+  // Despawn if sitting without wet dirt for too long
+  if (Math.random() < SEED_DESPAWN_CHANCE) {
+    grid.set(x, y, MaterialId.Empty);
+    grid.markUpdated(x, y);
   }
 }
 

@@ -11,6 +11,7 @@ const PALETTE: MaterialId[] = [
   MaterialId.Wood,
   MaterialId.Seed,
   MaterialId.Faucet,
+  MaterialId.Sprinkler,
   MaterialId.Drain,
   MaterialId.Empty,
 ];

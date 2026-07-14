@@ -319,7 +319,7 @@ const DIRT_MAX_MOISTURE = 12;
 // Per-step chance wet dirt wicks moisture to an adjacent dry dirt cell.
 const DIRT_WICK_CHANCE = 0.04;
 // Per-step chance wet dirt loses 1 moisture to evaporation.
-const DIRT_DRY_CHANCE = 0.001;
+const DIRT_DRY_CHANCE = 0.0015;
 
 /** Absorbs adjacent water and wicks moisture to neighboring dry dirt. */
 function updateDirt(grid: Grid, x: number, y: number): void {

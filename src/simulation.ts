@@ -318,25 +318,31 @@ function updateFaucet(grid: Grid, x: number, y: number): void {
 
 // Per-step chance a sprinkler top-edge cell emits a water droplet.
 const SPRINKLER_EMIT_CHANCE = 0.04;
-// Horizontal spray range (cells from sprinkler edge).
-const SPRINKLER_RANGE = 20;
 
-/** Emits water droplets in an arc from the top edge of the sprinkler. */
+/** Emits water droplets upward in a parabolic arc from the top edge. */
 function updateSprinkler(grid: Grid, x: number, y: number): void {
   // Only act from the top edge
   if (grid.get(x, y - 1) === MaterialId.Sprinkler) return;
   if (Math.random() >= SPRINKLER_EMIT_CHANCE) return;
 
-  // Pick a random landing spot within range, left or right
+  // Simulate a point along a parabolic arc:
+  // Pick a random "time" along the trajectory
   const dir = Math.random() < 0.5 ? -1 : 1;
-  const dist = 3 + Math.floor(Math.random() * SPRINKLER_RANGE);
-  const tx = x + dir * dist;
-  // Arc height: parabolic — highest at midpoint
-  const maxHeight = Math.floor(dist * 0.4);
-  const ty = y - maxHeight + Math.floor(Math.random() * 3);
+  const t = Math.random(); // 0..1 along trajectory
+  const range = 8 + Math.floor(Math.random() * 16); // 8-23 cells horizontal
+  const peakHeight = 6 + Math.floor(range * 0.3);   // arc peak scales with range
+
+  const dx = Math.floor(t * range) * dir;
+  // Parabolic height: peaks at t=0.3 (biased upward near source)
+  const dy = -Math.floor(peakHeight * 4 * t * (1 - t));
+
+  const tx = x + dx;
+  const ty = y + dy;
 
   if (grid.inBounds(tx, ty) && grid.get(tx, ty) === MaterialId.Empty) {
     grid.set(tx, ty, MaterialId.Water);
+    // Give a small drift in spray direction so it flows outward
+    grid.setVx(tx, ty, dir);
     grid.markUpdated(tx, ty);
   }
 }

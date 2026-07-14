@@ -172,6 +172,7 @@ export const MATERIALS: Record<MaterialId, Material> = {
     phase: MaterialPhase.Solid,
     density: Infinity,
     placement: { kind: "object", shape: "rect", width: 6, height: 4 },
+    permeable: true,
   },
 };
 

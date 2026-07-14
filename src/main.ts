@@ -71,7 +71,7 @@ function loop(): void {
   }
 
   const material = MATERIALS[state.selectedMaterial];
-  if (state.hover && !hoveringFaucet && material.placement.kind === "object") {
+  if (state.hover && !hoveringFaucet && !hoveredCluster && material.placement.kind === "object") {
     renderer.drawObjectPreview(state.hover.x, state.hover.y, material.placement, material.color);
   }
 

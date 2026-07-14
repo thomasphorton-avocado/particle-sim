@@ -54,7 +54,7 @@ function loop(): void {
     canvas.style.cursor = "";
   }
 
-  // Snip animation: close over ~150ms, then clear
+  // Snip animation: close over ~150ms at the click position (cursor reverts immediately)
   if (state.snip) {
     const SNIP_DURATION = 150;
     const elapsed = performance.now() - state.snip.startTime;
@@ -62,7 +62,6 @@ function loop(): void {
       state.snip = null;
     } else {
       const openness = 1 - elapsed / SNIP_DURATION;
-      canvas.style.cursor = "none";
       renderer.drawShears(state.snip.px, state.snip.py, openness);
     }
   }

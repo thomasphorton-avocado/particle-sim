@@ -158,15 +158,29 @@ function updateSeed(grid: Grid, x: number, y: number, density: number): void {
   }
 }
 
-/** Finds an adjacent dirt cell with moisture and drains 1 from it. Returns true if found. */
+/** Searches nearby cells (through stems) for dirt with moisture and drains 1. */
 function drainNearbyDirt(grid: Grid, x: number, y: number): boolean {
+  // Direct neighbors first
   for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
     const nx = x + dx;
     const ny = y + dy;
-    if (grid.get(nx, ny) === MaterialId.Dirt) {
-      const m = grid.getVx(nx, ny);
-      if (m > 0) {
-        grid.setVx(nx, ny, m - 1);
+    if (grid.get(nx, ny) === MaterialId.Dirt && grid.getVx(nx, ny) > 0) {
+      grid.setVx(nx, ny, grid.getVx(nx, ny) - 1);
+      return true;
+    }
+  }
+  // Check 2 cells away (through adjacent stem/flower) to reach dirt below
+  for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+    const mx = x + dx;
+    const my = y + dy;
+    const mid = grid.get(mx, my);
+    if (mid !== MaterialId.Stem && mid !== MaterialId.Flower) continue;
+    for (const [dx2, dy2] of ORTHOGONAL_NEIGHBORS) {
+      const nx = mx + dx2;
+      const ny = my + dy2;
+      if (nx === x && ny === y) continue;
+      if (grid.get(nx, ny) === MaterialId.Dirt && grid.getVx(nx, ny) > 0) {
+        grid.setVx(nx, ny, grid.getVx(nx, ny) - 1);
         return true;
       }
     }
@@ -277,9 +291,9 @@ function updateFaucet(grid: Grid, x: number, y: number): void {
 }
 
 // Dirt moisture: vx stores moisture level 0 (dry) to DIRT_MAX_MOISTURE (saturated).
-const DIRT_MAX_MOISTURE = 8;
+const DIRT_MAX_MOISTURE = 12;
 // Per-step chance wet dirt wicks moisture to an adjacent dry dirt cell.
-const DIRT_WICK_CHANCE = 0.06;
+const DIRT_WICK_CHANCE = 0.04;
 
 /** Absorbs adjacent water and wicks moisture to neighboring dry dirt. */
 function updateDirt(grid: Grid, x: number, y: number): void {
@@ -299,9 +313,8 @@ function updateDirt(grid: Grid, x: number, y: number): void {
     }
   }
 
-  // Wick moisture to adjacent dry dirt (with diminishing strength)
-  if (moisture > 1 && Math.random() < DIRT_WICK_CHANCE) {
-    // Pick a random neighbor order to avoid directional bias
+  // Wick moisture to adjacent dry dirt (source loses 1, neighbor gains source-1)
+  if (moisture > 2 && Math.random() < DIRT_WICK_CHANCE) {
     const dirs = [...ORTHOGONAL_NEIGHBORS];
     for (let i = dirs.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -311,7 +324,8 @@ function updateDirt(grid: Grid, x: number, y: number): void {
       const nx = x + dx;
       const ny = y + dy;
       if (grid.get(nx, ny) === MaterialId.Dirt && grid.getVx(nx, ny) === 0) {
-        grid.setVx(nx, ny, moisture - 1);
+        grid.setVx(nx, ny, moisture - 2);
+        grid.setVx(x, y, moisture - 1);
         grid.markUpdated(nx, ny);
         return;
       }

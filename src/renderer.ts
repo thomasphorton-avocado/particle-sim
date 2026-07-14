@@ -23,7 +23,7 @@ interface Cloud {
   puffs: CloudPuff[];
 }
 
-const CLOUD_COUNT = 7;
+const CLOUD_COUNT = 10;
 
 /**
  * Renders the grid at 1 pixel per cell into an offscreen buffer, then blits

@@ -119,19 +119,21 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     return true;
   };
 
-  /** Mine a small area in front of the character. */
+  /** Mine a small area in front of the character, matching the pickaxe arc. */
   const mineInFront = () => {
     const char = state.character;
     if (!char) return;
-    // Center of mining area: 3 cells in front of character at body height
-    const cx = Math.floor(char.x + char.width / 2 + char.facing * 4);
-    const cy = Math.floor(char.y + char.height / 2);
-    const r = 2; // small mining radius
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (dx * dx + dy * dy > r * r) continue;
-        const x = cx + dx;
-        const y = cy + dy;
+    // Mining area: vertical strip in front matching pickaxe reach
+    // 3 wide, character height + 2 tall (1 above, 1 below)
+    const mineW = 3;
+    const mineH = char.height + 2;
+    const startX = Math.floor(char.x + char.width / 2 + char.facing * 3);
+    const startY = Math.floor(char.y - 1); // 1 cell above character top
+
+    for (let dy = 0; dy < mineH; dy++) {
+      for (let dx = 0; dx < mineW; dx++) {
+        const x = startX + (char.facing === 1 ? dx : -dx);
+        const y = startY + dy;
         if (!grid.inBounds(x, y)) continue;
         const id = grid.get(x, y) as MaterialId;
         if (id === MaterialId.Empty) continue;

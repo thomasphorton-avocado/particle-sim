@@ -99,6 +99,13 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
     const showPalette = mode === "editor" || mode === "place";
     materialGroup.style.display = showPalette ? "" : "none";
     brushGroup.style.display = showPalette ? "" : "none";
+    if (!showPalette) {
+      // Deselect material buttons
+      for (const [, btn] of buttons) btn.classList.remove("active");
+    } else {
+      // Re-select current material
+      buttons.get(state.selectedMaterial)?.classList.add("active");
+    }
   };
   editorBtn.addEventListener("click", () => setToolMode("editor", editorBtn));
   placeBtn.addEventListener("click", () => setToolMode("place", placeBtn));

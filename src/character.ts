@@ -12,6 +12,8 @@ export interface Character {
   facing: -1 | 1;
   /** Pickaxe swing animation start time, null if not swinging. */
   swingStart: number | null;
+  /** Frames since last grounded (for coyote time). */
+  airFrames: number;
 }
 
 const GRAVITY = 0.4;
@@ -55,6 +57,7 @@ export function createCharacter(grid: Grid): Character {
     grounded: false,
     facing: 1,
     swingStart: null,
+    airFrames: 0,
   };
 }
 
@@ -93,10 +96,19 @@ export function updateCharacter(char: Character, grid: Grid): void {
   char.vy += GRAVITY;
   if (char.vy > MAX_FALL) char.vy = MAX_FALL;
 
-  // Jump
-  if (keys.jump && char.grounded && !jumpHeld) {
+  // Track air frames for coyote time
+  if (char.grounded) {
+    char.airFrames = 0;
+  } else {
+    char.airFrames++;
+  }
+
+  // Jump (with coyote time: can jump within 5 frames of leaving ground)
+  const COYOTE_FRAMES = 5;
+  if (keys.jump && !jumpHeld && (char.grounded || char.airFrames <= COYOTE_FRAMES)) {
     char.vy = JUMP_VELOCITY;
     char.grounded = false;
+    char.airFrames = COYOTE_FRAMES + 1; // prevent double-jump
     jumpHeld = true;
   }
 

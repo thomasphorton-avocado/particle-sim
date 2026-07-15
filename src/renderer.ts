@@ -159,20 +159,15 @@ export class Renderer {
     gw: number, gh: number,
   ): void {
     const r2 = r * r;
-    const x0 = Math.floor(cx - r);
-    const x1 = Math.ceil(cx + r);
     const y0 = Math.floor(cy - r);
     const y1 = Math.ceil(cy + r);
     for (let py = y0; py <= y1; py++) {
       if (py < 0 || py >= gh) continue;
-      for (let px = x0; px <= x1; px++) {
-        if (px < 0 || px >= gw) continue;
-        const dx = px + 0.5 - cx;
-        const dy = py + 0.5 - cy;
-        if (dx * dx + dy * dy <= r2) {
-          ctx.fillRect(px, py, 1, 1);
-        }
-      }
+      const dy = py + 0.5 - cy;
+      const halfWidth = Math.sqrt(Math.max(0, r2 - dy * dy));
+      const start = Math.max(0, Math.ceil(cx - halfWidth - 0.5));
+      const end = Math.min(gw - 1, Math.floor(cx + halfWidth - 0.5));
+      if (start <= end) ctx.fillRect(start, py, end - start + 1, 1);
     }
   }
 

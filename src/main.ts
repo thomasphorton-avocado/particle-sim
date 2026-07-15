@@ -45,10 +45,16 @@ const character = createCharacter(grid);
 state.character = character;
 attachCharacterInput();
 
+let lastTime = performance.now();
+
 function loop(): void {
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000; // seconds
+  lastTime = now;
+
   if (!state.paused) {
     step(grid);
-    updateCharacter(character, grid);
+    updateCharacter(character, grid, dt);
   }
   renderer.draw(grid);
   drawCharacter(renderer.getCtx(), character, CELL_SIZE);

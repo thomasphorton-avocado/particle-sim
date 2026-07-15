@@ -12,18 +12,21 @@ export interface Character {
   facing: -1 | 1;
   /** Pickaxe swing animation start time, null if not swinging. */
   swingStart: number | null;
-  /** Frames since last grounded (for coyote time). */
-  airFrames: number;
+  /** Seconds since last grounded (for coyote time). */
+  airTime: number;
   /** Whether the character is crouching. */
   crouching: boolean;
   /** Whether the character is looking up. */
   lookingUp: boolean;
 }
 
-const GRAVITY = 0.4;
-const MOVE_SPEED = 1.2;
-const JUMP_VELOCITY = -3.5;
-const MAX_FALL = 5;
+// Physics constants expressed per second (baseline: 60 fps).
+const BASE_FPS = 60;
+const GRAVITY_PER_S = 0.4 * BASE_FPS;        // acceleration per second
+const MOVE_SPEED_PER_S = 1.2 * BASE_FPS;     // cells per second
+const JUMP_VELOCITY_PER_S = -3.5 * BASE_FPS; // cells/second impulse
+const MAX_FALL_PER_S = 5 * BASE_FPS;         // terminal velocity cells per second
+const COYOTE_TIME_S = 5 / BASE_FPS;          // ~83ms coyote window
 
 /** Returns true if the given grid cell is solid ground the character can stand on. */
 function isSolid(grid: Grid, gx: number, gy: number): boolean {
@@ -61,7 +64,7 @@ export function createCharacter(grid: Grid): Character {
     grounded: false,
     facing: 1,
     swingStart: null,
-    airFrames: 0,
+    airTime: 0,
     crouching: false,
     lookingUp: false,
   };
@@ -98,33 +101,35 @@ export function attachCharacterInput(): void {
   });
 }
 
-export function updateCharacter(char: Character, grid: Grid): void {
+export function updateCharacter(char: Character, grid: Grid, dt: number): void {
+  // Clamp dt to avoid physics explosions on tab-switch
+  const clampedDt = Math.min(dt, 0.05);
+
   // Crouch / look up state
   char.crouching = keys.crouch;
   char.lookingUp = keys.lookUp;
 
   // Horizontal movement
   let moveX = 0;
-  if (keys.left) { moveX -= MOVE_SPEED; char.facing = -1; }
-  if (keys.right) { moveX += MOVE_SPEED; char.facing = 1; }
+  if (keys.left) { moveX -= MOVE_SPEED_PER_S * clampedDt; char.facing = -1; }
+  if (keys.right) { moveX += MOVE_SPEED_PER_S * clampedDt; char.facing = 1; }
 
-  // Apply gravity
-  char.vy += GRAVITY;
-  if (char.vy > MAX_FALL) char.vy = MAX_FALL;
+  // Apply gravity (vy is in cells/second)
+  char.vy += GRAVITY_PER_S * clampedDt;
+  if (char.vy > MAX_FALL_PER_S) char.vy = MAX_FALL_PER_S;
 
-  // Track air frames for coyote time
+  // Track air time for coyote time
   if (char.grounded) {
-    char.airFrames = 0;
+    char.airTime = 0;
   } else {
-    char.airFrames++;
+    char.airTime += clampedDt;
   }
 
-  // Jump (with coyote time: can jump within 5 frames of leaving ground)
-  const COYOTE_FRAMES = 5;
-  if (keys.jump && !jumpHeld && (char.grounded || char.airFrames <= COYOTE_FRAMES)) {
-    char.vy = JUMP_VELOCITY;
+  // Jump (with coyote time)
+  if (keys.jump && !jumpHeld && (char.grounded || char.airTime <= COYOTE_TIME_S)) {
+    char.vy = JUMP_VELOCITY_PER_S;
     char.grounded = false;
-    char.airFrames = COYOTE_FRAMES + 1; // prevent double-jump
+    char.airTime = COYOTE_TIME_S + 1; // prevent double-jump
     jumpHeld = true;
   }
 
@@ -143,8 +148,8 @@ export function updateCharacter(char: Character, grid: Grid): void {
     }
   }
 
-  // Move vertically with collision
-  const newY = char.y + char.vy;
+  // Move vertically with collision (convert vy from cells/s to displacement)
+  const newY = char.y + char.vy * clampedDt;
   if (!collidesAt(grid, char.x, newY, char.width, char.height)) {
     char.y = newY;
     char.grounded = false;

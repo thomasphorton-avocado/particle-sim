@@ -148,27 +148,20 @@ function checkFaucetBump(grid: Grid, char: Character): void {
   if (headY < 0) return;
   const x0 = Math.floor(char.x);
   const x1 = Math.floor(char.x + char.width - 0.01);
-  let hitFaucet = false;
+  const checkedRows = [...new Set([headY, Math.floor(char.y)])];
+  const seedCells: [number, number][] = [];
   // Check the row above and the row at the very top of hitbox
-  for (const checkY of [headY, Math.floor(char.y)]) {
+  for (const checkY of checkedRows) {
     for (let gx = x0; gx <= x1; gx++) {
       if (grid.inBounds(gx, checkY) && grid.get(gx, checkY) === MaterialId.Faucet) {
-        hitFaucet = true;
-        break;
+        seedCells.push([gx, checkY]);
       }
     }
-    if (hitFaucet) break;
   }
-  if (!hitFaucet) return;
+  if (seedCells.length === 0) return;
   // Cycle all connected faucet cells: 0→1→2→0
   const visited = new Set<number>();
-  const queue: [number, number][] = [];
-  // Start flood-fill from the hit cells
-  for (let gx = x0; gx <= x1; gx++) {
-    if (grid.inBounds(gx, headY) && grid.get(gx, headY) === MaterialId.Faucet) {
-      queue.push([gx, headY]);
-    }
-  }
+  const queue = [...seedCells];
   while (queue.length > 0) {
     const [fx, fy] = queue.pop()!;
     const idx = fy * grid.width + fx;
@@ -304,12 +297,12 @@ export function updateCharacter(char: Character, grid: Grid, dt: number): void {
       char.grounded = true;
     } else {
       // Hitting ceiling — snap below the ceiling
-      // Check if we hit a faucet — cycle its flow state
-      checkFaucetBump(grid, char);
       char.y = Math.ceil(newY);
       while (collidesAt(grid, char.x, char.y, char.width, char.height) && char.y < grid.height - char.height) {
         char.y += 1;
       }
+      // Check if we hit a faucet after resolving the final head position.
+      checkFaucetBump(grid, char);
     }
     char.vy = 0;
   }

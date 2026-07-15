@@ -15,20 +15,82 @@ const GRID_HEIGHT = 200;
 
 const grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
 
-// Seed the world with a dirt mound in the center
+// Seed the world with terrain, a faucet, and a drain
 {
-  const cx = Math.floor(GRID_WIDTH / 2);
-  const baseY = GRID_HEIGHT - 1;
-  const moundWidth = 80;
-  const moundHeight = 40;
-  for (let dy = 0; dy < moundHeight; dy++) {
-    // Wider at bottom, narrower at top (roughly elliptical)
-    const rowHalfW = Math.floor(moundWidth / 2 * (1 - (dy / moundHeight) ** 2));
-    for (let dx = -rowHalfW; dx <= rowHalfW; dx++) {
-      const x = cx + dx;
-      const y = baseY - dy;
+  // --- Terrain generation ---
+  // Create several overlapping dirt slopes/hills using sine waves + noise
+  const terrainHeight = new Float32Array(GRID_WIDTH);
+  const baseLevel = GRID_HEIGHT - 20; // leave some room at bottom
+
+  // Layer several sine waves for organic-looking terrain
+  const hills = [
+    { freq: 0.015, amp: 25, phase: 0 },
+    { freq: 0.035, amp: 12, phase: 2.1 },
+    { freq: 0.07, amp: 6, phase: 4.7 },
+    { freq: 0.12, amp: 3, phase: 1.3 },
+  ];
+
+  // Simple seeded pseudo-random for reproducible terrain
+  let seed = 42;
+  const rand = () => { seed = (seed * 16807 + 0) % 2147483647; return seed / 2147483647; };
+
+  for (let x = 0; x < GRID_WIDTH; x++) {
+    let h = 0;
+    for (const hill of hills) {
+      h += Math.sin(x * hill.freq + hill.phase) * hill.amp;
+    }
+    // Add small random jitter
+    h += (rand() - 0.5) * 4;
+    terrainHeight[x] = Math.floor(baseLevel - Math.abs(h) - 15);
+  }
+
+  // Fill dirt from terrain surface down to bottom
+  for (let x = 0; x < GRID_WIDTH; x++) {
+    const top = Math.max(0, terrainHeight[x]);
+    for (let y = top; y < GRID_HEIGHT; y++) {
       if (grid.inBounds(x, y)) {
         grid.set(x, y, MaterialId.Dirt);
+      }
+    }
+  }
+
+  // --- Place a faucet near the top ---
+  // Faucet is 10x6, place it centered near top-left area
+  const faucetX = Math.floor(GRID_WIDTH * 0.3);
+  const faucetY = 8;
+  for (let dy = 0; dy < 6; dy++) {
+    for (let dx = 0; dx < 10; dx++) {
+      const x = faucetX + dx;
+      const y = faucetY + dy;
+      if (grid.inBounds(x, y)) {
+        grid.set(x, y, MaterialId.Faucet);
+      }
+    }
+  }
+
+  // --- Place a drain at the bottom ---
+  // Drain is 32x6, place it centered at the bottom
+  const drainX = Math.floor(GRID_WIDTH / 2) - 16;
+  const drainY = GRID_HEIGHT - 6;
+  for (let dy = 0; dy < 6; dy++) {
+    for (let dx = 0; dx < 32; dx++) {
+      const x = drainX + dx;
+      const y = drainY + dy;
+      if (grid.inBounds(x, y)) {
+        // Clear dirt first, then place drain
+        grid.set(x, y, MaterialId.Drain);
+      }
+    }
+  }
+
+  // Carve out a small basin above the drain so water can reach it
+  for (let dy = 1; dy <= 8; dy++) {
+    const halfW = 16 + dy * 2; // wider at top
+    for (let dx = -halfW; dx <= halfW; dx++) {
+      const x = Math.floor(GRID_WIDTH / 2) + dx;
+      const y = GRID_HEIGHT - 6 - dy;
+      if (grid.inBounds(x, y) && grid.get(x, y) === MaterialId.Dirt) {
+        grid.set(x, y, MaterialId.Empty);
       }
     }
   }

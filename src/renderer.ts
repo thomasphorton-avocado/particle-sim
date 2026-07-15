@@ -186,11 +186,11 @@ export class Renderer {
       const color = id === MaterialId.Flower ? FLOWER_PALETTE[grid.vx[i]] : material.color;
       // Wet dirt gets progressively darker based on moisture (vx 0-8)
       const wetOffset = id === MaterialId.Dirt ? -(grid.vx[i] * 5) : 0;
-      // Darken bottom edge of dirt (where dirt meets non-dirt/non-grass below)
+      // Darken bottom edge (where material meets different/empty below)
       let edgeOffset = 0;
-      if ((id === MaterialId.Dirt || id === MaterialId.Grass) && i + grid.width < grid.ids.length) {
+      if ((id === MaterialId.Dirt || id === MaterialId.Grass || id === MaterialId.Stone || id === MaterialId.Wood) && i + grid.width < grid.ids.length) {
         const belowId = grid.ids[i + grid.width] as MaterialId;
-        if (belowId !== MaterialId.Dirt && belowId !== MaterialId.Grass) {
+        if (belowId !== id && belowId !== MaterialId.Dirt && belowId !== MaterialId.Grass) {
           edgeOffset = -40;
         }
       }
@@ -306,6 +306,8 @@ export class Renderer {
       for (let x = 0; x < grid.width; x++) {
         const id = ids[rowOffset + x] as MaterialId;
         if (MATERIALS[id].placement.kind !== "object") continue;
+        // Skip stone and wood — they use bottom-edge shading instead
+        if (id === MaterialId.Stone || id === MaterialId.Wood) continue;
 
         const left = x * cs;
         const top = y * cs;

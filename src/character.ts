@@ -10,6 +10,8 @@ export interface Character {
   height: number;
   grounded: boolean;
   facing: -1 | 1;
+  /** Pickaxe swing animation start time, null if not swinging. */
+  swingStart: number | null;
 }
 
 const GRAVITY = 0.4;
@@ -52,6 +54,7 @@ export function createCharacter(grid: Grid): Character {
     height: 5,
     grounded: false,
     facing: 1,
+    swingStart: null,
   };
 }
 
@@ -189,4 +192,45 @@ export function drawCharacter(
   ctx.fillStyle = pants;
   ctx.fillRect(px, py + cs * 4, cs, cs);
   ctx.fillRect(px + cs * 2, py + cs * 4, cs, cs);
+
+  // Pickaxe swing animation
+  if (char.swingStart !== null) {
+    const SWING_DURATION = 250;
+    const elapsed = performance.now() - char.swingStart;
+    if (elapsed >= SWING_DURATION) {
+      char.swingStart = null;
+    } else {
+      const progress = elapsed / SWING_DURATION;
+      // Swing arc: starts raised, swings down
+      const startAngle = -Math.PI * 0.6;
+      const endAngle = Math.PI * 0.2;
+      const angle = startAngle + (endAngle - startAngle) * progress;
+
+      ctx.save();
+      // Pivot at shoulder
+      const shoulderX = px + (char.facing === 1 ? cs * 3 : 0);
+      const shoulderY = py + cs * 2.5;
+      ctx.translate(shoulderX, shoulderY);
+      ctx.scale(char.facing, 1);
+      ctx.rotate(angle);
+
+      // Handle
+      ctx.fillStyle = "#8B6914";
+      ctx.fillRect(0, -cs * 0.4, cs * 4, cs * 0.8);
+
+      // Pickaxe head
+      ctx.fillStyle = "#666";
+      ctx.fillRect(cs * 3.2, -cs * 1.2, cs * 1.2, cs * 0.8); // top spike
+      ctx.fillRect(cs * 3.2, cs * 0.4, cs * 1.2, cs * 0.8);  // bottom spike
+      ctx.fillStyle = "#888";
+      ctx.fillRect(cs * 3, -cs * 0.6, cs * 0.8, cs * 1.2);   // head center
+
+      ctx.restore();
+    }
+  }
+}
+
+/** Trigger a pickaxe swing animation. */
+export function startSwing(char: Character): void {
+  char.swingStart = performance.now();
 }

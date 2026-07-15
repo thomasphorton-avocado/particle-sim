@@ -2,6 +2,7 @@ import { Grid } from "./grid";
 import { MATERIALS, MaterialId } from "./materials";
 import { harvestFlowerCluster } from "./harvest";
 import { state } from "./state";
+import { startSwing } from "./character";
 
 /** Maximum placement distance from character center (in grid cells). */
 const PLACEMENT_RADIUS = 30;
@@ -155,6 +156,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     if (state.toolMode === "pickaxe") {
       painting = true;
       mineAt(pos.x, pos.y);
+      if (state.character) startSwing(state.character);
       lastGridPos = pos;
       return;
     }

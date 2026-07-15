@@ -123,14 +123,26 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
   const mineInFront = () => {
     const char = state.character;
     if (!char) return;
-    // Simple rectangle: 4 wide × 8 tall, flush against character edge
-    const mineW = 4;
-    const mineH = char.height + 3;
-    const baseX = char.facing === 1
-      ? Math.floor(char.x + char.width)
-      : Math.floor(char.x) - mineW;
-    const crouchOffset = char.crouching ? 2 : 0;
-    const baseY = Math.floor(char.y) - 3 + crouchOffset;
+
+    let mineW: number, mineH: number, baseX: number, baseY: number;
+
+    if (char.crouching) {
+      // Crouched: dig more downward — wider horizontally, shifted below feet
+      mineW = 5;
+      mineH = 5;
+      baseX = char.facing === 1
+        ? Math.floor(char.x + char.width) - 1
+        : Math.floor(char.x) - mineW + 1;
+      baseY = Math.floor(char.y + char.height);
+    } else {
+      // Standing: dig in front — 4 wide × 8 tall
+      mineW = 4;
+      mineH = char.height + 3;
+      baseX = char.facing === 1
+        ? Math.floor(char.x + char.width)
+        : Math.floor(char.x) - mineW;
+      baseY = Math.floor(char.y) - 3;
+    }
 
     for (let dy = 0; dy < mineH; dy++) {
       for (let dx = 0; dx < mineW; dx++) {

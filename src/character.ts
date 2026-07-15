@@ -205,7 +205,7 @@ export function updateCharacter(char: Character, grid: Grid, dt: number): void {
   // Normalize dt to frame-units (1.0 = one 60fps frame) and clamp for tab-switch
   const dtFrames = Math.min(dt * BASE_FPS, 3);
 
-  // Detect swimming: submerged if 3+ cells are water (about half the body)
+  // Detect swimming: submerged if 3+ cells are water (~20% of the 3×5 hitbox; feet/lower body in water)
   const waterCells = waterCellCount(grid, char);
   char.swimming = waterCells >= 3;
 

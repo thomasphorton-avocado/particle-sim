@@ -9,7 +9,13 @@ export class Grid {
   readonly height: number;
   ids: Uint8Array;
   shade: Int8Array;
-  /** Horizontal drift (-1/0/1) that liquids carry between steps, for waterfall dispersion. */
+  /**
+   * Horizontal drift (-1/0/1) that liquids carry between steps, for waterfall dispersion.
+   *
+   * **Dual use for Faucet cells:** `vx` also stores the faucet flow-rate state (0 = off,
+   * 1 = low, 2 = high) for cells whose `ids` entry is `MaterialId.Faucet`. Liquid-dispersion
+   * code that iterates `vx` broadly should guard against touching Faucet-typed cells.
+   */
   vx: Int8Array;
   private updated: Uint8Array;
 

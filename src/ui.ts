@@ -90,7 +90,6 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   placeBtn.textContent = "🖌️ Place";
   const pickaxeBtn = document.createElement("button");
   pickaxeBtn.textContent = "⛏️ Mine";
-  pickaxeBtn.classList.add("active");
 
   const toolBtns = [editorBtn, placeBtn, pickaxeBtn];
   const setToolMode = (mode: typeof state.toolMode, active: HTMLButtonElement) => {
@@ -110,9 +109,8 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   editorBtn.addEventListener("click", () => setToolMode("editor", editorBtn));
   placeBtn.addEventListener("click", () => setToolMode("place", placeBtn));
   pickaxeBtn.addEventListener("click", () => setToolMode("pickaxe", pickaxeBtn));
-  // Apply initial mode visibility
-  materialGroup.style.display = "none";
-  brushGroup.style.display = "none";
+  // Apply initial mode visibility and button states
+  setToolMode(state.toolMode, pickaxeBtn);
   toolGroup.append(editorBtn, placeBtn, pickaxeBtn);
 
   // Inventory display

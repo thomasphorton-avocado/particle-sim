@@ -118,7 +118,7 @@ const grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
 
   // --- Drain on the lower dirt section ---
   // Place on the surface of the bottom terrain so water collects there
-  const drainX = 80, drainY = 163;
+  const drainX = 80, drainY = 171;
   for (let dy = 0; dy < 6; dy++) {
     for (let dx = 0; dx < 20; dx++) {
       const x = drainX + dx, y = drainY + dy;

@@ -240,24 +240,12 @@ function drainNearbyDirt(grid: Grid, x: number, y: number): boolean {
   return false;
 }
 
-// Per-step chance an established (non-growing) stem or flower cell tries to
-// consume moisture from adjacent dirt to stay alive.
-const PLANT_THIRST_CHANCE = 0.002;
-// Per-step chance a thirsty plant cell (no moisture available) withers and dies.
-const PLANT_WITHER_CHANCE = 0.005;
-
 /** Grows a stem upward one segment at a time until its budget runs out, then blooms. */
 function updateStemGrowth(grid: Grid, x: number, y: number): void {
   const budget = grid.getVx(x, y);
 
-  // Non-growing stem: occasionally consume moisture or wither
+  // Non-growing stem: no action needed
   if (budget <= 0) {
-    if (Math.random() < PLANT_THIRST_CHANCE) {
-      if (!drainNearbyDirt(grid, x, y) && Math.random() < PLANT_WITHER_CHANCE / PLANT_THIRST_CHANCE) {
-        grid.set(x, y, MaterialId.Empty);
-        grid.markUpdated(x, y);
-      }
-    }
     return;
   }
 
@@ -316,13 +304,9 @@ function bloom(grid: Grid, x: number, y: number): void {
   }
 }
 
-/** Flower cells occasionally consume moisture from nearby dirt or wither. */
-function updateFlower(grid: Grid, x: number, y: number): void {
-  if (Math.random() >= PLANT_THIRST_CHANCE) return;
-  if (!drainNearbyDirt(grid, x, y) && Math.random() < PLANT_WITHER_CHANCE / PLANT_THIRST_CHANCE) {
-    grid.set(x, y, MaterialId.Empty);
-    grid.markUpdated(x, y);
-  }
+/** Flower cells are now permanent — no withering. */
+function updateFlower(_grid: Grid, _x: number, _y: number): void {
+  // no-op: flowers no longer wilt
 }
 
 // Faucet flow states stored in vx: 0=off, 1=low, 2=high

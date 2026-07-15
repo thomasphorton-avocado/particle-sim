@@ -51,7 +51,7 @@ export const state: SimState = {
   inventory: { flowers: 0 },
   hotbar: [
     { kind: "pickaxe" },
-    { kind: "empty" },
+    { kind: "material", materialId: MaterialId.Seed, count: 5 },
     { kind: "empty" },
     { kind: "empty" },
     { kind: "empty" },

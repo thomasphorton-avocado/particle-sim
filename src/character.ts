@@ -201,26 +201,37 @@ export function drawCharacter(
   const pants = "#3a5a3a";
   const hair = "#5a3322";
 
-  // Head offset: tilts up when looking up
-  const headOff = char.lookingUp ? -cs : 0;
-
-  // Hair (top of head)
-  ctx.fillStyle = hair;
-  ctx.fillRect(px, py + headOff, cs * 3, cs);
-
-  // Face
-  ctx.fillStyle = skin;
-  ctx.fillRect(px, py + cs + headOff, cs * 3, cs);
-
-  // Eyes — on the side we're facing (move to top of face when looking up)
-  ctx.fillStyle = "#222";
   if (char.lookingUp) {
-    // Eyes on top edge of face when looking up
-    ctx.fillRect(px + cs, py + cs + headOff, cs, cs);
-  } else if (char.facing === 1) {
-    ctx.fillRect(px, py + cs, cs, cs);
+    // Rotate the head (top 2 rows) backward to look up
+    ctx.save();
+    const headCx = px + cs * 1.5;
+    const headCy = py + cs * 2; // pivot at neck
+    ctx.translate(headCx, headCy);
+    ctx.rotate(-0.4); // tilt back ~23 degrees
+    ctx.translate(-headCx, -headCy);
+    ctx.fillStyle = hair;
+    ctx.fillRect(px, py, cs * 3, cs);
+    ctx.fillStyle = skin;
+    ctx.fillRect(px, py + cs, cs * 3, cs);
+    ctx.fillStyle = "#222";
+    ctx.fillRect(px + cs, py + cs, cs, cs); // centered eye
+    ctx.restore();
   } else {
-    ctx.fillRect(px + cs * 2, py + cs, cs, cs);
+    // Hair (top of head)
+    ctx.fillStyle = hair;
+    ctx.fillRect(px, py, cs * 3, cs);
+
+    // Face
+    ctx.fillStyle = skin;
+    ctx.fillRect(px, py + cs, cs * 3, cs);
+
+    // Eyes — on the side we're facing
+    ctx.fillStyle = "#222";
+    if (char.facing === 1) {
+      ctx.fillRect(px, py + cs, cs, cs);
+    } else {
+      ctx.fillRect(px + cs * 2, py + cs, cs, cs);
+    }
   }
 
   // Body / shirt

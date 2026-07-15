@@ -104,13 +104,14 @@ const grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
   }
 
   // --- Faucet at top-left ---
-  // 10x6 object near top
+  // 10x6 object near top, start in full flow mode (vx=2)
   const faucetX = 18, faucetY = 2;
   for (let dy = 0; dy < 6; dy++) {
     for (let dx = 0; dx < 10; dx++) {
       const x = faucetX + dx, y = faucetY + dy;
       if (grid.inBounds(x, y)) {
         grid.set(x, y, MaterialId.Faucet);
+        grid.vx[y * GRID_WIDTH + x] = 2;
       }
     }
   }

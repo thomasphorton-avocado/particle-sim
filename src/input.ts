@@ -119,15 +119,19 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     return true;
   };
 
-  /** Mine (remove) cells and add to inventory. */
-  const mineAt = (gx: number, gy: number) => {
-    if (!withinPlacementRange(gx, gy)) return;
-    const r = state.brushSize;
+  /** Mine a small area in front of the character. */
+  const mineInFront = () => {
+    const char = state.character;
+    if (!char) return;
+    // Center of mining area: 3 cells in front of character at body height
+    const cx = Math.floor(char.x + char.width / 2 + char.facing * 4);
+    const cy = Math.floor(char.y + char.height / 2);
+    const r = 2; // small mining radius
     for (let dy = -r; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
         if (dx * dx + dy * dy > r * r) continue;
-        const x = gx + dx;
-        const y = gy + dy;
+        const x = cx + dx;
+        const y = cy + dy;
         if (!grid.inBounds(x, y)) continue;
         const id = grid.get(x, y) as MaterialId;
         if (id === MaterialId.Empty) continue;
@@ -154,10 +158,10 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
       return;
     }
     if (state.toolMode === "pickaxe") {
-      painting = true;
-      mineAt(pos.x, pos.y);
+      mineInFront();
       if (state.character) startSwing(state.character);
-      lastGridPos = pos;
+      painting = false;
+      lastGridPos = null;
       return;
     }
     if (MATERIALS[state.selectedMaterial].placement.kind === "object") {
@@ -175,11 +179,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     const pos = toGrid(clientX, clientY);
     state.hover = pos;
     if (!painting) return;
-    if (state.toolMode === "pickaxe") {
-      mineAt(pos.x, pos.y);
-    } else {
-      paintLine(lastGridPos, pos);
-    }
+    paintLine(lastGridPos, pos);
     lastGridPos = pos;
   };
 

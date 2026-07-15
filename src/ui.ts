@@ -81,21 +81,61 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
 
   actionGroup.append(pauseBtn, clearBtn);
 
+  // Tool mode toggle
+  const toolGroup = document.createElement("div");
+  toolGroup.className = "tool-group";
+  const editorBtn = document.createElement("button");
+  editorBtn.textContent = "🗺️ Edit";
+  const placeBtn = document.createElement("button");
+  placeBtn.textContent = "🖌️ Place";
+  placeBtn.classList.add("active");
+  const pickaxeBtn = document.createElement("button");
+  pickaxeBtn.textContent = "⛏️ Mine";
+
+  const toolBtns = [editorBtn, placeBtn, pickaxeBtn];
+  const setToolMode = (mode: typeof state.toolMode, active: HTMLButtonElement) => {
+    state.toolMode = mode;
+    for (const btn of toolBtns) btn.classList.toggle("active", btn === active);
+    const showPalette = mode === "editor" || mode === "place";
+    materialGroup.style.display = showPalette ? "" : "none";
+    brushGroup.style.display = showPalette ? "" : "none";
+    if (!showPalette) {
+      // Deselect material buttons
+      for (const [, btn] of buttons) btn.classList.remove("active");
+    } else {
+      // Re-select current material
+      buttons.get(state.selectedMaterial)?.classList.add("active");
+    }
+  };
+  editorBtn.addEventListener("click", () => setToolMode("editor", editorBtn));
+  placeBtn.addEventListener("click", () => setToolMode("place", placeBtn));
+  pickaxeBtn.addEventListener("click", () => setToolMode("pickaxe", pickaxeBtn));
+  toolGroup.append(editorBtn, placeBtn, pickaxeBtn);
+
   // Inventory display
   const inventoryGroup = document.createElement("div");
   inventoryGroup.className = "inventory-group";
   const flowerCount = document.createElement("span");
   flowerCount.className = "inventory-item";
   flowerCount.textContent = "🌸 0";
-  inventoryGroup.appendChild(flowerCount);
+  const mineCount = document.createElement("span");
+  mineCount.className = "inventory-item";
+  mineCount.textContent = "";
+  inventoryGroup.append(flowerCount, mineCount);
 
   // Poll inventory state each frame (cheap, no events needed)
   const updateInventory = () => {
     flowerCount.textContent = `🌸 ${state.inventory.flowers}`;
+    const items: string[] = [];
+    for (const [key, val] of Object.entries(state.inventory)) {
+      if (key === "flowers" || val === 0) continue;
+      items.push(`${key}: ${val}`);
+    }
+    mineCount.textContent = items.join(" | ");
     requestAnimationFrame(updateInventory);
   };
   requestAnimationFrame(updateInventory);
 
-  toolbar.append(materialGroup, brushGroup, actionGroup, inventoryGroup);
+  toolbar.append(materialGroup, brushGroup, toolGroup, actionGroup, inventoryGroup);
   root.appendChild(toolbar);
 }

@@ -2,6 +2,22 @@ import { Grid } from "./grid";
 import { MATERIALS, MaterialId } from "./materials";
 import { harvestFlowerCluster } from "./harvest";
 import { state } from "./state";
+import { startSwing } from "./character";
+
+/** Maximum placement distance from character center (in grid cells). */
+const PLACEMENT_RADIUS = 30;
+
+/** Returns true if the grid position is within placement range of the character. */
+function withinPlacementRange(gx: number, gy: number): boolean {
+  if (state.toolMode === "editor") return true; // editor ignores radius
+  const char = state.character;
+  if (!char) return true;
+  const cx = char.x + char.width / 2;
+  const cy = char.y + char.height / 2;
+  const dx = gx - cx;
+  const dy = gy - cy;
+  return dx * dx + dy * dy <= PLACEMENT_RADIUS * PLACEMENT_RADIUS;
+}
 
 /** Wires pointer events on `canvas` to paint or stamp the selected material into `grid`. */
 export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: number): void {
@@ -19,6 +35,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
   };
 
   const paintAt = (gx: number, gy: number) => {
+    if (!withinPlacementRange(gx, gy)) return;
     const r = state.brushSize;
     const material = state.selectedMaterial;
     for (let dy = -r; dy <= r; dy++) {
@@ -27,6 +44,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
         const x = gx + dx;
         const y = gy + dy;
         if (!grid.inBounds(x, y)) continue;
+        if (!withinPlacementRange(x, y)) continue;
         if (material === MaterialId.Empty || grid.get(x, y) === MaterialId.Empty) {
           grid.set(x, y, material);
         }
@@ -51,6 +69,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
   // Stamps a whole fixed-size shape centered on (gx, gy) in one shot, for materials
   // placed as discrete objects (e.g. a wood plank or a stone boulder) rather than painted.
   const stampObjectAt = (gx: number, gy: number) => {
+    if (!withinPlacementRange(gx, gy)) return;
     const material = MATERIALS[state.selectedMaterial];
     if (material.placement.kind !== "object") return;
     const { shape, width, height } = material.placement;
@@ -62,6 +81,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
         const x = gx + dx;
         const y = gy + dy;
         if (!grid.inBounds(x, y)) continue;
+        if (!withinPlacementRange(x, y)) continue;
         grid.set(x, y, state.selectedMaterial);
         // Faucets start on low flow
         if (state.selectedMaterial === MaterialId.Faucet) {
@@ -102,6 +122,53 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     return true;
   };
 
+  /** Mine a small area in front of the character, matching the pickaxe arc. */
+  const mineInFront = () => {
+    const char = state.character;
+    if (!char) return;
+
+    let mineW: number, mineH: number, baseX: number, baseY: number;
+
+    if (char.crouching) {
+      // Crouched: dig more downward — wider horizontally, shifted below feet
+      mineW = 5;
+      mineH = 5;
+      baseX = char.facing === 1
+        ? Math.floor(char.x + char.width) - 1
+        : Math.floor(char.x) - mineW + 1;
+      baseY = Math.floor(char.y + char.height);
+    } else if (char.lookingUp) {
+      // Looking up: dig above the character
+      mineW = 5;
+      mineH = 5;
+      baseX = Math.floor(char.x + char.width / 2) - 2;
+      baseY = Math.floor(char.y) - mineH;
+    } else {
+      // Standing: dig in front — 4 wide × 8 tall
+      mineW = 4;
+      mineH = char.height + 3;
+      baseX = char.facing === 1
+        ? Math.floor(char.x + char.width)
+        : Math.floor(char.x) - mineW;
+      baseY = Math.floor(char.y) - 3;
+    }
+
+    for (let dy = 0; dy < mineH; dy++) {
+      for (let dx = 0; dx < mineW; dx++) {
+        const x = baseX + dx;
+        const y = baseY + dy;
+        if (!grid.inBounds(x, y)) continue;
+        const id = grid.get(x, y) as MaterialId;
+        if (id === MaterialId.Empty) continue;
+        const mat = MATERIALS[id];
+        const name = mat.name.toLowerCase();
+        state.inventory[name] = (state.inventory[name] || 0) + 1;
+        grid.set(x, y, MaterialId.Empty);
+        grid.markUpdated(x, y);
+      }
+    }
+  };
+
   const start = (clientX: number, clientY: number) => {
     const pos = toGrid(clientX, clientY);
     // Clicking a faucet cycles its flow state
@@ -113,6 +180,13 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
       if (state.hoverPixel) {
         state.snip = { px: state.hoverPixel.x, py: state.hoverPixel.y, startTime: performance.now() };
       }
+      return;
+    }
+    if (state.toolMode === "pickaxe") {
+      mineInFront();
+      if (state.character) startSwing(state.character);
+      painting = false;
+      lastGridPos = null;
       return;
     }
     if (MATERIALS[state.selectedMaterial].placement.kind === "object") {

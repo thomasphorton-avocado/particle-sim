@@ -18,6 +18,8 @@ export interface Character {
   crouching: boolean;
   /** Whether the character is looking up. */
   lookingUp: boolean;
+  /** Whether the character is currently swimming (submerged in water). */
+  swimming: boolean;
 }
 
 // Physics constants (tuned at 60 fps baseline).
@@ -28,6 +30,12 @@ const MOVE_SPEED = 1.2;    // cells/frame
 const JUMP_VELOCITY = -3.5; // cells/frame (impulse)
 const MAX_FALL = 5;         // cells/frame (terminal velocity)
 const COYOTE_TIME_S = 5 / BASE_FPS; // ~83ms coyote window
+
+// Swimming constants
+const SWIM_GRAVITY = 0.1;       // reduced gravity underwater
+const SWIM_MAX_FALL = 1.5;      // slower sinking
+const SWIM_MOVE_SPEED = 0.7;    // slower horizontal movement
+const SWIM_UP_VELOCITY = -2.0;  // swim upward impulse (repeatable)
 
 /** Returns true if the given grid cell is solid ground the character can stand on. */
 function isSolid(grid: Grid, gx: number, gy: number): boolean {
@@ -68,6 +76,7 @@ export function createCharacter(grid: Grid): Character {
     airTime: 0,
     crouching: false,
     lookingUp: false,
+    swimming: false,
   };
 }
 
@@ -127,36 +136,65 @@ export function attachCharacterInput(): void {
   });
 }
 
+/** Check how many cells in the character's hitbox are water. */
+function waterCellCount(grid: Grid, char: Character): number {
+  let count = 0;
+  const x0 = Math.floor(char.x);
+  const x1 = Math.floor(char.x + char.width - 0.01);
+  const y0 = Math.floor(char.y);
+  const y1 = Math.floor(char.y + char.height - 0.01);
+  for (let gy = y0; gy <= y1; gy++) {
+    for (let gx = x0; gx <= x1; gx++) {
+      if (grid.inBounds(gx, gy) && grid.get(gx, gy) === MaterialId.Water) {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
 export function updateCharacter(char: Character, grid: Grid, dt: number): void {
   // Normalize dt to frame-units (1.0 = one 60fps frame) and clamp for tab-switch
   const dtFrames = Math.min(dt * BASE_FPS, 3);
+
+  // Detect swimming: submerged if 3+ cells are water (about half the body)
+  const waterCells = waterCellCount(grid, char);
+  char.swimming = waterCells >= 3;
 
   // Crouch / look up state
   char.crouching = keys.crouch;
   char.lookingUp = keys.lookUp;
 
-  // Horizontal movement
+  // Horizontal movement (slower in water)
+  const speed = char.swimming ? SWIM_MOVE_SPEED : MOVE_SPEED;
   let moveX = 0;
-  if (keys.left) { moveX -= MOVE_SPEED * dtFrames; char.facing = -1; }
-  if (keys.right) { moveX += MOVE_SPEED * dtFrames; char.facing = 1; }
+  if (keys.left) { moveX -= speed * dtFrames; char.facing = -1; }
+  if (keys.right) { moveX += speed * dtFrames; char.facing = 1; }
 
-  // Apply gravity (vy in cells/frame, scaled by dtFrames)
-  char.vy += GRAVITY * dtFrames;
-  if (char.vy > MAX_FALL) char.vy = MAX_FALL;
+  // Apply gravity (reduced in water)
+  const gravity = char.swimming ? SWIM_GRAVITY : GRAVITY;
+  const maxFall = char.swimming ? SWIM_MAX_FALL : MAX_FALL;
+  char.vy += gravity * dtFrames;
+  if (char.vy > maxFall) char.vy = maxFall;
 
-  // Track air time for coyote time (in seconds)
-  if (char.grounded) {
-    char.airTime = 0;
+  // Swimming: space to swim upward (repeatable, no jumpHeld gate)
+  if (char.swimming && keys.jump) {
+    char.vy = SWIM_UP_VELOCITY;
   } else {
-    char.airTime += dt;
-  }
+    // Track air time for coyote time (in seconds)
+    if (char.grounded) {
+      char.airTime = 0;
+    } else {
+      char.airTime += dt;
+    }
 
-  // Jump (with coyote time)
-  if (keys.jump && !jumpHeld && (char.grounded || char.airTime <= COYOTE_TIME_S)) {
-    char.vy = JUMP_VELOCITY;
-    char.grounded = false;
-    char.airTime = COYOTE_TIME_S + 1; // prevent double-jump
-    jumpHeld = true;
+    // Jump (with coyote time) - only when not swimming
+    if (!char.swimming && keys.jump && !jumpHeld && (char.grounded || char.airTime <= COYOTE_TIME_S)) {
+      char.vy = JUMP_VELOCITY;
+      char.grounded = false;
+      char.airTime = COYOTE_TIME_S + 1; // prevent double-jump
+      jumpHeld = true;
+    }
   }
 
   // Move horizontally with collision

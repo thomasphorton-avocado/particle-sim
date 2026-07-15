@@ -165,8 +165,11 @@ export function updateCharacter(char: Character, grid: Grid, dt: number): void {
       }
       char.grounded = true;
     } else {
-      // Hitting ceiling
-      char.y = Math.floor(char.y) + 1;
+      // Hitting ceiling — snap below the ceiling
+      char.y = Math.ceil(newY);
+      while (collidesAt(grid, char.x, char.y, char.width, char.height) && char.y < grid.height - char.height) {
+        char.y += 1;
+      }
     }
     char.vy = 0;
   }

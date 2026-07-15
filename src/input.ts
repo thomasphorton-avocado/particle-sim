@@ -9,8 +9,9 @@ const PLACEMENT_RADIUS = 30;
 
 /** Returns true if the grid position is within placement range of the character. */
 function withinPlacementRange(gx: number, gy: number): boolean {
+  if (state.toolMode === "editor") return true; // editor ignores radius
   const char = state.character;
-  if (!char) return true; // no character yet, allow all
+  if (!char) return true;
   const cx = char.x + char.width / 2;
   const cy = char.y + char.height / 2;
   const dx = gx - cx;

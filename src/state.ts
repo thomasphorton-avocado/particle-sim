@@ -1,7 +1,7 @@
 import { MaterialId } from "./materials";
 import type { Character } from "./character";
 
-export type ToolMode = "place" | "pickaxe";
+export type ToolMode = "editor" | "place" | "pickaxe";
 
 export interface Inventory {
   flowers: number;

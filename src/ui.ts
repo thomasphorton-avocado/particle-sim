@@ -84,22 +84,26 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   // Tool mode toggle
   const toolGroup = document.createElement("div");
   toolGroup.className = "tool-group";
+  const editorBtn = document.createElement("button");
+  editorBtn.textContent = "🗺️ Edit";
   const placeBtn = document.createElement("button");
   placeBtn.textContent = "🖌️ Place";
   placeBtn.classList.add("active");
   const pickaxeBtn = document.createElement("button");
   pickaxeBtn.textContent = "⛏️ Mine";
-  placeBtn.addEventListener("click", () => {
-    state.toolMode = "place";
-    placeBtn.classList.add("active");
-    pickaxeBtn.classList.remove("active");
-  });
-  pickaxeBtn.addEventListener("click", () => {
-    state.toolMode = "pickaxe";
-    pickaxeBtn.classList.add("active");
-    placeBtn.classList.remove("active");
-  });
-  toolGroup.append(placeBtn, pickaxeBtn);
+
+  const toolBtns = [editorBtn, placeBtn, pickaxeBtn];
+  const setToolMode = (mode: typeof state.toolMode, active: HTMLButtonElement) => {
+    state.toolMode = mode;
+    for (const btn of toolBtns) btn.classList.toggle("active", btn === active);
+    const showPalette = mode === "editor" || mode === "place";
+    materialGroup.style.display = showPalette ? "" : "none";
+    brushGroup.style.display = showPalette ? "" : "none";
+  };
+  editorBtn.addEventListener("click", () => setToolMode("editor", editorBtn));
+  placeBtn.addEventListener("click", () => setToolMode("place", placeBtn));
+  pickaxeBtn.addEventListener("click", () => setToolMode("pickaxe", pickaxeBtn));
+  toolGroup.append(editorBtn, placeBtn, pickaxeBtn);
 
   // Inventory display
   const inventoryGroup = document.createElement("div");

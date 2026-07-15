@@ -102,10 +102,13 @@ export function updateCharacter(char: Character, grid: Grid): void {
   if (!collidesAt(grid, newX, char.y, char.width, char.height)) {
     char.x = newX;
   } else {
-    // Try to step up 1 cell (slope/stair climbing)
-    if (!collidesAt(grid, newX, char.y - 1, char.width, char.height)) {
-      char.x = newX;
-      char.y -= 1;
+    // Try to step up 1-2 cells (slope/stair climbing)
+    for (let stepUp = 1; stepUp <= 2; stepUp++) {
+      if (!collidesAt(grid, newX, char.y - stepUp, char.width, char.height)) {
+        char.x = newX;
+        char.y -= stepUp;
+        break;
+      }
     }
   }
 
@@ -170,12 +173,12 @@ export function drawCharacter(
   ctx.fillStyle = skin;
   ctx.fillRect(px, py + cs, cs * 3, cs);
 
-  // Eyes
+  // Eyes — on the side we're facing
   ctx.fillStyle = "#222";
   if (char.facing === 1) {
-    ctx.fillRect(px + cs * 2, py + cs, cs, cs);
-  } else {
     ctx.fillRect(px, py + cs, cs, cs);
+  } else {
+    ctx.fillRect(px + cs * 2, py + cs, cs, cs);
   }
 
   // Body / shirt

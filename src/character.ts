@@ -136,8 +136,14 @@ export function attachCharacterInput(): void {
   });
 }
 
+let lastFaucetBumpTime = 0;
+
 /** When the character bumps its head, check for faucet cells above and cycle their state. */
 function checkFaucetBump(grid: Grid, char: Character): void {
+  // Debounce: only trigger once per 500ms
+  const now = performance.now();
+  if (now - lastFaucetBumpTime < 500) return;
+
   const headY = Math.floor(char.y) - 1; // row just above head
   if (headY < 0) return;
   const x0 = Math.floor(char.x);
@@ -178,6 +184,7 @@ function checkFaucetBump(grid: Grid, char: Character): void {
   for (const idx of visited) {
     grid.vx[idx] = newState;
   }
+  lastFaucetBumpTime = now;
 }
 
 /** Check how many cells in the character's hitbox are water. */

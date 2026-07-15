@@ -213,8 +213,13 @@ export function drawCharacter(
     ctx.fillRect(px, py, cs * 3, cs);
     ctx.fillStyle = skin;
     ctx.fillRect(px, py + cs, cs * 3, cs);
+    // Dark spot on back of head
     ctx.fillStyle = "#222";
-    ctx.fillRect(px + cs, py + cs, cs, cs); // centered eye
+    if (char.facing === 1) {
+      ctx.fillRect(px, py + cs, cs, cs);
+    } else {
+      ctx.fillRect(px + cs * 2, py + cs, cs, cs);
+    }
     ctx.restore();
   } else {
     // Hair (top of head)

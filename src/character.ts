@@ -140,20 +140,24 @@ let lastFaucetBumpTime = 0;
 
 /** When the character bumps its head, check for faucet cells above and cycle their state. */
 function checkFaucetBump(grid: Grid, char: Character): void {
-  // Debounce: only trigger once per 500ms
+  // Debounce: only trigger once per 300ms
   const now = performance.now();
-  if (now - lastFaucetBumpTime < 500) return;
+  if (now - lastFaucetBumpTime < 300) return;
 
   const headY = Math.floor(char.y) - 1; // row just above head
   if (headY < 0) return;
   const x0 = Math.floor(char.x);
   const x1 = Math.floor(char.x + char.width - 0.01);
   let hitFaucet = false;
-  for (let gx = x0; gx <= x1; gx++) {
-    if (grid.inBounds(gx, headY) && grid.get(gx, headY) === MaterialId.Faucet) {
-      hitFaucet = true;
-      break;
+  // Check the row above and the row at the very top of hitbox
+  for (const checkY of [headY, Math.floor(char.y)]) {
+    for (let gx = x0; gx <= x1; gx++) {
+      if (grid.inBounds(gx, checkY) && grid.get(gx, checkY) === MaterialId.Faucet) {
+        hitFaucet = true;
+        break;
+      }
     }
+    if (hitFaucet) break;
   }
   if (!hitFaucet) return;
   // Cycle all connected faucet cells: 0→1→2→0

@@ -186,9 +186,9 @@ export function drawCharacter(
   let py = Math.round(char.y * cellSize);
   const cs = cellSize;
 
-  // When crouching, shift sprite down 2 cells (visually squatting)
+  // When crouching, shift body down by 1 cell and hide legs
   if (char.crouching) {
-    py += cs * 2;
+    py += cs;
   }
 
   // Simple character: 3 wide x 5 tall
@@ -221,10 +221,12 @@ export function drawCharacter(
   ctx.fillStyle = shirt;
   ctx.fillRect(px, py + cs * 2, cs * 3, cs * 2);
 
-  // Legs / pants
-  ctx.fillStyle = pants;
-  ctx.fillRect(px, py + cs * 4, cs, cs);
-  ctx.fillRect(px + cs * 2, py + cs * 4, cs, cs);
+  // Legs / pants (hidden when crouching)
+  if (!char.crouching) {
+    ctx.fillStyle = pants;
+    ctx.fillRect(px, py + cs * 4, cs, cs);
+    ctx.fillRect(px + cs * 2, py + cs * 4, cs, cs);
+  }
 
   // Pickaxe swing animation
   if (char.swingStart !== null) {

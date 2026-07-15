@@ -127,7 +127,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     // 3 wide, character height + 2 tall (1 above, 1 below)
     const mineW = 3;
     const mineH = char.height + 2;
-    const startX = Math.floor(char.x + char.width / 2 + char.facing * 3);
+    const startX = Math.floor(char.x + (char.facing === 1 ? char.width : -1));
     const startY = Math.floor(char.y - 1); // 1 cell above character top
 
     for (let dy = 0; dy < mineH; dy++) {

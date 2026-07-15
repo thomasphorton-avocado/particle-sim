@@ -40,5 +40,5 @@ export const state: SimState = {
   inventory: { flowers: 0 },
   snip: null,
   character: null,
-  toolMode: "place",
+  toolMode: "pickaxe",
 };

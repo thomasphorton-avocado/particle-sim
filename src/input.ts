@@ -273,9 +273,10 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     const harvested = harvestFlowerCluster(grid, pos.x, pos.y);
     if (harvested > 0) {
       state.inventory.flowers += harvested;
-      // Add flowers and seeds to hotbar
+      // Add seeds to hotbar (1 per bloom + 10% chance of bonus seed)
       for (let i = 0; i < harvested; i++) {
         addToHotbar(MaterialId.Seed);
+        if (Math.random() < 0.1) addToHotbar(MaterialId.Seed);
       }
       if (state.hoverPixel) {
         state.snip = { px: state.hoverPixel.x, py: state.hoverPixel.y, startTime: performance.now() };

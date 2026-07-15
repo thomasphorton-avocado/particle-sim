@@ -145,6 +145,18 @@ h1 {
   gap: 8px;
 }
 
+.flower-counter {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #262832;
+  color: var(--text);
+  font-size: 14px;
+  user-select: none;
+}
+
 .inventory-item {
   display: flex;
   align-items: center;

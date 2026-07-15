@@ -113,7 +113,17 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   setToolMode(state.toolMode, pickaxeBtn);
   toolGroup.append(editorBtn, pickaxeBtn);
 
-  toolbar.append(materialGroup, brushGroup, toolGroup, actionGroup);
+  // Flower counter
+  const flowerCounter = document.createElement("span");
+  flowerCounter.className = "flower-counter";
+  flowerCounter.textContent = "🌸 0";
+  const updateFlowerCounter = () => {
+    flowerCounter.textContent = `🌸 ${state.inventory.flowers}`;
+    requestAnimationFrame(updateFlowerCounter);
+  };
+  requestAnimationFrame(updateFlowerCounter);
+
+  toolbar.append(materialGroup, brushGroup, toolGroup, actionGroup, flowerCounter);
   root.appendChild(toolbar);
 
   // --- Hotbar (below canvas) ---

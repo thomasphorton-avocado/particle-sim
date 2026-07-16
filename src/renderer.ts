@@ -1,6 +1,7 @@
 import { Grid } from "./grid";
 import { FLOWER_PALETTE, MATERIALS, MaterialId } from "./materials";
 import type { ObjectPlacement } from "./materials";
+import { state } from "./state";
 
 interface CloudPuff {
   dx: number; // base offset in grid cells
@@ -98,13 +99,46 @@ export class Renderer {
     return clouds;
   }
 
-  /** Paints a dusk sky gradient with pixelated drifting clouds. */
+  /** Paints a day/night sky gradient with pixelated drifting clouds. */
   private drawBackground(): void {
     const { width, height } = this.ctx.canvas;
+    const phase = (state.dayNightCycle % 1 + 1) % 1;
+    const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+    const ease = (t: number) => 0.5 - Math.cos(Math.PI * t) / 2;
+
+    // Full sky gradients (top / mid / bottom) for each key time of day.
+    // Keyframes are evenly spaced around the cycle at phases 0, 0.25, 0.5, 0.75.
+    type SkyGradient = { top: [number, number, number]; mid: [number, number, number]; bottom: [number, number, number] };
+    const keyframes: SkyGradient[] = [
+      // Morning — soft dawn: cool blue overhead melting into a warm peach horizon
+      { top: [74, 120, 178], mid: [196, 156, 180], bottom: [248, 196, 146] },
+      // Day — bright, crisp blue sky with a pale hazy horizon
+      { top: [78, 150, 224], mid: [136, 196, 242], bottom: [200, 232, 250] },
+      // Dusk — sunset: deep indigo up top through rose to a glowing orange horizon
+      { top: [44, 40, 96], mid: [166, 80, 126], bottom: [240, 126, 66] },
+      // Night — dark blue/purple, a touch lighter near the horizon
+      { top: [12, 16, 44], mid: [24, 26, 66], bottom: [40, 40, 86] },
+    ];
+
+    const scaled = phase * keyframes.length;
+    const idx = Math.floor(scaled) % keyframes.length;
+    const nextIdx = (idx + 1) % keyframes.length;
+    const blendT = ease(scaled - Math.floor(scaled));
+    const from = keyframes[idx];
+    const to = keyframes[nextIdx];
+    const blend = (band: keyof SkyGradient): string => {
+      const a = from[band];
+      const b = to[band];
+      const r = Math.round(lerp(a[0], b[0], blendT));
+      const g = Math.round(lerp(a[1], b[1], blendT));
+      const bl = Math.round(lerp(a[2], b[2], blendT));
+      return `rgb(${r}, ${g}, ${bl})`;
+    };
+
     const gradient = this.ctx.createLinearGradient(0, 0, 0, height);
-    gradient.addColorStop(0, "#241b4e");
-    gradient.addColorStop(0.5, "#7a3f7d");
-    gradient.addColorStop(1, "#f0824f");
+    gradient.addColorStop(0, blend("top"));
+    gradient.addColorStop(0.5, blend("mid"));
+    gradient.addColorStop(1, blend("bottom"));
     this.ctx.fillStyle = gradient;
     this.ctx.fillRect(0, 0, width, height);
 
@@ -116,12 +150,14 @@ export class Renderer {
 
     const t = performance.now() / 1000;
     const wrap = gw + 60;
+    const nightStrength = this.nightStrength();
+    const cloudVisibility = 0.35 + 0.65 * (1 - nightStrength * 0.6);
 
     for (const cloud of this.clouds) {
       const cx = (((cloud.baseX + t * cloud.speed) % wrap) + wrap) % wrap - 30;
 
       // Bottom shadow — shifted down, darker
-      cctx.fillStyle = `rgba(40, 25, 50, ${cloud.opacity * 0.45})`;
+      cctx.fillStyle = `rgba(40, 25, 50, ${cloud.opacity * 0.45 * cloudVisibility})`;
       for (const puff of cloud.puffs) {
         const ax = puff.dx + Math.sin(t * puff.freqX + puff.phaseX) * 1.5;
         const ay = puff.dy + Math.sin(t * puff.freqY + puff.phaseY) * 0.8;
@@ -130,7 +166,7 @@ export class Renderer {
       }
 
       // Main cloud body
-      cctx.fillStyle = `rgba(255, 248, 240, ${cloud.opacity})`;
+      cctx.fillStyle = `rgba(255, 248, 240, ${cloud.opacity * cloudVisibility})`;
       for (const puff of cloud.puffs) {
         const ax = puff.dx + Math.sin(t * puff.freqX + puff.phaseX) * 1.5;
         const ay = puff.dy + Math.sin(t * puff.freqY + puff.phaseY) * 0.8;
@@ -139,7 +175,7 @@ export class Renderer {
       }
 
       // Top highlight — shifted up, smaller, brighter
-      cctx.fillStyle = `rgba(255, 255, 255, ${cloud.opacity * 0.35})`;
+      cctx.fillStyle = `rgba(255, 255, 255, ${cloud.opacity * 0.35 * cloudVisibility})`;
       for (const puff of cloud.puffs) {
         const ax = puff.dx + Math.sin(t * puff.freqX + puff.phaseX) * 1.5;
         const ay = puff.dy + Math.sin(t * puff.freqY + puff.phaseY) * 0.8;
@@ -211,8 +247,87 @@ export class Renderer {
       this.buffer.height * this.cellSize,
     );
 
+    const nightStrength = this.nightStrength();
+    if (nightStrength > 0) {
+      this.ctx.fillStyle = `rgba(6, 10, 24, ${nightStrength * 0.45})`;
+      this.ctx.fillRect(0, 0, this.ctx.canvas.width, this.ctx.canvas.height);
+    }
+
+    this.drawTorchLights(grid);
+    this.drawClockFaces(grid);
     this.drawObjectOutlines(grid);
     this.drawFaucetDials(grid);
+  }
+
+  /**
+   * Darkness factor for the current time: 0 at midday (phase 0.25),
+   * 1 at midnight (phase 0.75), easing smoothly through dawn and dusk.
+   */
+  private nightStrength(): number {
+    const phase = (state.dayNightCycle % 1 + 1) % 1;
+    return (1 - Math.cos(2 * Math.PI * (phase - 0.25))) / 2;
+  }
+
+  private drawTorchLights(grid: Grid): void {
+    const cs = this.cellSize;
+    const nightStrength = this.nightStrength();
+    const glowStrength = 0.25 + nightStrength * 0.75;
+    this.ctx.save();
+    this.ctx.globalCompositeOperation = "screen";
+
+    for (let y = 0; y < grid.height; y++) {
+      for (let x = 0; x < grid.width; x++) {
+        if (grid.get(x, y) !== MaterialId.Torch) continue;
+        const px = x * cs + cs / 2;
+        const py = y * cs + cs / 2;
+        const gradient = this.ctx.createRadialGradient(px, py, cs * 1.2, px, py, cs * (12 + nightStrength * 4));
+        gradient.addColorStop(0, `rgba(255, 240, 180, ${0.18 + glowStrength * 0.5})`);
+        gradient.addColorStop(0.25, `rgba(255, 190, 90, ${0.1 + glowStrength * 0.32})`);
+        gradient.addColorStop(0.6, `rgba(255, 140, 40, ${0.04 + glowStrength * 0.16})`);
+        gradient.addColorStop(1, "rgba(255, 120, 30, 0)");
+        this.ctx.fillStyle = gradient;
+        this.ctx.beginPath();
+        this.ctx.arc(px, py, cs * (12 + nightStrength * 4), 0, Math.PI * 2);
+        this.ctx.fill();
+      }
+    }
+
+    this.ctx.restore();
+  }
+
+  private drawClockFaces(grid: Grid): void {
+    const cs = this.cellSize;
+    const cycle = state.dayNightCycle % 1;
+    const angle = (cycle * Math.PI * 2 + Math.PI / 2) % (Math.PI * 2);
+    const handLength = cs * 4.2;
+
+    for (let y = 0; y < grid.height; y++) {
+      for (let x = 0; x < grid.width; x++) {
+        if (grid.get(x, y) !== MaterialId.Clock) continue;
+        const px = x * cs + cs / 2;
+        const py = y * cs + cs / 2;
+        this.ctx.save();
+        this.ctx.translate(px, py);
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, cs * 2.4, 0, Math.PI * 2);
+        this.ctx.fillStyle = "#f8f3e4";
+        this.ctx.fill();
+        this.ctx.strokeStyle = "#4a4032";
+        this.ctx.lineWidth = 2;
+        this.ctx.stroke();
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, 0);
+        this.ctx.lineTo(Math.sin(angle) * handLength, -Math.cos(angle) * handLength);
+        this.ctx.strokeStyle = "#2f2a24";
+        this.ctx.lineWidth = 4.5;
+        this.ctx.stroke();
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
+        this.ctx.fillStyle = "#2f2a24";
+        this.ctx.fill();
+        this.ctx.restore();
+      }
+    }
   }
 
   /** Draws a small flow-state dial on each faucet body. */

@@ -1,6 +1,6 @@
 import { Grid } from "./grid";
 import { MATERIALS, MaterialId } from "./materials";
-import { state } from "./state";
+import { setDayNightPreset, state } from "./state";
 import type { HotbarItem } from "./state";
 
 const PALETTE: MaterialId[] = [
@@ -14,6 +14,8 @@ const PALETTE: MaterialId[] = [
   MaterialId.Faucet,
   MaterialId.Sprinkler,
   MaterialId.Drain,
+  MaterialId.Torch,
+  MaterialId.Clock,
   MaterialId.Empty,
 ];
 
@@ -113,6 +115,21 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   setToolMode(state.toolMode, pickaxeBtn);
   toolGroup.append(editorBtn, pickaxeBtn);
 
+  const timeGroup = document.createElement("div");
+  timeGroup.className = "time-group";
+  const timePresets = [
+    { label: "Morning", preset: "morning" as const },
+    { label: "Day", preset: "day" as const },
+    { label: "Dusk", preset: "dusk" as const },
+    { label: "Night", preset: "night" as const },
+  ];
+  for (const { label, preset } of timePresets) {
+    const btn = document.createElement("button");
+    btn.textContent = label;
+    btn.addEventListener("click", () => setDayNightPreset(preset));
+    timeGroup.appendChild(btn);
+  }
+
   // Flower counter
   const flowerCounter = document.createElement("span");
   flowerCounter.className = "flower-counter";
@@ -123,7 +140,7 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   };
   requestAnimationFrame(updateFlowerCounter);
 
-  toolbar.append(materialGroup, brushGroup, toolGroup, actionGroup, flowerCounter);
+  toolbar.append(materialGroup, brushGroup, toolGroup, timeGroup, actionGroup, flowerCounter);
   root.appendChild(toolbar);
 
   // --- Hotbar (below canvas) ---
@@ -141,6 +158,8 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
     [MaterialId.Faucet]: "🚰",
     [MaterialId.Sprinkler]: "💦",
     [MaterialId.Drain]: "🕳️",
+    [MaterialId.Torch]: "🔥",
+    [MaterialId.Clock]: "🕰️",
   };
 
   function slotLabel(item: HotbarItem): string {

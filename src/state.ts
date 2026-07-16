@@ -2,6 +2,7 @@ import { MaterialId } from "./materials";
 import type { Character } from "./character";
 
 export type ToolMode = "editor" | "place" | "play";
+export type DayNightPreset = "morning" | "day" | "dusk" | "night";
 
 export interface InventoryCounts {
   flowers: number;
@@ -40,6 +41,8 @@ export interface SimState {
   character: Character | null;
   /** Current tool mode. */
   toolMode: ToolMode;
+  /** Progress through the day/night cycle from 0 to 1. */
+  dayNightCycle: number;
 }
 
 export const state: SimState = {
@@ -52,7 +55,8 @@ export const state: SimState = {
   hotbar: [
     { kind: "pickaxe" },
     { kind: "material", materialId: MaterialId.Seed, count: 5 },
-    { kind: "empty" },
+    { kind: "material", materialId: MaterialId.Torch, count: 5 },
+    { kind: "material", materialId: MaterialId.Clock, count: 1 },
     { kind: "empty" },
     { kind: "empty" },
     { kind: "empty" },
@@ -65,7 +69,18 @@ export const state: SimState = {
   snip: null,
   character: null,
   toolMode: "play",
+  dayNightCycle: 0.5,
 };
+
+export function setDayNightPreset(preset: DayNightPreset): void {
+  const presets: Record<DayNightPreset, number> = {
+   morning: 0.0,
+   day: 0.25,
+   dusk: 0.5,
+   night: 0.75,
+  };
+  state.dayNightCycle = presets[preset];
+}
 
 /** Returns true if the currently selected hotbar item is a pickaxe. */
 export function hasPickaxeEquipped(): boolean {

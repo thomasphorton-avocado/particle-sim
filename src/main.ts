@@ -157,6 +157,7 @@ function loop(): void {
   lastTime = now;
 
   if (!state.paused) {
+    state.dayNightCycle += dt / 300;
     step(grid);
     updateCharacter(character, grid, dt);
   }

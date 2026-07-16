@@ -13,6 +13,8 @@ export const MaterialId = {
   Dirt: 11,
   Sprinkler: 12,
   Grass: 13,
+  Torch: 14,
+  Clock: 15,
 } as const;
 export type MaterialId = (typeof MaterialId)[keyof typeof MaterialId];
 
@@ -184,6 +186,24 @@ export const MATERIALS: Record<MaterialId, Material> = {
     density: Infinity,
     placement: { kind: "brush" },
     permeable: true,
+  },
+  [MaterialId.Torch]: {
+    id: MaterialId.Torch,
+    name: "Torch",
+    color: [226, 132, 38],
+    colorVariance: 10,
+    phase: MaterialPhase.Solid,
+    density: Infinity,
+    placement: { kind: "object", shape: "circle", width: 3, height: 3 },
+  },
+  [MaterialId.Clock]: {
+    id: MaterialId.Clock,
+    name: "Clock",
+    color: [96, 86, 72],
+    colorVariance: 6,
+    phase: MaterialPhase.Solid,
+    density: Infinity,
+    placement: { kind: "object", shape: "rect", width: 1, height: 1 },
   },
 };
 

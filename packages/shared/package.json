@@ -12,8 +12,9 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --pretty false",
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.js"
+    "test": "npm run build && node --test test/*.test.js",
+    "test:smoke": "node --test test/*.test.js"
   }
 }

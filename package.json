@@ -8,13 +8,13 @@
   ],
   "scripts": {
     "dev": "vite",
-    "typecheck:shared": "tsc -p packages/shared/tsconfig.json --pretty false",
+    "typecheck:shared": "tsc -p packages/shared/tsconfig.json --pretty false --noEmit",
     "typecheck:client": "tsc -p tsconfig.json --pretty false",
     "typecheck": "npm run typecheck:shared && npm run typecheck:client",
     "build:shared": "npm --workspace @particle-sim/shared run build",
     "build:client": "tsc -p tsconfig.json --pretty false && vite build",
     "build": "npm run build:shared && npm run build:client",
-    "test:shared": "npm --workspace @particle-sim/shared run test",
+    "test:shared": "npm --workspace @particle-sim/shared run test:smoke",
     "test:client": "vitest run",
     "test": "npm run build:shared && npm run test:client && npm run test:shared",
     "preview": "vite preview"

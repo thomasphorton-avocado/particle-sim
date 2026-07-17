@@ -54,8 +54,16 @@ function canPlaceObjectFootprint(world: WorldState, materialId: MaterialId, anch
   return true;
 }
 
-function canPlaceFootprintAt(world: WorldState, materialId: MaterialId, anchorX: number, anchorY: number, offsets: [number, number][]): boolean {
-  return canPlaceObjectFootprint(world, materialId, anchorX, anchorY, offsets);
+function canDescendObjectFootprint(world: WorldState, anchorX: number, anchorY: number, offsets: [number, number][]): boolean {
+  if (offsets.length === 0) return false;
+  const grid = world.grid;
+  for (const [dx, dy] of offsets) {
+    const x = anchorX + dx;
+    const y = anchorY + dy;
+    if (!grid.inBounds(x, y)) return false;
+    if (grid.get(x, y) !== MaterialId.Empty) return false;
+  }
+  return true;
 }
 
 export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number): boolean {
@@ -71,17 +79,16 @@ export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number)
     const offsets = getObjectOffsets(materialId);
     if (offsets.length === 0) return false;
 
+    if (!canPlaceObjectFootprint(world, materialId, gx, gy, offsets)) {
+      return false;
+    }
+
     let restY = gy;
     const fallsWhenAirborne = materialId === MaterialId.Torch || materialId === MaterialId.Stone;
     if (fallsWhenAirborne) {
-      while (canPlaceFootprintAt(world, materialId, gx, restY + 1, offsets)) {
+      while (canDescendObjectFootprint(world, gx, restY + 1, offsets)) {
         restY += 1;
       }
-      if (!canPlaceFootprintAt(world, materialId, gx, restY, offsets)) {
-        return false;
-      }
-    } else if (!canPlaceFootprintAt(world, materialId, gx, gy, offsets)) {
-      return false;
     }
 
     if (!removeFromActiveSlot()) return false;
@@ -192,7 +199,7 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
     const material = MATERIALS[materialId];
     if (material.placement.kind !== "object") return;
     const offsets = getObjectOffsets(materialId);
-    if (!canPlaceFootprintAt(world, materialId, gx, gy, offsets)) return;
+    if (!canPlaceObjectFootprint(world, materialId, gx, gy, offsets)) return;
     const objectId = allocateObjectId(world);
     for (const [dx, dy] of offsets) {
       const x = gx + dx;

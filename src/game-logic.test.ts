@@ -123,6 +123,73 @@ describe("game logic", () => {
     expect(restored.grid.get(3, restoredFalling.restY)).toBe(MaterialId.Torch);
   });
 
+  it("lets falling objects rest on the actual support even beyond placement range", () => {
+    const world = state.world;
+    const player = getLocalPlayer();
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Torch, count: 1 },
+      ...Array(9).fill({ kind: "empty" }),
+    ];
+    player.activeHotbarSlot = 0;
+    player.x = 0;
+    player.y = 0;
+    state.toolMode = "play";
+    world.grid.set(3, 40, MaterialId.Wall);
+
+    const placed = placeHotbarMaterialAt(world, 3, 1);
+
+    expect(placed).toBe(true);
+    const objectId = Object.keys(world.fallingObjects)[0];
+    expect(objectId).toBeDefined();
+    expect(world.fallingObjects[objectId].restY).toBe(38);
+  });
+
+  it("stops falling on water instead of traversing through it", () => {
+    const world = state.world;
+    const player = getLocalPlayer();
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Torch, count: 1 },
+      ...Array(9).fill({ kind: "empty" }),
+    ];
+    player.activeHotbarSlot = 0;
+    player.x = 0;
+    player.y = 0;
+    state.toolMode = "play";
+    world.grid.set(3, 3, MaterialId.Water);
+
+    const placed = placeHotbarMaterialAt(world, 3, 1);
+
+    expect(placed).toBe(true);
+    expect(Object.keys(world.fallingObjects)).toHaveLength(0);
+    expect(world.grid.get(3, 1)).toBe(MaterialId.Torch);
+    expect(world.grid.getObjectId(3, 1)).toBeDefined();
+  });
+
+  it("rejects a blocked initial footprint without mutating state", () => {
+    const world = state.world;
+    const grid = world.grid;
+    const player = getLocalPlayer();
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Wood, count: 1 },
+      ...Array(9).fill({ kind: "empty" }),
+    ];
+    player.activeHotbarSlot = 0;
+    player.x = 24;
+    player.y = 4;
+    state.toolMode = "play";
+    grid.set(24, 4, MaterialId.Wall);
+    const beforeOrdinal = world.nextObjectOrdinal;
+
+    const placed = placeHotbarMaterialAt(world, 24, 4);
+
+    expect(placed).toBe(false);
+    expect(player.hotbar[0]).toEqual({ kind: "material", materialId: MaterialId.Wood, count: 1 });
+    expect(grid.get(24, 4)).toBe(MaterialId.Wall);
+    expect(Object.keys(world.fallingObjects)).toHaveLength(0);
+    expect(grid.getObjectId(24, 4)).toBeNull();
+    expect(world.nextObjectOrdinal).toBe(beforeOrdinal);
+  });
+
   it("clears only the tracked adjacent object when mining", () => {
     const grid = state.world.grid;
     const player = getLocalPlayer();

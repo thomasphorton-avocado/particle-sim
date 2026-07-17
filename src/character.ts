@@ -1,5 +1,4 @@
-import { Grid } from "./grid";
-import { MATERIALS, MaterialId, MaterialPhase } from "./materials";
+import { Grid, MATERIALS, MaterialId, MaterialPhase } from "@particle-sim/shared";
 import { state, addToHotbar, hasPickaxeEquipped } from "./state";
 
 // Pickaxe swing animation + mining arc (shared by update/mining and draw)

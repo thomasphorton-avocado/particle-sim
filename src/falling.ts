@@ -1,4 +1,4 @@
-import { Grid } from "./grid";
+import { Grid } from "@particle-sim/shared";
 import { state } from "./state";
 
 // Match the character's gravity model so falling objects feel consistent.

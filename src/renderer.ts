@@ -1,6 +1,5 @@
-import { Grid } from "./grid";
-import { FLOWER_PALETTE, MATERIALS, MaterialId } from "./materials";
-import type { ObjectPlacement } from "./materials";
+import { Grid, FLOWER_PALETTE, MATERIALS, MaterialId } from "@particle-sim/shared";
+import type { ObjectPlacement } from "@particle-sim/shared";
 import { state } from "./state";
 
 interface CloudPuff {

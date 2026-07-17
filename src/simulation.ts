@@ -1,5 +1,4 @@
-import { Grid } from "./grid";
-import { FLOWER_PALETTE, MATERIALS, MaterialId, MaterialPhase } from "./materials";
+import { Grid, FLOWER_PALETTE, MATERIALS, MaterialId, MaterialPhase } from "@particle-sim/shared";
 
 function randDir(): 1 | -1 {
   return Math.random() < 0.5 ? -1 : 1;

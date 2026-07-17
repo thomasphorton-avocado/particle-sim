@@ -1,5 +1,5 @@
-import { Grid } from "./grid";
-import { MaterialId } from "./materials";
+import { Grid } from "./grid.js";
+import { MaterialId } from "./materials.js";
 
 /**
  * BFS to find all connected Flower cells and their connected Stem cells,

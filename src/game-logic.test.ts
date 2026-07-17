@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { Grid, harvestFlowerCluster, MaterialId } from "@particle-sim/shared";
+import { Grid, createDefaultFallingObjectState, createObjectId, harvestFlowerCluster, MaterialId } from "@particle-sim/shared";
 import { updateFallingObjects } from "./falling";
-import { state } from "./state";
+import { getLocalPlayer, state } from "./state";
 
 describe("game logic", () => {
   beforeEach(() => {
-    state.fallingObjects = [];
-    state.inventory = { flowers: 0 };
-    state.hotbar = [
+    const player = getLocalPlayer();
+    state.world.fallingObjects = {};
+    player.inventory = { flowers: 0 };
+    player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Seed, count: 5 },
       { kind: "material", materialId: MaterialId.Torch, count: 5 },
@@ -18,9 +19,8 @@ describe("game logic", () => {
       { kind: "empty" },
       { kind: "empty" },
       { kind: "empty" },
-      { kind: "empty" },
     ];
-    state.activeSlot = 0;
+    player.activeHotbarSlot = 0;
   });
 
   it("harvests a connected flower cluster and clears the cells", () => {
@@ -40,22 +40,16 @@ describe("game logic", () => {
 
   it("lands falling objects by stamping their footprint into the grid", () => {
     const grid = new Grid(10, 10);
-    state.fallingObjects.push({
-      materialId: MaterialId.Stone,
-      x: 3,
-      y: 1,
-      restY: 4,
-      vy: 0,
-      offsets: [
-        [0, 0],
-        [1, 0],
-        [0, 1],
-      ],
-    });
+    const id = createObjectId("object_test_1");
+    state.world.fallingObjects[id] = createDefaultFallingObjectState(id, MaterialId.Stone, 3, 1, 4, 0, [
+      [0, 0],
+      [1, 0],
+      [0, 1],
+    ]);
 
     updateFallingObjects(grid, 0.05);
 
-    expect(state.fallingObjects).toHaveLength(0);
+    expect(Object.keys(state.world.fallingObjects)).toHaveLength(0);
     expect(grid.get(3, 4)).toBe(MaterialId.Stone);
     expect(grid.get(4, 4)).toBe(MaterialId.Stone);
     expect(grid.get(3, 5)).toBe(MaterialId.Stone);
@@ -63,18 +57,12 @@ describe("game logic", () => {
 
   it("keeps falling objects in the state until they land", () => {
     const grid = new Grid(10, 10);
-    state.fallingObjects.push({
-      materialId: MaterialId.Torch,
-      x: 5,
-      y: 1,
-      restY: 8,
-      vy: 0,
-      offsets: [[0, 0]],
-    });
+    const id = createObjectId("object_test_2");
+    state.world.fallingObjects[id] = createDefaultFallingObjectState(id, MaterialId.Torch, 5, 1, 8, 0, [[0, 0]]);
 
     updateFallingObjects(grid, 0.01);
 
-    expect(state.fallingObjects).toHaveLength(1);
+    expect(Object.keys(state.world.fallingObjects)).toHaveLength(1);
     expect(grid.get(5, 8)).toBe(MaterialId.Empty);
   });
 });

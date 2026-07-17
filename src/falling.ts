@@ -11,11 +11,11 @@ const TERMINAL_VY = 3; // cells / frame
  * entity is removed from the animation list.
  */
 export function updateFallingObjects(grid: Grid, dt: number): void {
-  if (state.fallingObjects.length === 0) return;
+  const fallingEntries = Object.entries(state.world.fallingObjects);
+  if (fallingEntries.length === 0) return;
   const dtFrames = Math.min(dt * 60, 3);
 
-  for (let i = state.fallingObjects.length - 1; i >= 0; i--) {
-    const o = state.fallingObjects[i];
+  for (const [objectId, o] of fallingEntries) {
     o.vy = Math.min(o.vy + GRAVITY * dtFrames, TERMINAL_VY);
     o.y += o.vy * dtFrames;
 
@@ -24,9 +24,9 @@ export function updateFallingObjects(grid: Grid, dt: number): void {
       for (const [dx, dy] of o.offsets) {
         const x = o.x + dx;
         const y = o.restY + dy;
-        if (grid.inBounds(x, y)) grid.set(x, y, o.materialId);
+        if (grid.inBounds(x, y)) grid.set(x, y, o.materialId, { objectId: o.id });
       }
-      state.fallingObjects.splice(i, 1);
+      delete state.world.fallingObjects[objectId];
     }
   }
 }

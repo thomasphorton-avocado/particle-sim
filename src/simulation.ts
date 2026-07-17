@@ -273,13 +273,13 @@ function bloom(grid: Grid, x: number, y: number): void {
 
   const place = (px: number, py: number, shade?: number) => {
     if (grid.get(px, py) === MaterialId.Empty) {
-      grid.set(px, py, MaterialId.Flower, shade);
+      grid.set(px, py, MaterialId.Flower, { shade });
       grid.setVx(px, py, colorVariant);
     }
   };
 
   // Center — dark pistil
-  grid.set(x, y, MaterialId.Flower, -40);
+  grid.set(x, y, MaterialId.Flower, { shade: -40 });
   grid.setVx(x, y, colorVariant);
 
   // Inner ring — standard brightness

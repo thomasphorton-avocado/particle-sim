@@ -12,7 +12,8 @@ const CELL_SIZE = 5;
 const GRID_WIDTH = 320;
 const GRID_HEIGHT = 200;
 
-const grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
+state.world.grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
+const grid = state.world.grid;
 
 // Seed the world with a starter layout (based on reference design)
 {
@@ -110,7 +111,7 @@ const grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
       const x = faucetX + dx, y = faucetY + dy;
       if (grid.inBounds(x, y)) {
         grid.set(x, y, MaterialId.Faucet);
-        grid.vx[y * GRID_WIDTH + x] = 2;
+        grid.setFaucetFlow(x, y, 2);
       }
     }
   }
@@ -155,8 +156,8 @@ function loop(): void {
   const dt = (now - lastTime) / 1000; // seconds
   lastTime = now;
 
-  if (!state.paused) {
-    state.dayNightCycle += dt / 300;
+  if (!state.world.paused) {
+    state.world.time.dayNightCycle += dt / 300;
     step(grid);
     updateCharacter(character, grid, dt);
     updateFallingObjects(grid, dt);

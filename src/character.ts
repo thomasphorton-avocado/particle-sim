@@ -1,5 +1,5 @@
 import { Grid, MATERIALS, MaterialId, MaterialPhase } from "@particle-sim/shared";
-import { state, addToHotbar, hasPickaxeEquipped } from "./state";
+import { state, addToHotbar, getLocalPlayer, hasPickaxeEquipped } from "./state";
 
 // Pickaxe swing animation + mining arc (shared by update/mining and draw)
 const SWING_DURATION = 250; // ms
@@ -188,12 +188,14 @@ function checkFaucetBump(grid: Grid, char: Character): void {
   if (seedCells.length === 0) return;
   // Cycle all connected faucet cells: 0→1→2→0
   const visited = new Set<number>();
+  const visitedCells: [number, number][] = [];
   const queue = [...seedCells];
   while (queue.length > 0) {
     const [fx, fy] = queue.pop()!;
     const idx = fy * grid.width + fx;
     if (visited.has(idx)) continue;
     visited.add(idx);
+    visitedCells.push([fx, fy]);
     // Check neighbors
     for (const [nx, ny] of [[fx-1,fy],[fx+1,fy],[fx,fy-1],[fx,fy+1]]) {
       if (grid.inBounds(nx, ny) && grid.get(nx, ny) === MaterialId.Faucet && !visited.has(ny * grid.width + nx)) {
@@ -202,11 +204,12 @@ function checkFaucetBump(grid: Grid, char: Character): void {
     }
   }
   // Get current state from any cell and cycle
-  const firstIdx = visited.values().next().value!;
-  const currentState = grid.vx[firstIdx];
+  const firstCell = seedCells[0]!;
+  const [firstX, firstY] = firstCell;
+  const currentState = grid.getFaucetFlow(firstX, firstY);
   const newState = (currentState + 1) % 3;
-  for (const idx of visited) {
-    grid.vx[idx] = newState;
+  for (const [fx, fy] of visitedCells) {
+    grid.setFaucetFlow(fx, fy, newState);
   }
   lastFaucetBumpTime = now;
 }
@@ -392,14 +395,16 @@ function mineCellAt(grid: Grid, x: number, y: number, mined: Set<number>): void 
       }
     }
     addToHotbar(id);
+    const player = getLocalPlayer();
     const name = mat.name.toLowerCase();
-    state.inventory[name] = (state.inventory[name] || 0) + 1;
+    player.inventory[name] = (player.inventory[name] || 0) + 1;
     return;
   }
 
   mined.add(key);
+  const player = getLocalPlayer();
   const name = mat.name.toLowerCase();
-  state.inventory[name] = (state.inventory[name] || 0) + 1;
+  player.inventory[name] = (player.inventory[name] || 0) + 1;
   // Add minable materials to hotbar (skip non-placeable things like stems/flowers/grass)
   if (id !== MaterialId.Stem && id !== MaterialId.Flower && id !== MaterialId.Grass) {
     addToHotbar(id);

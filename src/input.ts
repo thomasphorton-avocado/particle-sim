@@ -1,5 +1,5 @@
-import { Grid, MATERIALS, MaterialId, harvestFlowerCluster } from "@particle-sim/shared";
-import { state, hasPickaxeEquipped, addToHotbar, getActiveHotbarMaterial, removeFromActiveSlot } from "./state";
+import { Grid, MATERIALS, MaterialId, allocateObjectId, createDefaultFallingObjectState, harvestFlowerCluster } from "@particle-sim/shared";
+import { state, hasPickaxeEquipped, addToHotbar, getActiveHotbarMaterial, removeFromActiveSlot, getLocalPlayer } from "./state";
 import { startSwing, setSwingHeld } from "./character";
 
 /** Maximum placement distance from character center (in grid cells). */
@@ -93,7 +93,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
         grid.set(x, y, state.selectedMaterial);
         // Faucets start on low flow
         if (state.selectedMaterial === MaterialId.Faucet) {
-          grid.setVx(x, y, 1);
+          grid.setFaucetFlow(x, y, 1);
         }
       }
     }
@@ -122,10 +122,10 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
         }
       }
     }
-    const current = grid.getVx(gx, gy);
+    const current = grid.getFaucetFlow(gx, gy);
     const next = (current + 1) % 3;
     for (const [x, y] of cells) {
-      grid.setVx(x, y, next);
+      grid.setFaucetFlow(x, y, next);
     }
     return true;
   };
@@ -177,7 +177,8 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
         while (footFits(restY + 1)) restY++;
         if (restY > gy) {
           // Animate the fall; the object is stamped into the grid on landing.
-          state.fallingObjects.push({ materialId, x: gx, y: gy, restY, vy: 0, offsets });
+          const objectId = allocateObjectId(state.world);
+          state.world.fallingObjects[objectId] = createDefaultFallingObjectState(objectId, materialId, gx, gy, restY, 0, offsets);
           return;
         }
       }
@@ -190,7 +191,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
           if (!grid.inBounds(x, y)) continue;
           if (!canPlaceOver(x, y, materialId)) continue;
           grid.set(x, y, materialId);
-          if (materialId === MaterialId.Faucet) grid.setVx(x, y, 1);
+          if (materialId === MaterialId.Faucet) grid.setFaucetFlow(x, y, 1);
         }
       }
     } else {
@@ -218,7 +219,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     // Clicking a bloomed flower harvests it instead of painting
     const harvested = harvestFlowerCluster(grid, pos.x, pos.y);
     if (harvested > 0) {
-      state.inventory.flowers += harvested;
+      getLocalPlayer().inventory.flowers += harvested;
       // Add seeds to hotbar (1 per bloom + 10% chance of bonus seed)
       for (let i = 0; i < harvested; i++) {
         addToHotbar(MaterialId.Seed);

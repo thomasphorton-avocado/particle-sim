@@ -1,20 +1,16 @@
-import { MaterialId } from "@particle-sim/shared";
+import {
+  MaterialId,
+  createDefaultPlayerState,
+  createDefaultWorldState,
+  createPlayerId,
+  type PlayerId,
+  type PlayerState,
+  type WorldState,
+} from "@particle-sim/shared";
 import type { Character } from "./character";
 
 export type ToolMode = "editor" | "place" | "play";
 export type DayNightPreset = "morning" | "day" | "dusk" | "night";
-
-export interface InventoryCounts {
-  flowers: number;
-  [key: string]: number; // dynamic material inventory
-}
-
-const MAX_STACK = 1000;
-
-export type HotbarItem =
-  | { kind: "pickaxe" }
-  | { kind: "material"; materialId: MaterialId; count: number }
-  | { kind: "empty" };
 
 export interface SnipAnimation {
   px: number;
@@ -23,67 +19,70 @@ export interface SnipAnimation {
 }
 
 export interface SimState {
+  world: WorldState;
+  localPlayerId: PlayerId;
   selectedMaterial: MaterialId;
   brushSize: number;
-  paused: boolean;
   /** Grid-space cursor position, for the placement preview. Null when the pointer is off-canvas. */
   hover: { x: number; y: number } | null;
   /** Raw pixel position on the canvas element, for drawing custom cursors. */
   hoverPixel: { x: number; y: number } | null;
-  inventory: InventoryCounts;
-  /** 10-slot hotbar. */
-  hotbar: HotbarItem[];
-  /** Currently selected hotbar slot (0-9). */
-  activeSlot: number;
   /** Active snip animation, if any. */
   snip: SnipAnimation | null;
   /** The player character. */
   character: Character | null;
   /** Current tool mode. */
   toolMode: ToolMode;
-  /** Progress through the day/night cycle from 0 to 1. */
-  dayNightCycle: number;
-  /** Objects currently animating a fall from placement to the ground. */
-  fallingObjects: FallingObject[];
 }
 
-/** An object mid-fall: material, center cell x, animated center y (float), rest target, velocity, footprint. */
-export interface FallingObject {
-  materialId: MaterialId;
-  x: number;
-  y: number;
-  restY: number;
-  vy: number;
-  offsets: [number, number][];
+function getLocalPlayerState(): PlayerState {
+  const player = state.world.players[state.localPlayerId];
+  if (!player) {
+   const created = createDefaultPlayerState(state.localPlayerId);
+   state.world.players[state.localPlayerId] = created;
+   return created;
+  }
+  return player;
+}
+
+function syncWorldDefaults(): void {
+  const player = getLocalPlayerState();
+  if (!player.hotbar || player.hotbar.length !== 10) {
+   player.hotbar = [
+     { kind: "pickaxe" },
+     { kind: "material", materialId: MaterialId.Seed, count: 5 },
+     { kind: "material", materialId: MaterialId.Torch, count: 5 },
+     { kind: "material", materialId: MaterialId.Clock, count: 1 },
+     { kind: "empty" },
+     { kind: "empty" },
+     { kind: "empty" },
+     { kind: "empty" },
+     { kind: "empty" },
+     { kind: "empty" },
+   ];
+  }
+  if (!player.inventory || typeof player.inventory.flowers !== "number") {
+   player.inventory = { flowers: 0 };
+  }
 }
 
 export const state: SimState = {
+  world: createDefaultWorldState("room_default"),
+  localPlayerId: createPlayerId("player_1"),
   selectedMaterial: MaterialId.Sand,
   brushSize: 4,
-  paused: false,
   hover: null,
   hoverPixel: null,
-  inventory: { flowers: 0 },
-  hotbar: [
-    { kind: "pickaxe" },
-    { kind: "material", materialId: MaterialId.Seed, count: 5 },
-    { kind: "material", materialId: MaterialId.Torch, count: 5 },
-    { kind: "material", materialId: MaterialId.Clock, count: 1 },
-    { kind: "empty" },
-    { kind: "empty" },
-    { kind: "empty" },
-    { kind: "empty" },
-    { kind: "empty" },
-    { kind: "empty" },
-    { kind: "empty" },
-  ],
-  activeSlot: 0,
   snip: null,
   character: null,
   toolMode: "play",
-  dayNightCycle: 0.5,
-  fallingObjects: [],
 };
+
+syncWorldDefaults();
+
+export function getLocalPlayer(): PlayerState {
+  return getLocalPlayerState();
+}
 
 export function setDayNightPreset(preset: DayNightPreset): void {
   const presets: Record<DayNightPreset, number> = {
@@ -92,17 +91,19 @@ export function setDayNightPreset(preset: DayNightPreset): void {
    dusk: 0.5,
    night: 0.75,
   };
-  state.dayNightCycle = presets[preset];
+  state.world.time.dayNightCycle = presets[preset];
 }
 
 /** Returns true if the currently selected hotbar item is a pickaxe. */
 export function hasPickaxeEquipped(): boolean {
-  return state.hotbar[state.activeSlot]?.kind === "pickaxe";
+  const player = getLocalPlayer();
+  return player.hotbar[player.activeHotbarSlot]?.kind === "pickaxe";
 }
 
 /** Returns the material item in the active slot, or null. */
-export function getActiveHotbarMaterial(): (HotbarItem & { kind: "material" }) | null {
-  const item = state.hotbar[state.activeSlot];
+export function getActiveHotbarMaterial(): (NonNullable<PlayerState["hotbar"][number]> & { kind: "material" }) | null {
+  const player = getLocalPlayer();
+  const item = player.hotbar[player.activeHotbarSlot];
   return item?.kind === "material" ? item : null;
 }
 
@@ -112,26 +113,25 @@ export function getActiveHotbarMaterial(): (HotbarItem & { kind: "material" }) |
  * Returns false if inventory is full.
  */
 export function addToHotbar(materialId: MaterialId, amount: number = 1): boolean {
+  const player = getLocalPlayer();
   let remaining = amount;
 
-  // First pass: stack into existing slots of same material
-  for (let i = 0; i < state.hotbar.length && remaining > 0; i++) {
-    const slot = state.hotbar[i];
-    if (slot.kind === "material" && slot.materialId === materialId && slot.count < MAX_STACK) {
-      const space = MAX_STACK - slot.count;
-      const add = Math.min(remaining, space);
-      slot.count += add;
-      remaining -= add;
-    }
+  for (let i = 0; i < player.hotbar.length && remaining > 0; i++) {
+   const slot = player.hotbar[i];
+   if (slot.kind === "material" && slot.materialId === materialId && slot.count < 1000) {
+     const space = 1000 - slot.count;
+     const add = Math.min(remaining, space);
+     slot.count += add;
+     remaining -= add;
+   }
   }
 
-  // Second pass: fill empty slots
-  for (let i = 0; i < state.hotbar.length && remaining > 0; i++) {
-    if (state.hotbar[i].kind === "empty") {
-      const add = Math.min(remaining, MAX_STACK);
-      state.hotbar[i] = { kind: "material", materialId, count: add };
-      remaining -= add;
-    }
+  for (let i = 0; i < player.hotbar.length && remaining > 0; i++) {
+   if (player.hotbar[i].kind === "empty") {
+     const add = Math.min(remaining, 1000);
+     player.hotbar[i] = { kind: "material", materialId, count: add };
+     remaining -= add;
+   }
   }
 
   return remaining === 0;
@@ -142,20 +142,20 @@ export function addToHotbar(materialId: MaterialId, amount: number = 1): boolean
  * Clears the slot to empty when count reaches 0. Returns true if successful.
  */
 export function removeFromActiveSlot(): boolean {
-  const slot = state.hotbar[state.activeSlot];
+  const player = getLocalPlayer();
+  const slot = player.hotbar[player.activeHotbarSlot];
   if (slot?.kind !== "material") return false;
   slot.count -= 1;
   if (slot.count <= 0) {
-    state.hotbar[state.activeSlot] = { kind: "empty" };
-    // Auto-select closest previous slot that has an item
-    for (let offset = 1; offset < state.hotbar.length; offset++) {
-      const prev = state.activeSlot - offset;
-      if (prev < 0) break;
-      if (state.hotbar[prev].kind !== "empty") {
-        state.activeSlot = prev;
-        return true;
-      }
-    }
+   player.hotbar[player.activeHotbarSlot] = { kind: "empty" };
+   for (let offset = 1; offset < player.hotbar.length; offset++) {
+     const prev = player.activeHotbarSlot - offset;
+     if (prev < 0) break;
+     if (player.hotbar[prev].kind !== "empty") {
+       player.activeHotbarSlot = prev;
+       return true;
+     }
+   }
   }
   return true;
 }

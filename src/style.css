@@ -16,6 +16,7 @@ body {
 }
 
 #app {
+  position: relative;
   max-width: 1650px;
   margin: 0 auto;
   padding: 16px 20px 40px;
@@ -299,4 +300,67 @@ h1 {
   text-shadow: 0 0 2px #000, 0 0 4px #000;
   pointer-events: none;
   line-height: 1;
+}
+
+.touch-controls {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.touch-control-group {
+  display: flex;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.touch-btn {
+  width: 56px;
+  height: 56px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 16px;
+  background: rgba(38, 40, 50, 0.9);
+  color: var(--text);
+  font-size: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+
+.touch-btn.active {
+  background: rgba(192, 132, 252, 0.85);
+  transform: translateY(1px);
+}
+
+.touch-btn-jump {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .hotbar-slot {
+    width: 58px;
+    height: 58px;
+    font-size: 24px;
+  }
+
+  .hotbar-key {
+    font-size: 11px;
+  }
+
+  .hotbar-count {
+    font-size: 11px;
+  }
 }

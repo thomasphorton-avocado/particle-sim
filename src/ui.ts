@@ -2,6 +2,7 @@ import { Grid } from "./grid";
 import { MATERIALS, MaterialId } from "./materials";
 import { setDayNightPreset, state } from "./state";
 import type { HotbarItem } from "./state";
+import { setTouchControl } from "./character";
 
 const PALETTE: MaterialId[] = [
   MaterialId.Sand,
@@ -158,6 +159,58 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
 
   toolbar.append(toolGroup, actionGroup, flowerCounter);
   root.append(toolbar, editPanel);
+
+  const touchHost = root.parentElement ?? root;
+  const supportsTouch = window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
+  if (supportsTouch) {
+    const touchOverlay = document.createElement("div");
+    touchOverlay.className = "touch-controls";
+
+    const bindTouchButton = (control: "left" | "right" | "jump", label: string, className: string) => {
+      const button = document.createElement("button");
+      button.className = `touch-btn ${className}`;
+      button.type = "button";
+      button.textContent = label;
+      button.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        button.setPointerCapture(event.pointerId);
+        button.classList.add("active");
+        setTouchControl(control, true);
+      });
+      button.addEventListener("pointerup", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        button.classList.remove("active");
+        setTouchControl(control, false);
+      });
+      button.addEventListener("pointerleave", (event) => {
+        if (button.hasPointerCapture(event.pointerId)) {
+          button.classList.remove("active");
+          setTouchControl(control, false);
+        }
+      });
+      button.addEventListener("pointercancel", () => {
+        button.classList.remove("active");
+        setTouchControl(control, false);
+      });
+      return button;
+    };
+
+    const moveGroup = document.createElement("div");
+    moveGroup.className = "touch-control-group";
+    moveGroup.append(
+      bindTouchButton("left", "◀", "touch-btn-left"),
+      bindTouchButton("right", "▶", "touch-btn-right"),
+    );
+
+    const jumpGroup = document.createElement("div");
+    jumpGroup.className = "touch-control-group";
+    jumpGroup.append(bindTouchButton("jump", "⤴", "touch-btn-jump"));
+
+    touchOverlay.append(moveGroup, jumpGroup);
+    touchHost.appendChild(touchOverlay);
+  }
 
   // Apply initial mode visibility and button states
   setToolMode(state.toolMode, pickaxeBtn);

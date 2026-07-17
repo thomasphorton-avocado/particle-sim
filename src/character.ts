@@ -105,7 +105,19 @@ export interface CharacterInput {
 }
 
 const keys: CharacterInput = { left: false, right: false, jump: false, crouch: false, lookUp: false };
+const touchControls: CharacterInput = { left: false, right: false, jump: false, crouch: false, lookUp: false };
 let jumpHeld = false;
+
+function inputState(control: keyof CharacterInput): boolean {
+  return keys[control] || touchControls[control];
+}
+
+export function setTouchControl(control: keyof CharacterInput, pressed: boolean): void {
+  touchControls[control] = pressed;
+  if (control === "jump" && !pressed) {
+    jumpHeld = false;
+  }
+}
 
 function isEditable(target: EventTarget | null): boolean {
   if (!target || !(target instanceof HTMLElement)) return false;
@@ -226,14 +238,14 @@ export function updateCharacter(char: Character, grid: Grid, dt: number): void {
   char.swimming = waterCells >= 3;
 
   // Crouch / look up state
-  char.crouching = keys.crouch;
-  char.lookingUp = keys.lookUp;
+  char.crouching = inputState("crouch");
+  char.lookingUp = inputState("lookUp");
 
   // Horizontal movement (slower in water)
   const speed = char.swimming ? SWIM_MOVE_SPEED : MOVE_SPEED;
   let moveX = 0;
-  if (keys.left) { moveX -= speed * dtFrames; char.facing = -1; }
-  if (keys.right) { moveX += speed * dtFrames; char.facing = 1; }
+  if (inputState("left")) { moveX -= speed * dtFrames; char.facing = -1; }
+  if (inputState("right")) { moveX += speed * dtFrames; char.facing = 1; }
 
   // Apply gravity (reduced in water)
   const gravity = char.swimming ? SWIM_GRAVITY : GRAVITY;
@@ -242,7 +254,7 @@ export function updateCharacter(char: Character, grid: Grid, dt: number): void {
   if (char.vy > maxFall) char.vy = maxFall;
 
   // Swimming: space to swim upward (repeatable, no jumpHeld gate)
-  if (char.swimming && keys.jump) {
+  if (char.swimming && inputState("jump")) {
     // Check if near the surface (top 2 rows of character are not fully submerged)
     const headY = Math.floor(char.y);
     const x0 = Math.floor(char.x);
@@ -273,7 +285,7 @@ export function updateCharacter(char: Character, grid: Grid, dt: number): void {
     }
 
     // Jump (with coyote time) - only when not swimming
-    if (!char.swimming && keys.jump && !jumpHeld && (char.grounded || char.airTime <= COYOTE_TIME_S)) {
+    if (!char.swimming && inputState("jump") && !jumpHeld && (char.grounded || char.airTime <= COYOTE_TIME_S)) {
       char.vy = JUMP_VELOCITY;
       char.grounded = false;
       char.airTime = COYOTE_TIME_S + 1; // prevent double-jump

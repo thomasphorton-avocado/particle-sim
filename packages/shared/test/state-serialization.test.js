@@ -1,6 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Grid, MaterialId, allocateObjectId, allocatePlayerId, createDefaultWorldState, createObjectId, createPlayerId, deserializeWorldState, serializeWorldState } from "@particle-sim/shared";
+import { FLOWER_PALETTE, Grid, MaterialId, allocateObjectId, allocatePlayerId, createDefaultWorldState, createObjectId, createPlayerId, deserializeWorldState, serializeWorldState } from "@particle-sim/shared";
+
+function createValidWorldDto(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    roomId: "room_test",
+    grid: {
+      width: 4,
+      height: 4,
+      ids: Array(16).fill(MaterialId.Empty),
+      shade: Array(16).fill(0),
+      auxiliary: Array(16).fill(0),
+      objectMembership: [],
+    },
+    players: {},
+    fallingObjects: {},
+    paused: false,
+    time: { dayNightCycle: 0.25 },
+    weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 },
+    nextPlayerOrdinal: 1,
+    nextObjectOrdinal: 1,
+    ...overrides,
+  };
+}
 
 test("inventory and hotbar stay independent across players", () => {
   const world = createDefaultWorldState("room_test");
@@ -85,6 +108,93 @@ test("allocation after restore never reuses an ID", () => {
   const second = allocateObjectId(restored);
   assert.equal(first, "player_3");
   assert.equal(second, "object_3");
+});
+
+test("multi-cell object identities survive a round-trip", () => {
+  const world = createDefaultWorldState("room_multi");
+  const stoneId = allocateObjectId(world);
+  const woodId = allocateObjectId(world);
+  const faucetId = allocateObjectId(world);
+  const drainId = allocateObjectId(world);
+  world.grid.set(1, 1, MaterialId.Stone, { objectId: stoneId });
+  world.grid.set(2, 1, MaterialId.Stone, { objectId: stoneId });
+  world.grid.set(3, 1, MaterialId.Wood, { objectId: woodId });
+  world.grid.set(1, 2, MaterialId.Faucet, { objectId: faucetId });
+  world.grid.set(2, 2, MaterialId.Drain, { objectId: drainId });
+  const restored = deserializeWorldState(serializeWorldState(world));
+  assert.equal(restored.grid.getObjectId(1, 1), stoneId);
+  assert.equal(restored.grid.getObjectId(2, 1), stoneId);
+  assert.equal(restored.grid.getObjectId(3, 1), woodId);
+  assert.equal(restored.grid.getObjectId(1, 2), faucetId);
+  assert.equal(restored.grid.getObjectId(2, 2), drainId);
+});
+
+test("fractional falling y round-trips and non-object falling materials are rejected", () => {
+  const world = createDefaultWorldState("room_falling");
+  const objectId = allocateObjectId(world);
+  world.fallingObjects[objectId] = { id: objectId, materialId: MaterialId.Stone, x: 4, y: 1.75, restY: 6, vy: 0.25, offsets: [[0, 0], [1, 0]] };
+  const restored = deserializeWorldState(serializeWorldState(world));
+  assert.equal(restored.fallingObjects[objectId].y, 1.75);
+  assert.throws(() => deserializeWorldState(createValidWorldDto({
+    fallingObjects: {
+      object_1: { id: "object_1", materialId: MaterialId.Water, x: 0, y: 0, restY: 0, vy: 0, offsets: [[0, 0]] },
+    },
+  })), /object material/i);
+});
+
+test("semantic auxiliary values are validated during deserialization", () => {
+  assert.throws(() => deserializeWorldState(createValidWorldDto({
+    grid: { width: 1, height: 1, ids: [MaterialId.Water], shade: [0], auxiliary: [127], objectMembership: [] },
+  })), /water/i);
+  assert.throws(() => deserializeWorldState(createValidWorldDto({
+    grid: { width: 1, height: 1, ids: [MaterialId.Flower], shade: [0], auxiliary: [FLOWER_PALETTE.length], objectMembership: [] },
+  })), /flower/i);
+  assert.throws(() => deserializeWorldState(createValidWorldDto({
+    grid: { width: 1, height: 1, ids: [MaterialId.Stone], shade: [0], auxiliary: [1], objectMembership: [] },
+  })), /auxiliary/i);
+});
+
+test("serialization DTO mutations do not mutate world state", () => {
+  const world = createDefaultWorldState("room_mutation");
+  const playerId = allocatePlayerId(world);
+  world.players[playerId] = { id: playerId, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "material", materialId: MaterialId.Stone, count: 2 }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 };
+  const objectId = allocateObjectId(world);
+  world.fallingObjects[objectId] = { id: objectId, materialId: MaterialId.Stone, x: 1, y: 2.5, restY: 4, vy: 0.5, offsets: [[0, 0]] };
+  const dto = serializeWorldState(world);
+  dto.players[playerId].inventory.flowers += 1;
+  dto.players[playerId].hotbar[0] = { kind: "empty" };
+  dto.fallingObjects[objectId].offsets[0][0] += 1;
+  dto.fallingObjects[objectId].y += 1;
+  dto.grid.auxiliary[0] = 1;
+  assert.equal(world.players[playerId].inventory.flowers, 0);
+  assert.equal(world.players[playerId].hotbar[0].kind, "material");
+  assert.equal(world.fallingObjects[objectId].offsets[0][0], 0);
+  assert.equal(world.fallingObjects[objectId].y, 2.5);
+  assert.equal(world.grid.auxiliary[0], 0);
+});
+
+test("restored allocation skips IDs already in players, falling objects, and membership", () => {
+  const dto = createValidWorldDto({
+    players: {
+      player_1: { id: "player_1", x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 },
+    },
+    fallingObjects: {
+      object_1: { id: "object_1", materialId: MaterialId.Stone, x: 0, y: 0, restY: 0, vy: 0, offsets: [[0, 0]] },
+    },
+    grid: {
+      width: 4,
+      height: 4,
+      ids: [MaterialId.Stone, ...Array(15).fill(MaterialId.Empty)],
+      shade: Array(16).fill(0),
+      auxiliary: Array(16).fill(0),
+      objectMembership: [{ x: 0, y: 0, objectId: "object_2" }],
+    },
+    nextPlayerOrdinal: 1,
+    nextObjectOrdinal: 1,
+  });
+  const restored = deserializeWorldState(dto);
+  assert.equal(allocatePlayerId(restored), "player_2");
+  assert.equal(allocateObjectId(restored), "object_3");
 });
 
 test("rejects malformed schema and dangling object identities", () => {

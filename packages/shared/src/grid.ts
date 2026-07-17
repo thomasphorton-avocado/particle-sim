@@ -1,6 +1,46 @@
 import { type ObjectId } from "./ids.js";
 import { FLOWER_PALETTE, MaterialId } from "./materials.js";
 
+function assertFiniteNumber(value: number, label: string): number {
+  if (!Number.isFinite(value)) {
+    throw new RangeError(`${label} must be finite`);
+  }
+  return value;
+}
+
+function assertInteger(value: number, label: string): number {
+  const finite = assertFiniteNumber(value, label);
+  if (!Number.isInteger(finite)) {
+    throw new RangeError(`${label} must be an integer`);
+  }
+  return finite;
+}
+
+export function assertAuxiliaryValueForMaterial(materialId: MaterialId, value: number): number {
+  const integer = assertInteger(value, "auxiliary value");
+  if (integer < -128 || integer > 127) throw new RangeError("auxiliary value must fit in an Int8");
+  switch (materialId) {
+    case MaterialId.Water:
+      if (integer < -4 || integer > 4) throw new RangeError("water level must be between -4 and 4");
+      return integer;
+    case MaterialId.Faucet:
+      if (integer < 0 || integer > 2) throw new RangeError("faucet flow must be between 0 and 2");
+      return integer;
+    case MaterialId.Flower:
+      if (integer < 0 || integer >= FLOWER_PALETTE.length) throw new RangeError("flower palette index is out of range");
+      return integer;
+    case MaterialId.Dirt:
+      if (integer < 0 || integer > 12) throw new RangeError("dirt moisture must be between 0 and 12");
+      return integer;
+    case MaterialId.Stem:
+      if (integer < 0 || integer > 10) throw new RangeError("stem budget must be between 0 and 10");
+      return integer;
+    default:
+      if (integer !== 0) throw new RangeError("auxiliary value must be 0 for this material");
+      return integer;
+  }
+}
+
 export interface GridSetOptions {
   shade?: number;
   objectId?: ObjectId | null;
@@ -42,21 +82,6 @@ export class Grid {
       throw new RangeError(`grid coordinate (${x}, ${y}) is out of bounds`);
     }
     return this.index(x, y);
-  }
-
-  private assertFiniteNumber(value: number, label: string): number {
-    if (!Number.isFinite(value)) {
-      throw new RangeError(`${label} must be finite`);
-    }
-    return value;
-  }
-
-  private assertInteger(value: number, label: string): number {
-    const finite = this.assertFiniteNumber(value, label);
-    if (!Number.isInteger(finite)) {
-      throw new RangeError(`${label} must be an integer`);
-    }
-    return finite;
   }
 
   get(x: number, y: number): MaterialId {
@@ -136,7 +161,7 @@ export class Grid {
 
   setAuxiliaryValue(x: number, y: number, value: number): void {
     const i = this.assertInBounds(x, y);
-    this.auxiliary[i] = this.assertInteger(value, "auxiliary value");
+    this.auxiliary[i] = assertAuxiliaryValueForMaterial(this.get(x, y), value);
   }
 
   getVx(x: number, y: number): number {
@@ -185,7 +210,7 @@ export class Grid {
 
   setWaterLevel(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Water) throw new TypeError("water level requires a water cell");
-    const integer = this.assertInteger(value, "water level");
+    const integer = assertInteger(value, "water level");
     if (integer < -4 || integer > 4) throw new RangeError("water level must be between -4 and 4");
     this.setAuxiliaryValue(x, y, integer);
   }
@@ -197,7 +222,7 @@ export class Grid {
 
   setFaucetFlow(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Faucet) throw new TypeError("faucet flow requires a faucet cell");
-    const integer = this.assertInteger(value, "faucet flow");
+    const integer = assertInteger(value, "faucet flow");
     if (integer < 0 || integer > 2) throw new RangeError("faucet flow must be between 0 and 2");
     this.setAuxiliaryValue(x, y, integer);
   }
@@ -209,7 +234,7 @@ export class Grid {
 
   setFlowerPaletteIndex(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Flower) throw new TypeError("flower palette requires a flower cell");
-    const integer = this.assertInteger(value, "flower palette index");
+    const integer = assertInteger(value, "flower palette index");
     if (integer < 0 || integer >= FLOWER_PALETTE.length) throw new RangeError("flower palette index is out of range");
     this.setAuxiliaryValue(x, y, integer);
   }
@@ -221,7 +246,7 @@ export class Grid {
 
   setDirtMoisture(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Dirt) throw new TypeError("dirt moisture requires a dirt cell");
-    const integer = this.assertInteger(value, "dirt moisture");
+    const integer = assertInteger(value, "dirt moisture");
     if (integer < 0 || integer > 12) throw new RangeError("dirt moisture must be between 0 and 12");
     this.setAuxiliaryValue(x, y, integer);
   }
@@ -233,7 +258,7 @@ export class Grid {
 
   setStemBudget(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Stem) throw new TypeError("stem budget requires a stem cell");
-    const integer = this.assertInteger(value, "stem budget");
+    const integer = assertInteger(value, "stem budget");
     if (integer < 0 || integer > 10) throw new RangeError("stem budget must be between 0 and 10");
     this.setAuxiliaryValue(x, y, integer);
   }

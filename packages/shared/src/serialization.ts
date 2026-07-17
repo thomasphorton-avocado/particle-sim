@@ -1,4 +1,4 @@
-import { Grid } from "./grid.js";
+import { Grid, assertAuxiliaryValueForMaterial } from "./grid.js";
 import { cloneHotbar, cloneInventory, createDefaultInventory, type HotbarItem, type InventoryCounts } from "./inventory.js";
 import { parseObjectId, parsePlayerId, parseRoomId } from "./ids.js";
 import { MATERIALS, MaterialId } from "./materials.js";
@@ -130,6 +130,11 @@ function assertMaterialId(value: unknown, label: string): MaterialId {
   return materialId;
 }
 
+function assertAuxiliaryValueForMaterialId(materialId: MaterialId, value: unknown, label: string): number {
+  const auxValue = assertInteger(value, label, -128, 127);
+  return assertAuxiliaryValueForMaterial(materialId, auxValue);
+}
+
 function validateHotbar(value: unknown): HotbarItem[] {
   const arr = assertArray(value, "hotbar");
   if (arr.length !== 10) {
@@ -196,6 +201,9 @@ function validateFallingObjectState(value: unknown): FallingObjectState {
   const obj = assertObject(value, "falling object");
   const id = parseObjectId(requireField(obj, "id", "fallingObject.id"));
   const materialId = assertMaterialId(requireField(obj, "materialId", "fallingObject.materialId"), "fallingObject.materialId");
+  if (MATERIALS[materialId].placement.kind !== "object") {
+    throw new TypeError("fallingObject.materialId must reference an object material");
+  }
   const offsets = assertArray(requireField(obj, "offsets", "fallingObject.offsets"), "fallingObject.offsets").map((entry) => {
     const pair = assertArray(entry, "fallingObject.offsets[]");
     if (pair.length !== 2) throw new TypeError("fallingObject.offsets entries must be length 2");
@@ -205,7 +213,7 @@ function validateFallingObjectState(value: unknown): FallingObjectState {
     id,
     materialId,
     assertInteger(requireField(obj, "x", "fallingObject.x"), "fallingObject.x"),
-    assertInteger(requireField(obj, "y", "fallingObject.y"), "fallingObject.y"),
+    assertFiniteNumber(requireField(obj, "y", "fallingObject.y"), "fallingObject.y"),
     assertInteger(requireField(obj, "restY", "fallingObject.restY"), "fallingObject.restY"),
     assertFiniteNumber(requireField(obj, "vy", "fallingObject.vy"), "fallingObject.vy"),
     offsets,
@@ -256,7 +264,7 @@ function validateGrid(value: unknown): Grid {
     const auxValue = assertInteger(auxiliary[i], `grid.auxiliary[${i}]`, -128, 127);
     grid.ids[i] = materialId;
     grid.shade[i] = shadeValue;
-    grid.auxiliary[i] = auxValue;
+    grid.auxiliary[i] = assertAuxiliaryValueForMaterialId(materialId, auxValue, `grid.auxiliary[${i}]`);
     grid.objectIds[i] = null;
   }
   const seenCoordinates = new Set<string>();
@@ -365,7 +373,6 @@ export function serializeWeatherState(weather: WeatherState): WeatherStateDto {
 }
 
 function validateObjectIdentityInvariants(world: WorldState): void {
-  const placedIds = new Set<string>();
   const fallingIds = new Set<string>();
   for (const objectState of Object.values(world.fallingObjects)) {
     if (fallingIds.has(objectState.id)) {
@@ -379,10 +386,6 @@ function validateObjectIdentityInvariants(world: WorldState): void {
     if (fallingIds.has(objectId)) {
       throw new TypeError("falling and placed object IDs must be disjoint");
     }
-    if (placedIds.has(objectId)) {
-      throw new TypeError("placed object IDs must be unique");
-    }
-    placedIds.add(objectId);
   }
 }
 

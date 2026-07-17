@@ -343,10 +343,7 @@ export function updateCharacter(player: PlayerState, runtime: CharacterRuntime, 
   // interrupt a held swing. updateCharacter fully owns swingStart (draw only reads it).
   const swinging = runtime.swingStart !== null;
   const swingDone = swinging && performance.now() - runtime.swingStart! >= SWING_DURATION;
-  if (player.swimming) {
-    runtime.swingStart = null;
-    runtime.swingHeld = false;
-  } else if (runtime.swingHeld && state.toolMode === "play" && hasPickaxeEquipped()) {
+  if (runtime.swingHeld && state.toolMode === "play" && hasPickaxeEquipped()) {
     if (!swinging || swingDone) {
       runtime.swingStart = performance.now();
       runtime.swingMinedProgress = 0;
@@ -357,7 +354,7 @@ export function updateCharacter(player: PlayerState, runtime: CharacterRuntime, 
 }
 
 /** Mine a single grid cell, handling object flood-fill, inventory and hotbar. */
-function mineCellAt(grid: Grid, x: number, y: number, mined: Set<number>, player: PlayerState): void {
+export function mineCellAt(grid: Grid, x: number, y: number, mined: Set<number>, player: PlayerState): void {
   if (!grid.inBounds(x, y)) return;
   const key = y * grid.width + x;
   if (mined.has(key)) return;

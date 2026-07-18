@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { FLOWER_PALETTE, Grid, MaterialId, allocateObjectId, allocatePlayerId, createDefaultWorldState, createObjectId, createPlayerId, deserializeWorldState, serializeWorldState } from "@particle-sim/shared";
+import { FLOWER_PALETTE, Grid, MaterialId, allocateObjectId, allocatePlayerId, createDefaultWorldState, createObjectId, createPlayerId, createStarterWorld, deserializeWorldState, serializeWorldState } from "@particle-sim/shared";
 
 function createValidWorldDto(overrides = {}) {
   return {
@@ -201,6 +201,68 @@ test("deserialization rejects malformed v2 random payloads", () => {
   ]) {
     assert.throws(() => deserializeWorldState(createValidWorldDto({ random })), /random/i);
   }
+});
+
+test("schema-v1 migration defaults the RNG state and serializes as v2", () => {
+  const dto = {
+    schemaVersion: 1,
+    roomId: "room_v1_migration",
+    grid: { width: 1, height: 1, ids: [0], shade: [0], auxiliary: [0], objectMembership: [] },
+    players: {},
+    fallingObjects: {},
+    paused: false,
+    time: { dayNightCycle: 0.25 },
+    weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 },
+    nextPlayerOrdinal: 1,
+    nextObjectOrdinal: 1,
+  };
+  const restored = deserializeWorldState(dto);
+  assert.deepEqual(restored.random, { algorithm: "mulberry32-v1", seed: 0, state: 0 });
+  assert.equal(serializeWorldState(restored).schemaVersion, 2);
+  assert.deepEqual(serializeWorldState(restored).random, { algorithm: "mulberry32-v1", seed: 0, state: 0 });
+});
+
+test("starter worlds expose a fixed topology fixture while differing only by shades and RNG metadata", () => {
+  const first = createStarterWorld({ roomId: "starter_fixture", seed: 12345 });
+  const second = createStarterWorld({ roomId: "starter_fixture", seed: 12346 });
+
+  const firstDto = serializeWorldState(first);
+  const secondDto = serializeWorldState(second);
+
+  assert.equal(first.grid.width, 320);
+  assert.equal(first.grid.height, 200);
+  assert.equal(first.grid.get(18, 2), MaterialId.Faucet);
+  assert.equal(first.grid.get(95, 82), MaterialId.Stone);
+  assert.equal(first.grid.get(200, 105), MaterialId.Wood);
+  assert.equal(first.grid.get(80, 171), MaterialId.Drain);
+  assert.equal(first.grid.get(20, 185), MaterialId.Sand);
+  assert.equal(first.grid.get(265, 110), MaterialId.Stone);
+  assert.equal(first.grid.get(18, 2), first.grid.get(18, 2));
+  assert.equal(first.grid.getFaucetFlow(18, 2), 2);
+  assert.equal(first.grid.getFaucetFlow(27, 7), 2);
+  assert.equal(first.grid.get(80, 171), MaterialId.Drain);
+  assert.equal(first.grid.get(0, 0), MaterialId.Empty);
+
+  assert.deepEqual(firstDto.grid.ids, secondDto.grid.ids);
+  assert.deepEqual(firstDto.grid.auxiliary, secondDto.grid.auxiliary);
+  assert.deepEqual(firstDto.grid.objectMembership, secondDto.grid.objectMembership);
+  assert.deepEqual(first.players, second.players);
+  assert.deepEqual(first.fallingObjects, second.fallingObjects);
+  assert.notDeepEqual(firstDto.grid.shade, secondDto.grid.shade);
+  assert.notEqual(firstDto.random.seed, secondDto.random.seed);
+  assert.notEqual(firstDto.random.state, secondDto.random.state);
+
+  const objectIds = [first.grid.getObjectId(95, 82), first.grid.getObjectId(200, 105), first.grid.getObjectId(18, 2), first.grid.getObjectId(80, 171)];
+  assert.deepEqual(objectIds, ["object_1", "object_2", "object_3", "object_4"]);
+
+  const dirtCount = first.grid.ids.filter((id) => id === MaterialId.Dirt).length;
+  const stoneCount = first.grid.ids.filter((id) => id === MaterialId.Stone).length;
+  const woodCount = first.grid.ids.filter((id) => id === MaterialId.Wood).length;
+  const sandCount = first.grid.ids.filter((id) => id === MaterialId.Sand).length;
+  assert.equal(dirtCount, 12328);
+  assert.equal(stoneCount, 2656);
+  assert.equal(woodCount, 288);
+  assert.equal(sandCount, 600);
 });
 
 test("restored allocation skips IDs already in players, falling objects, and membership", () => {

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { Grid, createDefaultFallingObjectState, createDefaultWorldState, createGameplayRandomState, createObjectId, deserializeWorldState, harvestFlowerCluster, MaterialId, placeWorldCell, serializeWorldState } from "@particle-sim/shared";
+import { Grid, createDefaultFallingObjectState, createDefaultWorldState, createGameplayRandomState, createObjectId, createStarterWorld, deserializeWorldState, harvestFlowerCluster, MaterialId, placeWorldCell, serializeWorldState } from "@particle-sim/shared";
 import { updateFallingObjects } from "./falling";
 import { mineCellAt } from "./character";
-import { placeHotbarMaterialAt } from "./input";
+import { handleHarvestInputAt, placeHotbarMaterialAt } from "./input";
 import { step } from "./simulation";
 import { getLocalPlayer, state } from "./state";
 
@@ -41,6 +41,74 @@ describe("game logic", () => {
 
     expect(serializeWorldState(original)).toEqual(serializeWorldState(restored));
     expect(original.random).toEqual(restored.random);
+  });
+
+  it("continues an interrupted starter-world simulation restore with identical final bytes and random state", () => {
+    const seed = 12345;
+    let interrupted = createStarterWorld({ roomId: "interrupted_restore", seed });
+    const uninterrupted = createStarterWorld({ roomId: "interrupted_restore", seed });
+
+    for (let i = 0; i < 8; i += 1) {
+      step(interrupted);
+      step(uninterrupted);
+    }
+
+    interrupted = deserializeWorldState(serializeWorldState(interrupted));
+
+    for (let i = 0; i < 8; i += 1) {
+      step(interrupted);
+      step(uninterrupted);
+    }
+
+    const interruptedBytes = new TextEncoder().encode(JSON.stringify(serializeWorldState(interrupted)));
+    const uninterruptedBytes = new TextEncoder().encode(JSON.stringify(serializeWorldState(uninterrupted)));
+
+    expect(Array.from(interruptedBytes)).toEqual(Array.from(uninterruptedBytes));
+    expect(interrupted.random).toEqual(uninterrupted.random);
+  });
+
+  it("continues harvest RNG after restoring a world through the production input helper", () => {
+    const worldA = createDefaultWorldState("harvest_rng_restore_a");
+    worldA.grid = new Grid(8, 8);
+    worldA.random = createGameplayRandomState(4242);
+
+    const worldB = createDefaultWorldState("harvest_rng_restore_b");
+    worldB.grid = new Grid(8, 8);
+    worldB.random = createGameplayRandomState(4242);
+
+    const setupWorld = (world: typeof worldA) => {
+      world.grid.set(2, 2, MaterialId.Flower);
+      world.grid.set(2, 3, MaterialId.Stem);
+      world.grid.set(3, 2, MaterialId.Flower);
+
+      state.world = world;
+      const player = getLocalPlayer();
+      player.inventory = { flowers: 0 };
+      player.hotbar = [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })];
+      player.activeHotbarSlot = 0;
+    };
+
+    setupWorld(worldA);
+    setupWorld(worldB);
+
+    const restoredWorldA = deserializeWorldState(serializeWorldState(worldA));
+
+    state.world = restoredWorldA;
+    handleHarvestInputAt(restoredWorldA, 2, 2);
+
+    state.world = worldB;
+    handleHarvestInputAt(worldB, 2, 2);
+
+    const restoredPlayer = restoredWorldA.players[state.localPlayerId];
+    const originalPlayer = worldB.players[state.localPlayerId];
+
+    expect(restoredPlayer.inventory).toEqual(originalPlayer.inventory);
+    expect(restoredPlayer.hotbar).toEqual(originalPlayer.hotbar);
+    expect(restoredWorldA.grid.ids).toEqual(worldB.grid.ids);
+    expect(restoredWorldA.random).toEqual(worldB.random);
+    expect(restoredWorldA.grid.get(2, 2)).toBe(MaterialId.Empty);
+    expect(restoredWorldA.grid.get(2, 3)).toBe(MaterialId.Empty);
+    expect(restoredWorldA.grid.get(3, 2)).toBe(MaterialId.Empty);
   });
 
   it("harvests a connected flower cluster and clears the cells", () => {

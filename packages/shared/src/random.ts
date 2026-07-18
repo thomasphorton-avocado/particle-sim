@@ -53,6 +53,25 @@ function assertRandomStateShape(random: unknown): GameplayRandomState {
   };
 }
 
+function hashVisualValue(seed: number, x: number, y: number, materialId: number, salt: number): number {
+  const baseSeed = assertUint32(seed, "seed");
+  const xValue = assertInteger(x, "x");
+  const yValue = assertInteger(y, "y");
+  const materialValue = assertInteger(materialId, "materialId");
+  const saltValue = assertInteger(salt, "salt");
+  let value = (baseSeed + 0x9e3779b9) >>> 0;
+  value = (value ^ (xValue + 0x85ebca6b)) >>> 0;
+  value = (value ^ (yValue + 0xc2b2ae3d)) >>> 0;
+  value = (value ^ (materialValue + 0x27d4eb2d)) >>> 0;
+  value = (value ^ (saltValue + 0x165667b1)) >>> 0;
+  value = (value ^ (value >>> 16)) >>> 0;
+  value = Math.imul(value, 0x85ebca6b);
+  value = (value ^ (value >>> 13)) >>> 0;
+  value = Math.imul(value, 0xc2b2ae3d);
+  value = (value ^ (value >>> 16)) >>> 0;
+  return value >>> 0;
+}
+
 export function createGameplayRandomState(seed: number): GameplayRandomState {
   return {
     algorithm: "mulberry32-v1",
@@ -90,20 +109,15 @@ export function nextBool(random: GameplayRandomState, probability: number = 0.5)
 }
 
 export function hashVisualShade(seed: number, x: number, y: number, materialId: number, salt: number = 0): number {
-  const baseSeed = assertUint32(seed, "seed");
-  const xValue = assertInteger(x, "x");
-  const yValue = assertInteger(y, "y");
-  const materialValue = assertInteger(materialId, "materialId");
-  const saltValue = assertInteger(salt, "salt");
-  let value = (baseSeed + 0x9e3779b9) >>> 0;
-  value = (value ^ (xValue + 0x85ebca6b)) >>> 0;
-  value = (value ^ (yValue + 0xc2b2ae3d)) >>> 0;
-  value = (value ^ (materialValue + 0x27d4eb2d)) >>> 0;
-  value = (value ^ (saltValue + 0x165667b1)) >>> 0;
-  value = (value ^ (value >>> 16)) >>> 0;
-  value = Math.imul(value, 0x85ebca6b);
-  value = (value ^ (value >>> 13)) >>> 0;
-  value = Math.imul(value, 0xc2b2ae3d);
-  value = (value ^ (value >>> 16)) >>> 0;
-  return ((value >>> 0) % 21) - 10;
+  return (hashVisualValue(seed, x, y, materialId, salt) % 21) - 10;
+}
+
+export function hashVisualShadeInRange(seed: number, x: number, y: number, materialId: number, salt: number, min: number, max: number): number {
+  const lower = assertInteger(min, "min");
+  const upper = assertInteger(max, "max");
+  if (lower > upper) {
+    throw new RangeError("min must be <= max");
+  }
+  const span = upper - lower + 1;
+  return lower + (hashVisualValue(seed, x, y, materialId, salt) % span);
 }

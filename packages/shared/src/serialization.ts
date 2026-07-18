@@ -124,6 +124,10 @@ function assertArray(value: unknown, label: string): unknown[] {
   return value;
 }
 
+function compareStringCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function requireField<T>(obj: Record<string, unknown>, key: string, label: string): T {
   if (!Object.prototype.hasOwnProperty.call(obj, key)) {
     throw new TypeError(`${label} is required`);
@@ -301,8 +305,8 @@ function validateGrid(value: unknown): Grid {
 }
 
 function cloneInventoryCounts(inventory: InventoryCounts): InventoryCounts {
-  const normalized: InventoryCounts = createDefaultInventory();
-  for (const key of Object.keys(inventory).sort()) {
+  const normalized = {} as InventoryCounts;
+  for (const key of Object.keys(inventory).sort(compareStringCodeUnits)) {
     normalized[key] = inventory[key];
   }
   return normalized;
@@ -352,8 +356,8 @@ export function serializeWorldState(world: WorldState): WorldStateDto {
       objectMembership,
     },
     random: cloneGameplayRandomState(world.random),
-    players: Object.fromEntries(Object.entries(world.players).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => [key, serializePlayerState(value)])),
-    fallingObjects: Object.fromEntries(Object.entries(world.fallingObjects).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => [key, serializeFallingObjectState(value)])),
+    players: Object.fromEntries(Object.entries(world.players).sort(([left], [right]) => compareStringCodeUnits(left, right)).map(([key, value]) => [key, serializePlayerState(value)])),
+    fallingObjects: Object.fromEntries(Object.entries(world.fallingObjects).sort(([left], [right]) => compareStringCodeUnits(left, right)).map(([key, value]) => [key, serializeFallingObjectState(value)])),
     paused: world.paused,
     time: { dayNightCycle: world.time.dayNightCycle },
     weather: serializeWeatherState(world.weather),

@@ -168,11 +168,39 @@ test("serialization DTO mutations do not mutate world state", () => {
   dto.fallingObjects[objectId].offsets[0][0] += 1;
   dto.fallingObjects[objectId].y += 1;
   dto.grid.auxiliary[0] = 1;
+  dto.random.state += 1;
   assert.equal(world.players[playerId].inventory.flowers, 0);
   assert.equal(world.players[playerId].hotbar[0].kind, "material");
   assert.equal(world.fallingObjects[objectId].offsets[0][0], 0);
   assert.equal(world.fallingObjects[objectId].y, 2.5);
   assert.equal(world.grid.auxiliary[0], 0);
+  assert.equal(world.random.state, 0);
+});
+
+test("serialization uses deterministic code-unit ordering for canonical JSON", () => {
+  const world = createDefaultWorldState("room_canonical");
+  const playerIds = ["player_i", "player_I", "player_1", "player_a", "player_A"];
+  for (const id of playerIds) {
+    world.players[id] = { id, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0, zeta: 1, Alpha: 2, beta: 3 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 };
+  }
+  const objectId = allocateObjectId(world);
+  world.fallingObjects[objectId] = { id: objectId, materialId: MaterialId.Stone, x: 0, y: 0, restY: 0, vy: 0, offsets: [[0, 0]] };
+  const dto = serializeWorldState(world);
+  const expectedPlayerOrder = [...playerIds].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  assert.deepEqual(Object.keys(dto.players), expectedPlayerOrder);
+  assert.deepEqual(Object.keys(dto.players.player_I.inventory), ["Alpha", "beta", "flowers", "zeta"]);
+  assert.deepEqual(Object.keys(dto.fallingObjects), [objectId]);
+});
+
+test("deserialization rejects malformed v2 random payloads", () => {
+  for (const random of [
+    { algorithm: "mulberry32-v1", seed: -1, state: 0 },
+    { algorithm: "mulberry32-v1", seed: 0, state: 0x1_0000_0000 },
+    { algorithm: "v2", seed: 0, state: 0 },
+    { algorithm: "mulberry32-v1", seed: 0 },
+  ]) {
+    assert.throws(() => deserializeWorldState(createValidWorldDto({ random })), /random/i);
+  }
 });
 
 test("restored allocation skips IDs already in players, falling objects, and membership", () => {

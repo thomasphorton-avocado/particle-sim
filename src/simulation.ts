@@ -1,7 +1,15 @@
-import { FLOWER_PALETTE, MATERIALS, MaterialId, MaterialPhase, type GameplayRandomState, type Grid, type WorldState, hashVisualShade, nextBool, nextInt, nextFloat } from "@particle-sim/shared";
+import { FLOWER_PALETTE, MATERIALS, MaterialId, MaterialPhase, type GameplayRandomState, type Grid, type WorldCellPlacementOptions, type WorldState, hashVisualShadeInRange, nextBool, nextFloat, nextInt, placeWorldCell } from "@particle-sim/shared";
 
 function randDir(random: GameplayRandomState): 1 | -1 {
   return nextBool(random, 0.5) ? -1 : 1;
+}
+
+function setWorldCell(world: WorldState, grid: Grid, x: number, y: number, materialId: MaterialId, options?: WorldCellPlacementOptions): void {
+  if (materialId === MaterialId.Empty) {
+    grid.set(x, y, MaterialId.Empty);
+    return;
+  }
+  placeWorldCell(world, x, y, materialId, options);
 }
 
 /** Runs one step of the cellular automaton over the whole grid. */
@@ -23,27 +31,27 @@ export function step(world: WorldState): void {
       switch (material.phase) {
         case MaterialPhase.Powder:
           if (id === MaterialId.Seed) {
-            updateSeed(random, grid, x, y, material.density);
+            updateSeed(world, random, grid, x, y, material.density);
           } else {
-            updatePowder(random, grid, x, y, material.density);
+            updatePowder(world, random, grid, x, y, material.density);
           }
           break;
         case MaterialPhase.Liquid:
-          updateLiquid(random, grid, x, y, material.density, material.flowRate ?? 3);
+          updateLiquid(world, random, grid, x, y, material.density, material.flowRate ?? 3);
           break;
         case MaterialPhase.Solid:
           if (id === MaterialId.Stem) {
-            updateStemGrowth(random, grid, x, y);
+            updateStemGrowth(world, random, grid, x, y);
           } else if (id === MaterialId.Faucet) {
-            updateFaucet(random, grid, x, y);
+            updateFaucet(world, random, grid, x, y);
           } else if (id === MaterialId.Sprinkler) {
-            updateSprinkler(random, grid, x, y);
+            updateSprinkler(world, random, grid, x, y);
           } else if (id === MaterialId.Dirt) {
-            updateDirt(random, grid, x, y);
+            updateDirt(world, random, grid, x, y);
           } else if (id === MaterialId.Grass) {
-            updateGrass(random, grid, x, y);
+            updateGrass(world, random, grid, x, y);
           } else if (id === MaterialId.Flower) {
-            updateFlower(random, grid, x, y);
+            updateFlower(world, random, grid, x, y);
           }
           break;
         // Gas (empty) cells never act on their own.
@@ -113,7 +121,7 @@ function tryFallPowder(random: GameplayRandomState, grid: Grid, x: number, y: nu
   return false;
 }
 
-function updatePowder(random: GameplayRandomState, grid: Grid, x: number, y: number, density: number): void {
+function updatePowder(_world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number, density: number): void {
   tryFallPowder(random, grid, x, y, density);
 }
 
@@ -141,7 +149,7 @@ const SEED_GERMINATION_NEIGHBORS: [number, number][] = [
 const SEED_DESPAWN_CHANCE = 0.003;
 
 /** Falls like sand; once settled, sprouts in wet dirt or eventually despawns. */
-function updateSeed(random: GameplayRandomState, grid: Grid, x: number, y: number, density: number): void {
+function updateSeed(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number, density: number): void {
   if (tryFallPowder(random, grid, x, y, density)) return;
 
   // Seeds can push through grass — replace the grass cell below
@@ -160,7 +168,7 @@ function updateSeed(random: GameplayRandomState, grid: Grid, x: number, y: numbe
     const ny = y + dy;
     const nid = grid.get(nx, ny);
     if (nid === MaterialId.Dirt && grid.getDirtMoisture(nx, ny) > 0) {
-      grid.set(x, y, MaterialId.Stem);
+      setWorldCell(world, grid, x, y, MaterialId.Stem);
       grid.setStemBudget(x, y, randomStemBudget(random));
       grid.markUpdated(x, y);
       return;
@@ -171,7 +179,7 @@ function updateSeed(random: GameplayRandomState, grid: Grid, x: number, y: numbe
         const nnx = nx + ddx;
         const nny = ny + ddy;
         if (grid.get(nnx, nny) === MaterialId.Dirt && grid.getDirtMoisture(nnx, nny) > 0) {
-          grid.set(x, y, MaterialId.Stem);
+          setWorldCell(world, grid, x, y, MaterialId.Stem);
           grid.setStemBudget(x, y, randomStemBudget(random));
           grid.markUpdated(x, y);
           return;
@@ -242,7 +250,7 @@ function drainNearbyDirt(grid: Grid, x: number, y: number): boolean {
 }
 
 /** Grows a stem upward one segment at a time until its budget runs out, then blooms. */
-function updateStemGrowth(random: GameplayRandomState, grid: Grid, x: number, y: number): void {
+function updateStemGrowth(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
   const budget = grid.getStemBudget(x, y);
 
   // Non-growing stem: no action needed
@@ -259,29 +267,29 @@ function updateStemGrowth(random: GameplayRandomState, grid: Grid, x: number, y:
   const canGrowInto = above === MaterialId.Empty || above === MaterialId.Water;
 
   if (budget <= 1 || !canGrowInto) {
-    bloom(random, grid, x, y);
+    bloom(world, random, grid, x, y);
     return;
   }
 
-  grid.set(x, y - 1, MaterialId.Stem);
+  setWorldCell(world, grid, x, y - 1, MaterialId.Stem);
   grid.setStemBudget(x, y - 1, budget - 1);
   grid.markUpdated(x, y - 1);
   grid.setStemBudget(x, y, 0);
 }
 
 /** Turns a stem tip into a small flower head, in a random color from FLOWER_PALETTE. */
-function bloom(random: GameplayRandomState, grid: Grid, x: number, y: number): void {
+function bloom(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
   const colorVariant = nextInt(random, FLOWER_PALETTE.length);
 
   const place = (px: number, py: number, shade?: number) => {
     if (grid.get(px, py) === MaterialId.Empty) {
-      grid.set(px, py, MaterialId.Flower, { shade });
+      setWorldCell(world, grid, px, py, MaterialId.Flower, { shade });
       grid.setFlowerPalette(px, py, colorVariant);
     }
   };
 
   // Center — dark pistil
-  grid.set(x, y, MaterialId.Flower, { shade: -40 });
+  setWorldCell(world, grid, x, y, MaterialId.Flower, { shade: -40 });
   grid.setFlowerPalette(x, y, colorVariant);
 
   // Inner ring — standard brightness
@@ -290,7 +298,7 @@ function bloom(random: GameplayRandomState, grid: Grid, x: number, y: number): v
     [-1, -1], [1, -1],
   ];
   for (const [dx, dy] of inner) {
-    place(x + dx, y + dy, hashVisualShade(random.seed, x + dx, y + dy, MaterialId.Flower, colorVariant + 1));
+    place(x + dx, y + dy, hashVisualShadeInRange(world.random.seed, x + dx, y + dy, MaterialId.Flower, colorVariant + 1, -5, 4));
   }
 
   // Outer petals — lighter tips for a softer edge
@@ -301,12 +309,12 @@ function bloom(random: GameplayRandomState, grid: Grid, x: number, y: number): v
     [-1, 1], [1, 1],
   ];
   for (const [dx, dy] of outer) {
-    place(x + dx, y + dy, hashVisualShade(random.seed, x + dx, y + dy, MaterialId.Flower, colorVariant + 2));
+    place(x + dx, y + dy, hashVisualShadeInRange(world.random.seed, x + dx, y + dy, MaterialId.Flower, colorVariant + 2, 15, 24));
   }
 }
 
 /** Flower cells are now permanent — no withering. */
-function updateFlower(_random: GameplayRandomState, _grid: Grid, _x: number, _y: number): void {
+function updateFlower(_world: WorldState, _random: GameplayRandomState, _grid: Grid, _x: number, _y: number): void {
   // no-op: flowers no longer wilt
 }
 
@@ -314,7 +322,7 @@ function updateFlower(_random: GameplayRandomState, _grid: Grid, _x: number, _y:
 const FAUCET_EMIT_CHANCES = [0, 0.15, 0.30];
 
 /** Emits water below this faucet cell if it's at the bottom edge of the faucet body. */
-function updateFaucet(random: GameplayRandomState, grid: Grid, x: number, y: number): void {
+function updateFaucet(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
   const flowState = grid.getFaucetFlow(x, y);
   if (flowState <= 0) return;
   // Only emit from cells whose neighbor below isn't also faucet (bottom edge)
@@ -322,7 +330,7 @@ function updateFaucet(random: GameplayRandomState, grid: Grid, x: number, y: num
   const chance = FAUCET_EMIT_CHANCES[flowState] ?? 0;
   if (!nextBool(random, chance)) return;
   if (grid.get(x, y + 1) === MaterialId.Empty) {
-    grid.set(x, y + 1, MaterialId.Water);
+    setWorldCell(world, grid, x, y + 1, MaterialId.Water);
     grid.markUpdated(x, y + 1);
   }
 }
@@ -331,7 +339,7 @@ function updateFaucet(random: GameplayRandomState, grid: Grid, x: number, y: num
 const SPRINKLER_EMIT_CHANCE = 0.04;
 
 /** Emits water droplets upward in a parabolic arc from the top edge. */
-function updateSprinkler(random: GameplayRandomState, grid: Grid, x: number, y: number): void {
+function updateSprinkler(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
   // Only act from the top edge
   if (grid.get(x, y - 1) === MaterialId.Sprinkler) return;
   if (!nextBool(random, SPRINKLER_EMIT_CHANCE)) return;
@@ -351,7 +359,7 @@ function updateSprinkler(random: GameplayRandomState, grid: Grid, x: number, y: 
   const ty = y + dy;
 
   if (grid.inBounds(tx, ty) && grid.get(tx, ty) === MaterialId.Empty) {
-    grid.set(tx, ty, MaterialId.Water);
+    setWorldCell(world, grid, tx, ty, MaterialId.Water);
     // Give a small drift in spray direction so it flows outward
     grid.setWaterLiquidMemory(tx, ty, dir);
     grid.markUpdated(tx, ty);
@@ -368,7 +376,7 @@ const DIRT_DRY_CHANCE = 0.0025;
 const DIRT_DRY_CHANCE_GRASSED = 0.0008;
 
 /** Absorbs adjacent water and wicks moisture to neighboring dry dirt. */
-function updateDirt(random: GameplayRandomState, grid: Grid, x: number, y: number): void {
+function updateDirt(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
   const moisture = grid.getDirtMoisture(x, y);
 
   // Absorb adjacent water — dirt soaks it up and gains max moisture
@@ -439,10 +447,10 @@ function updateDirt(random: GameplayRandomState, grid: Grid, x: number, y: numbe
         (above === MaterialId.Water && grid.get(x, y - 2) !== MaterialId.Water)) {
       // Check this is actually the surface — dirt above means we're buried
       if (grid.get(x, y - 1) !== MaterialId.Dirt) {
-        grid.set(x, y, MaterialId.Grass);
+        setWorldCell(world, grid, x, y, MaterialId.Grass);
         grid.markUpdated(x, y);
         // Preserve moisture — grass inherits it
-        grid.setDirtMoisture(x, y, 0);
+        grid.setAuxiliaryValue(x, y, 0);
       }
     }
   }
@@ -452,7 +460,7 @@ function updateDirt(random: GameplayRandomState, grid: Grid, x: number, y: numbe
 const GRASS_SPROUT_CHANCE = 0.001;
 
 /** Grass can creep down into adjacent dirt (1-2 layers) and dies without moisture nearby. */
-function updateGrass(random: GameplayRandomState, grid: Grid, x: number, y: number): void {
+function updateGrass(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
   // Creep downward: convert dirt directly below into grass (max 2 deep)
   if (nextBool(random, 0.001)) {
     const below = grid.get(x, y + 1);
@@ -464,7 +472,7 @@ function updateGrass(random: GameplayRandomState, grid: Grid, x: number, y: numb
         else break;
       }
       if (depth < 2) {
-        grid.set(x, y + 1, MaterialId.Grass);
+        setWorldCell(world, grid, x, y + 1, MaterialId.Grass);
         grid.markUpdated(x, y + 1);
       }
     }
@@ -494,7 +502,7 @@ function updateGrass(random: GameplayRandomState, grid: Grid, x: number, y: numb
       }
     }
     if (!hasMoisture) {
-      grid.set(x, y, MaterialId.Dirt);
+      setWorldCell(world, grid, x, y, MaterialId.Dirt);
       grid.setDirtMoisture(x, y, 0);
       grid.markUpdated(x, y);
     }
@@ -535,6 +543,7 @@ function isExposed(grid: Grid, x: number, y: number): boolean {
 }
 
 function updateLiquid(
+  _world: WorldState,
   random: GameplayRandomState,
   grid: Grid,
   x: number,

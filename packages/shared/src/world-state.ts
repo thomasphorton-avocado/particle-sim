@@ -2,6 +2,7 @@ import { Grid } from "./grid.js";
 import { createDefaultHotbar, createDefaultInventory, type HotbarItem, type InventoryCounts } from "./inventory.js";
 import { createObjectId, createPlayerId, createRoomId, type ObjectId, type PlayerId, type RoomId } from "./ids.js";
 import { MaterialId } from "./materials.js";
+import { createGameplayRandomState, type GameplayRandomState } from "./random.js";
 
 export interface WeatherState {
   kind: "clear" | "rain" | "storm";
@@ -53,6 +54,7 @@ export interface WorldTimeState {
 export interface WorldState {
   roomId: RoomId;
   grid: Grid;
+  random: GameplayRandomState;
   players: Record<string, PlayerState>;
   fallingObjects: Record<string, FallingObjectState>;
   paused: boolean;
@@ -110,6 +112,7 @@ export function createDefaultWorldState(roomId: RoomId | string = "room_default"
   const world: WorldState = {
     roomId: resolvedRoomId,
     grid: grid ?? new Grid(80, 80),
+    random: createGameplayRandomState(0),
     players: {},
     fallingObjects: {},
     paused: false,

@@ -1,5 +1,7 @@
 import { type ObjectId } from "./ids.js";
 import { FLOWER_PALETTE, MaterialId } from "./materials.js";
+import { hashVisualShade } from "./random.js";
+import type { WorldState } from "./world-state.js";
 
 function assertFiniteNumber(value: number, label: string): number {
   if (!Number.isFinite(value)) {
@@ -44,6 +46,17 @@ export function assertAuxiliaryValueForMaterial(materialId: MaterialId, value: n
 export interface GridSetOptions {
   shade?: number;
   objectId?: ObjectId | null;
+}
+
+export interface WorldCellPlacementOptions extends GridSetOptions {
+  salt?: number;
+}
+
+export function placeWorldCell(world: WorldState, x: number, y: number, materialId: MaterialId, options?: WorldCellPlacementOptions): void {
+  const shade = materialId === MaterialId.Empty
+    ? 0
+    : (options?.shade ?? hashVisualShade(world.random.seed, x, y, materialId, options?.salt ?? 0));
+  world.grid.set(x, y, materialId, { ...options, shade });
 }
 
 /**
@@ -93,7 +106,7 @@ export class Grid {
     if (!this.inBounds(x, y)) return;
     const i = this.index(x, y);
     this.ids[i] = id;
-    this.shade[i] = options?.shade ?? (((Math.random() * 21) | 0) - 10);
+    this.shade[i] = options?.shade ?? 0;
     this.auxiliary[i] = 0;
     this.objectIds[i] = options?.objectId ?? null;
   }

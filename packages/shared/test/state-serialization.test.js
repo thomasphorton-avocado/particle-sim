@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { FLOWER_PALETTE, Grid, MaterialId, allocateObjectId, allocatePlayerId, createDefaultWorldState, createObjectId, createPlayerId, deserializeWorldState, serializeWorldState } from "@particle-sim/shared";
+import { FLOWER_PALETTE, Grid, MaterialId, allocateObjectId, allocatePlayerId, createDefaultWorldState, createObjectId, createPlayerId, createStarterWorld, deserializeWorldState, serializeWorldState } from "@particle-sim/shared";
 
 function createValidWorldDto(overrides = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     roomId: "room_test",
     grid: {
       width: 4,
@@ -19,6 +19,7 @@ function createValidWorldDto(overrides = {}) {
     paused: false,
     time: { dayNightCycle: 0.25 },
     weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 },
+    random: { algorithm: "mulberry32-v1", seed: 0, state: 0 },
     nextPlayerOrdinal: 1,
     nextObjectOrdinal: 1,
     ...overrides,
@@ -100,6 +101,7 @@ test("allocation after restore never reuses an ID", () => {
     paused: false,
     time: { dayNightCycle: 0.25 },
     weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 },
+    random: { algorithm: "mulberry32-v1", seed: 0, state: 0 },
     nextPlayerOrdinal: 3,
     nextObjectOrdinal: 3,
   };
@@ -166,11 +168,101 @@ test("serialization DTO mutations do not mutate world state", () => {
   dto.fallingObjects[objectId].offsets[0][0] += 1;
   dto.fallingObjects[objectId].y += 1;
   dto.grid.auxiliary[0] = 1;
+  dto.random.state += 1;
   assert.equal(world.players[playerId].inventory.flowers, 0);
   assert.equal(world.players[playerId].hotbar[0].kind, "material");
   assert.equal(world.fallingObjects[objectId].offsets[0][0], 0);
   assert.equal(world.fallingObjects[objectId].y, 2.5);
   assert.equal(world.grid.auxiliary[0], 0);
+  assert.equal(world.random.state, 0);
+});
+
+test("serialization uses deterministic code-unit ordering for canonical JSON", () => {
+  const world = createDefaultWorldState("room_canonical");
+  const playerIds = ["player_i", "player_I", "player_1", "player_a", "player_A"];
+  for (const id of playerIds) {
+    world.players[id] = { id, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0, zeta: 1, Alpha: 2, beta: 3 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 };
+  }
+  const objectId = allocateObjectId(world);
+  world.fallingObjects[objectId] = { id: objectId, materialId: MaterialId.Stone, x: 0, y: 0, restY: 0, vy: 0, offsets: [[0, 0]] };
+  const dto = serializeWorldState(world);
+  const expectedPlayerOrder = [...playerIds].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  assert.deepEqual(Object.keys(dto.players), expectedPlayerOrder);
+  assert.deepEqual(Object.keys(dto.players.player_I.inventory), ["Alpha", "beta", "flowers", "zeta"]);
+  assert.deepEqual(Object.keys(dto.fallingObjects), [objectId]);
+});
+
+test("deserialization rejects malformed v2 random payloads", () => {
+  for (const random of [
+    { algorithm: "mulberry32-v1", seed: -1, state: 0 },
+    { algorithm: "mulberry32-v1", seed: 0, state: 0x1_0000_0000 },
+    { algorithm: "v2", seed: 0, state: 0 },
+    { algorithm: "mulberry32-v1", seed: 0 },
+  ]) {
+    assert.throws(() => deserializeWorldState(createValidWorldDto({ random })), /random/i);
+  }
+});
+
+test("schema-v1 migration defaults the RNG state and serializes as v2", () => {
+  const dto = {
+    schemaVersion: 1,
+    roomId: "room_v1_migration",
+    grid: { width: 1, height: 1, ids: [0], shade: [0], auxiliary: [0], objectMembership: [] },
+    players: {},
+    fallingObjects: {},
+    paused: false,
+    time: { dayNightCycle: 0.25 },
+    weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 },
+    nextPlayerOrdinal: 1,
+    nextObjectOrdinal: 1,
+  };
+  const restored = deserializeWorldState(dto);
+  assert.deepEqual(restored.random, { algorithm: "mulberry32-v1", seed: 0, state: 0 });
+  assert.equal(serializeWorldState(restored).schemaVersion, 2);
+  assert.deepEqual(serializeWorldState(restored).random, { algorithm: "mulberry32-v1", seed: 0, state: 0 });
+});
+
+test("starter worlds expose a fixed topology fixture while differing only by shades and RNG metadata", () => {
+  const first = createStarterWorld({ roomId: "starter_fixture", seed: 12345 });
+  const second = createStarterWorld({ roomId: "starter_fixture", seed: 12346 });
+
+  const firstDto = serializeWorldState(first);
+  const secondDto = serializeWorldState(second);
+
+  assert.equal(first.grid.width, 320);
+  assert.equal(first.grid.height, 200);
+  assert.equal(first.grid.get(18, 2), MaterialId.Faucet);
+  assert.equal(first.grid.get(95, 82), MaterialId.Stone);
+  assert.equal(first.grid.get(200, 105), MaterialId.Wood);
+  assert.equal(first.grid.get(80, 171), MaterialId.Drain);
+  assert.equal(first.grid.get(20, 185), MaterialId.Sand);
+  assert.equal(first.grid.get(265, 110), MaterialId.Stone);
+  assert.equal(first.grid.get(18, 2), first.grid.get(18, 2));
+  assert.equal(first.grid.getFaucetFlow(18, 2), 2);
+  assert.equal(first.grid.getFaucetFlow(27, 7), 2);
+  assert.equal(first.grid.get(80, 171), MaterialId.Drain);
+  assert.equal(first.grid.get(0, 0), MaterialId.Empty);
+
+  assert.deepEqual(firstDto.grid.ids, secondDto.grid.ids);
+  assert.deepEqual(firstDto.grid.auxiliary, secondDto.grid.auxiliary);
+  assert.deepEqual(firstDto.grid.objectMembership, secondDto.grid.objectMembership);
+  assert.deepEqual(first.players, second.players);
+  assert.deepEqual(first.fallingObjects, second.fallingObjects);
+  assert.notDeepEqual(firstDto.grid.shade, secondDto.grid.shade);
+  assert.notEqual(firstDto.random.seed, secondDto.random.seed);
+  assert.notEqual(firstDto.random.state, secondDto.random.state);
+
+  const objectIds = [first.grid.getObjectId(95, 82), first.grid.getObjectId(200, 105), first.grid.getObjectId(18, 2), first.grid.getObjectId(80, 171)];
+  assert.deepEqual(objectIds, ["object_1", "object_2", "object_3", "object_4"]);
+
+  const dirtCount = first.grid.ids.filter((id) => id === MaterialId.Dirt).length;
+  const stoneCount = first.grid.ids.filter((id) => id === MaterialId.Stone).length;
+  const woodCount = first.grid.ids.filter((id) => id === MaterialId.Wood).length;
+  const sandCount = first.grid.ids.filter((id) => id === MaterialId.Sand).length;
+  assert.equal(dirtCount, 12328);
+  assert.equal(stoneCount, 2656);
+  assert.equal(woodCount, 288);
+  assert.equal(sandCount, 600);
 });
 
 test("restored allocation skips IDs already in players, falling objects, and membership", () => {
@@ -198,6 +290,6 @@ test("restored allocation skips IDs already in players, falling objects, and mem
 });
 
 test("rejects malformed schema and dangling object identities", () => {
-  assert.throws(() => deserializeWorldState({ schemaVersion: 2, roomId: "room_bad", grid: { width: 2, height: 2, ids: [0, 0, 0, 0], shade: [0, 0, 0, 0], auxiliary: [0, 0, 0, 0], objectMembership: [] }, players: {}, fallingObjects: {}, paused: false, time: { dayNightCycle: 0.5 }, weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 }, nextPlayerOrdinal: 1, nextObjectOrdinal: 1 }), /unsupported/);
+  assert.throws(() => deserializeWorldState({ schemaVersion: 3, roomId: "room_bad", grid: { width: 2, height: 2, ids: [0, 0, 0, 0], shade: [0, 0, 0, 0], auxiliary: [0, 0, 0, 0], objectMembership: [] }, players: {}, fallingObjects: {}, paused: false, time: { dayNightCycle: 0.5 }, weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 }, random: { algorithm: "mulberry32-v1", seed: 0, state: 0 }, nextPlayerOrdinal: 1, nextObjectOrdinal: 1 }), /unsupported/);
   assert.throws(() => deserializeWorldState({ schemaVersion: 1, roomId: "room_bad", grid: { width: 2, height: 2, ids: [0, 0, 0, 0], shade: [0, 0, 0, 0], auxiliary: [0, 0, 0, 0], objectMembership: [{ x: 0, y: 0, objectId: "bad_id" }] }, players: {}, fallingObjects: {}, paused: false, time: { dayNightCycle: 0.5 }, weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 }, nextPlayerOrdinal: 1, nextObjectOrdinal: 1 }), /object/i);
 });

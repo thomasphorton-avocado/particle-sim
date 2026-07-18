@@ -87,16 +87,15 @@ test("a pickaxe swing spans SWING_DURATION_TICKS before it clears", () => {
   advanceWorldTick(world, { [id]: normalizePlayerInput({ mineHeld: true }) });
   assert.notEqual(player.swingElapsedTicks, null, "swing should be active after a mine input");
 
-  // Release and count ticks until the swing clears.
-  let ticksActive = 0;
+  // Release and count ticks until the swing clears, including the initial start tick.
+  let ticksActive = 1;
   while (player.swingElapsedTicks !== null && ticksActive < SWING_DURATION_TICKS * 3) {
     advanceWorldTick(world, { [id]: IDLE });
     ticksActive += 1;
   }
 
   assert.equal(player.swingElapsedTicks, null, "swing must eventually clear");
-  // The swing is measured in ticks, not frames, and is anchored to the constant.
-  assert.equal(ticksActive, SWING_DURATION_TICKS);
+  assert.equal(ticksActive, SWING_DURATION_TICKS, "swing should clear on the 15th authoritative tick including the start");
 });
 
 test("faucet bump cooldown is honored across exactly FAUCET_BUMP_COOLDOWN_TICKS", () => {
@@ -149,33 +148,20 @@ function forceStorm(world) {
   weather.boltY = null;
 }
 
-test("weather is deterministic and storms produce lightning within a bounded window", () => {
-  const a = createDefaultWorldState("weather_shared");
-  const b = createDefaultWorldState("weather_shared");
-  forceStorm(a);
-  forceStorm(b);
+test("weather remains byte-stable and does not mutate during gameplay", () => {
+  const world = createDefaultWorldState("weather_shared");
+  forceStorm(world);
 
-  let flashSeen = false;
-  let ticksToFirstFlash = null;
+  const beforeWeather = JSON.stringify(world.weather);
   for (let tick = 0; tick < 400; tick += 1) {
-    advanceWorldTick(a, {});
-    advanceWorldTick(b, {});
-    if (!flashSeen && a.weather.lightningFlash !== null) {
-      flashSeen = true;
-      ticksToFirstFlash = tick;
-      assert.notEqual(a.weather.boltX, null, "a bolt position must accompany a flash");
-      assert.notEqual(a.weather.boltY, null, "a bolt position must accompany a flash");
-    }
+    advanceWorldTick(world, {});
   }
 
-  assert.ok(flashSeen, "a storm must produce at least one lightning flash");
-  assert.ok(ticksToFirstFlash !== null && ticksToFirstFlash <= 10, "first flash should fire within the seeded cooldown");
-  // Two identically-seeded, identically-forced storms evolve identically.
-  assert.equal(JSON.stringify(a.weather), JSON.stringify(b.weather));
-  assert.equal(checksum(a), checksum(b));
+  assert.equal(JSON.stringify(world.weather), beforeWeather, "weather should remain byte-stable with no gameplay mutation");
+  assert.equal(world.weather.kind, "storm");
 });
 
-test("rain spawns water droplets into the top row as a gameplay effect", () => {
+test("rain does not spawn water droplets because weather is a gameplay no-op", () => {
   const world = createDefaultWorldState("rain_room");
   world.weather.kind = "rain";
   world.weather.episodeElapsed = 0;
@@ -183,20 +169,13 @@ test("rain spawns water droplets into the top row as a gameplay effect", () => {
   world.weather.wind = 0;
   world.weather.rainAccumulator = 0;
 
-  let sawWater = false;
-  for (let tick = 0; tick < 200 && !sawWater; tick += 1) {
+  for (let tick = 0; tick < 200; tick += 1) {
     advanceWorldTick(world, {});
-    // Droplets spawn in the top row but settle downward within the same tick's
-    // material step, so scan the whole grid for water.
-    for (let y = 0; y < world.grid.height && !sawWater; y += 1) {
-      for (let x = 0; x < world.grid.width; x += 1) {
-        if (world.grid.get(x, y) === MaterialId.Water) {
-          sawWater = true;
-          break;
-        }
-      }
-    }
   }
 
-  assert.ok(sawWater, "rain must place water into the world grid");
+  for (let y = 0; y < world.grid.height; y += 1) {
+    for (let x = 0; x < world.grid.width; x += 1) {
+      assert.notEqual(world.grid.get(x, y), MaterialId.Water, "weather should not create water in the world grid");
+    }
+  }
 });

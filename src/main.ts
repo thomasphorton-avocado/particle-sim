@@ -5,6 +5,8 @@ import { attachInput } from "./input";
 import { buildUi } from "./ui";
 import { state, getActiveHotbarMaterial, getLocalPlayer } from "./state";
 import { createCharacter, attachCharacterInput, getCharacterInputState, drawCharacter } from "./character";
+import { createInputEdgeBuffer, consumeBufferedInputs, updateInputEdgeBuffer } from "./input-buffer";
+import { createPresentationSnapshot, getInterpolatedPlayerSnapshot } from "./render-snapshots";
 
 const CELL_SIZE = 5;
 const TICK_MS = 1000 / 60;
@@ -28,17 +30,22 @@ let lastTime = performance.now();
 let accumulatorMs = 0;
 let wasPaused = state.world.paused;
 let hidden = document.hidden;
+const inputBuffer = createInputEdgeBuffer();
+let previousPresentationSnapshot = createPresentationSnapshot(state.world);
+let currentPresentationSnapshot = createPresentationSnapshot(state.world);
 
 function getBufferedInputs(): Record<string, PlayerInputState> {
   const localInput = getCharacterInputState();
+  updateInputEdgeBuffer(inputBuffer, { jump: localInput.jump, mine: localInput.mine });
+  const bufferedInputs = consumeBufferedInputs(inputBuffer);
   return {
     [state.localPlayerId]: normalizePlayerInput({
       left: localInput.left,
       right: localInput.right,
-      jumpHeld: localInput.jump,
+      jumpHeld: bufferedInputs.jumpHeld,
       crouchHeld: localInput.crouch,
       lookUpHeld: localInput.lookUp,
-      mineHeld: runtime.swingHeld,
+      mineHeld: bufferedInputs.mineHeld,
     }),
   };
 }
@@ -62,13 +69,36 @@ function loop(): void {
 
   let ticksThisFrame = 0;
   while (accumulatorMs >= TICK_MS && ticksThisFrame < MAX_TICKS_PER_FRAME) {
+    previousPresentationSnapshot = currentPresentationSnapshot;
     advanceWorldTick(state.world, getBufferedInputs());
+    currentPresentationSnapshot = createPresentationSnapshot(state.world);
     accumulatorMs -= TICK_MS;
     ticksThisFrame += 1;
   }
 
   renderer.draw(grid);
-  drawCharacter(renderer.getCtx(), getLocalPlayer(), runtime, CELL_SIZE);
+  const displayAlpha = accumulatorMs >= TICK_MS ? 1 : Math.min(Math.max(accumulatorMs / TICK_MS, 0), 1);
+  const interpolatedPlayer = getInterpolatedPlayerSnapshot(
+    previousPresentationSnapshot,
+    currentPresentationSnapshot,
+    state.localPlayerId,
+    displayAlpha,
+  );
+  if (interpolatedPlayer) {
+    drawCharacter(
+      renderer.getCtx(),
+      {
+        ...getLocalPlayer(),
+        x: interpolatedPlayer.x,
+        y: interpolatedPlayer.y,
+        vy: interpolatedPlayer.vy,
+      },
+      runtime,
+      CELL_SIZE,
+    );
+  } else {
+    drawCharacter(renderer.getCtx(), getLocalPlayer(), runtime, CELL_SIZE);
+  }
 
   // Draw placement radius border (place mode, or play mode with material selected)
   const showRadius = state.toolMode === "place" || (state.toolMode === "play" && getActiveHotbarMaterial() != null);

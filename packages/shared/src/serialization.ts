@@ -92,6 +92,11 @@ function normalizeDayNightTick(dayNightCycle: number): number {
   return ((Math.round(dayNightCycle * DAY_NIGHT_CYCLE_TICKS) % DAY_NIGHT_CYCLE_TICKS) + DAY_NIGHT_CYCLE_TICKS) % DAY_NIGHT_CYCLE_TICKS;
 }
 
+function normalizeLegacyAirTicksSeconds(airTimeSeconds: number): number {
+  const roundedTicks = Math.round(airTimeSeconds * 60);
+  return Math.max(0, Math.min(MAX_SAFE_INTEGER, roundedTicks));
+}
+
 function assertFiniteNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new TypeError(`${label} must be a finite number`);
@@ -219,8 +224,11 @@ function validatePlayerState(value: unknown, version: number): PlayerState {
     player.faucetCooldownUntilTick = assertInteger(requireField(obj, "faucetCooldownUntilTick", "player.faucetCooldownUntilTick"), "player.faucetCooldownUntilTick", 0, MAX_SAFE_INTEGER);
   } else if (version === 1 || version === 2) {
     const legacyAirTime = assertFiniteNumber(requireField(obj, "airTime", "player.airTime"), "player.airTime");
-    player.airTime = Math.max(0, Math.round(legacyAirTime));
-    player.airTicks = Math.max(0, Math.round(legacyAirTime));
+    if (legacyAirTime < 0) {
+      throw new TypeError("player.airTime must be >= 0");
+    }
+    player.airTime = normalizeLegacyAirTicksSeconds(legacyAirTime);
+    player.airTicks = player.airTime;
     player.previousJumpHeld = false;
     player.swingElapsedTicks = null;
     player.faucetCooldownUntilTick = 0;

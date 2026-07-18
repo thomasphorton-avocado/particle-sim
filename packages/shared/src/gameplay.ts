@@ -3,7 +3,6 @@ import { type Grid } from "./grid.js";
 import { type PlayerId } from "./ids.js";
 import { MATERIALS, MaterialId, MaterialPhase } from "./materials.js";
 import { stepMaterial } from "./material-step.js";
-import { stepWeather } from "./weather-step.js";
 import { type PlayerState, type WorldState } from "./world-state.js";
 
 export const GAMEPLAY_HZ = 60;
@@ -179,8 +178,8 @@ function mineCellAt(_world: WorldState, player: PlayerState, grid: Grid, x: numb
 function sweepMiningArc(world: WorldState, player: PlayerState, fromProgress: number, toProgress: number): void {
   if (fromProgress >= toProgress) return;
   const swept = new Map<string, [number, number]>();
-  const step = 0.04;
-  for (let progress = fromProgress; progress <= toProgress + 1e-6; progress += step) {
+  const step = 1 / SWING_DURATION_TICKS;
+  for (let progress = fromProgress; progress <= toProgress + 1e-9; progress += step) {
     pickaxeHeadCells(player, swingAngle(Math.min(progress, 1)), swept);
   }
   const mined = new Set<number>();
@@ -197,14 +196,14 @@ function handleSwing(world: WorldState, player: PlayerState, input: PlayerInputS
   const segments: Array<[number, number]> = [];
 
   if (!active && input.mineHeld) {
-    player.swingElapsedTicks = 0;
+    player.swingElapsedTicks = 1;
     segments.push([0, 1 / SWING_DURATION_TICKS]);
   } else if (active) {
     const nextElapsed = previousElapsed + 1;
     if (nextElapsed >= SWING_DURATION_TICKS) {
       segments.push([previousProgress, 1]);
       if (input.mineHeld) {
-        player.swingElapsedTicks = 0;
+        player.swingElapsedTicks = 1;
         segments.push([0, 1 / SWING_DURATION_TICKS]);
       } else {
         player.swingElapsedTicks = null;
@@ -399,9 +398,6 @@ export function advanceWorldTick(world: WorldState, inputs: Readonly<Record<stri
 
   world.time.dayNightTick = (world.time.dayNightTick + 1) % DAY_NIGHT_CYCLE_TICKS;
   world.time.dayNightCycle = world.time.dayNightTick / DAY_NIGHT_CYCLE_TICKS;
-
-  // Weather runs before materials so rain droplets settle within the same tick.
-  stepWeather(world);
 
   stepMaterial(world);
 

@@ -379,7 +379,7 @@ const DIRT_DRY_CHANCE = 0.0025;
 const DIRT_DRY_CHANCE_GRASSED = 0.0008;
 
 /** Absorbs adjacent water and wicks moisture to neighboring dry dirt. */
-function updateDirt(_world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
+function updateDirt(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
   const moisture = grid.getDirtMoisture(x, y);
 
   // Absorb adjacent water — dirt soaks it up and gains max moisture
@@ -409,79 +409,238 @@ function updateDirt(_world: WorldState, random: GameplayRandomState, grid: Grid,
     }
   }
 
-  // Wick moisture to neighboring dry dirt.
-  if (nextBool(random, DIRT_WICK_CHANCE) && moisture > 0) {
-    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+  // Wick moisture to adjacent dry dirt (source loses 1, neighbor gains source-1)
+  if (moisture > 2 && nextBool(random, DIRT_WICK_CHANCE)) {
+    const dirs = [...ORTHOGONAL_NEIGHBORS];
+    for (let i = dirs.length - 1; i > 0; i--) {
+      const j = nextInt(random, i + 1);
+      [dirs[i], dirs[j]] = [dirs[j], dirs[i]];
+    }
+    for (const [dx, dy] of dirs) {
       const nx = x + dx;
       const ny = y + dy;
-      const nid = grid.get(nx, ny);
-      if (nid === MaterialId.Dirt && grid.getDirtMoisture(nx, ny) < DIRT_MAX_MOISTURE) {
-        grid.setDirtMoisture(nx, ny, grid.getDirtMoisture(nx, ny) + 1);
+      if (grid.get(nx, ny) === MaterialId.Dirt && grid.getDirtMoisture(nx, ny) === 0) {
+        grid.setDirtMoisture(nx, ny, moisture - 2);
         grid.setDirtMoisture(x, y, moisture - 1);
+        grid.markUpdated(nx, ny);
         return;
       }
     }
   }
 
-  // Evaporation: dry out over time, slower near grass.
-  const dryChance = grid.get(x, y - 1) === MaterialId.Grass || grid.get(x, y + 1) === MaterialId.Grass
-    ? DIRT_DRY_CHANCE_GRASSED
-    : DIRT_DRY_CHANCE;
-  if (moisture > 0 && nextBool(random, dryChance)) {
-    grid.setDirtMoisture(x, y, moisture - 1);
+  // Slowly lose moisture over time (evaporation) — grass cover slows it
+  if (moisture > 0) {
+    let dryChance = DIRT_DRY_CHANCE;
+    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+      if (grid.get(x + dx, y + dy) === MaterialId.Grass) {
+        dryChance = DIRT_DRY_CHANCE_GRASSED;
+        break;
+      }
+    }
+    if (nextBool(random, dryChance)) {
+      grid.setDirtMoisture(x, y, moisture - 1);
+    }
   }
-}
 
-/** A grass cell can spread to adjacent empty cells through water or air. */
-function updateGrass(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
-  const chance = nextBool(random, 0.02) ? 0.02 : 0.0;
-  if (!nextBool(random, chance)) return;
-  for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
-    const nx = x + dx;
-    const ny = y + dy;
-    if (grid.get(nx, ny) === MaterialId.Empty) {
-      setWorldCell(world, grid, nx, ny, MaterialId.Grass);
-      grid.markUpdated(nx, ny);
-      return;
+  // Wet dirt can sprout grass on its top surface
+  if (moisture >= 4 && nextBool(random, GRASS_SPROUT_CHANCE)) {
+    const above = grid.get(x, y - 1);
+    // Only on exposed top surface — block if standing water (water stacked 2+ deep)
+    if (above === MaterialId.Empty ||
+        (above === MaterialId.Water && grid.get(x, y - 2) !== MaterialId.Water)) {
+      // Check this is actually the surface — dirt above means we're buried
+      if (grid.get(x, y - 1) !== MaterialId.Dirt) {
+        setWorldCell(world, grid, x, y, MaterialId.Grass);
+        grid.markUpdated(x, y);
+        // Preserve moisture — grass inherits it
+        grid.setAuxiliaryValue(x, y, 0);
+      }
     }
   }
 }
 
+// Per-step chance wet surface dirt converts to grass.
+const GRASS_SPROUT_CHANCE = 0.001;
+
+/** Grass can creep down into adjacent dirt (1-2 layers) and dies without moisture nearby. */
+function updateGrass(world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number): void {
+  // Creep downward: convert dirt directly below into grass (max 2 deep)
+  if (nextBool(random, 0.001)) {
+    const below = grid.get(x, y + 1);
+    if (below === MaterialId.Dirt && grid.getDirtMoisture(x, y + 1) > 0) {
+      // Count how deep this grass layer already is
+      let depth = 0;
+      for (let dy = 0; dy <= 2; dy++) {
+        if (grid.get(x, y - dy) === MaterialId.Grass) depth++;
+        else break;
+      }
+      if (depth < 2) {
+        setWorldCell(world, grid, x, y + 1, MaterialId.Grass);
+        grid.markUpdated(x, y + 1);
+      }
+    }
+  }
+
+  // Die if no adjacent dirt has moisture and no adjacent grass is near moist dirt
+  if (nextBool(random, 0.002)) {
+    let hasMoisture = false;
+    for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const nid = grid.get(nx, ny);
+      if (nid === MaterialId.Dirt && grid.getDirtMoisture(nx, ny) > 0) {
+        hasMoisture = true;
+        break;
+      }
+      // Adjacent grass counts if it's touching moist dirt
+      if (nid === MaterialId.Grass) {
+        for (const [ddx, ddy] of ORTHOGONAL_NEIGHBORS) {
+          const nnid = grid.get(nx + ddx, ny + ddy);
+          if (nnid === MaterialId.Dirt && grid.getDirtMoisture(nx + ddx, ny + ddy) > 0) {
+            hasMoisture = true;
+            break;
+          }
+        }
+        if (hasMoisture) break;
+      }
+    }
+    if (!hasMoisture) {
+      setWorldCell(world, grid, x, y, MaterialId.Dirt);
+      grid.setDirtMoisture(x, y, 0);
+      grid.markUpdated(x, y);
+    }
+  }
+}
+
+// Chance a free-falling liquid cell nudges diagonally even with no prior
+// drift, so long vertical drops fan out instead of staying a razor-straight line.
+const FALL_TURBULENCE_CHANCE = 0.012;
+// Chance inherited horizontal drift is actually applied on a given step,
+// once present (keeps the effect subtle rather than drifting every frame).
+const DRIFT_APPLY_CHANCE = 0.1;
+// Chance inherited horizontal drift dies out on a given step, so streams
+// eventually straighten out again rather than drifting forever.
+const DRIFT_DECAY_CHANCE = 0.2;
+// How fast the sideways-spread "last direction" memory fades. Kept much
+// shorter-lived than fall drift so the anti-oscillation guard only blocks an
+// immediate double-back, not normal back-and-forth leveling as a pool settles.
+const SPREAD_MEMORY_DECAY_CHANCE = 0.75;
+// Per-step chance a fully settled, exposed liquid cell evaporates. Only
+// rolled once a cell has nowhere left to fall, slide, or spread to, so
+// flowing water never evaporates mid-flow — only water that's come to rest.
+const EVAPORATION_CHANCE = 0.0006;
+
 const ORTHOGONAL_NEIGHBORS: [number, number][] = [
-  [-1, 0], [1, 0], [0, -1], [0, 1],
+  [0, -1],
+  [0, 1],
+  [-1, 0],
+  [1, 0],
 ];
 
-function updateLiquid(_world: WorldState, random: GameplayRandomState, grid: Grid, x: number, y: number, density: number, flowRate: number): void {
-  if (tryFallPowder(random, grid, x, y, density)) return;
+/** True if at least one neighbor isn't water — i.e. this cell is at a surface, not buried inside a pool. */
+function isExposed(grid: Grid, x: number, y: number): boolean {
+  for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+    if (grid.get(x + dx, y + dy) !== MaterialId.Water) return true;
+  }
+  return false;
+}
+
+function updateLiquid(
+  _world: WorldState,
+  random: GameplayRandomState,
+  grid: Grid,
+  x: number,
+  y: number,
+  density: number,
+  flowRate: number,
+): void {
+  // Water touching a drain is sucked away immediately, before any normal movement.
+  for (const [dx, dy] of ORTHOGONAL_NEIGHBORS) {
+    if (grid.get(x + dx, y + dy) === MaterialId.Drain) {
+      grid.set(x, y, MaterialId.Empty);
+      grid.markUpdated(x, y);
+      return;
+    }
+  }
+
+  const below = skipPlants(grid, x, y, 0, 1);
+  if (canDisplace(below.id, density)) {
+    const vx = grid.getWaterLiquidMemory(x, y);
+    const driftDir = vx !== 0 ? (vx > 0 ? 1 : -1) : randDir(random);
+    // Falling water keeps a little drift from how it was already flowing
+    // (inertia from spreading along a ledge before it dropped), plus rare
+    // random turbulence, instead of always snapping straight down.
+    let shouldTurbulence = false;
+    if (vx !== 0) {
+      if (nextBool(random, DRIFT_APPLY_CHANCE)) {
+        shouldTurbulence = true;
+      } else {
+        shouldTurbulence = nextBool(random, FALL_TURBULENCE_CHANCE);
+      }
+    } else {
+      shouldTurbulence = nextBool(random, FALL_TURBULENCE_CHANCE);
+    }
+    if (shouldTurbulence) {
+      const diag = skipPlants(grid, x, y, driftDir, 1);
+      if (canDisplace(diag.id, density)) {
+        moveCell(grid, x, y, diag.x, diag.y);
+        grid.setWaterLiquidMemory(diag.x, diag.y, nextBool(random, DRIFT_DECAY_CHANCE) ? 0 : driftDir);
+        return;
+      }
+    }
+    moveCell(grid, x, y, below.x, below.y);
+    grid.setWaterLiquidMemory(below.x, below.y, nextBool(random, DRIFT_DECAY_CHANCE) ? 0 : vx);
+    return;
+  }
 
   const dir = randDir(random);
-  const left = grid.get(x - 1, y);
-  const right = grid.get(x + 1, y);
-  if (canDisplace(left, density)) {
-    moveCell(grid, x, y, x - 1, y);
-    return;
+  for (const dx of [dir, -dir] as const) {
+    const diag = skipPlants(grid, x, y, dx, 1);
+    if (canDisplace(diag.id, density)) {
+      moveCell(grid, x, y, diag.x, diag.y);
+      // Decayed like the other fall-related writes, so a diagonal drop doesn't
+      // leave behind a long-lived direction that later blocks sideways spread.
+      grid.setWaterLiquidMemory(diag.x, diag.y, nextBool(random, DRIFT_DECAY_CHANCE) ? 0 : dx);
+      return;
+    }
   }
-  if (canDisplace(right, density)) {
-    moveCell(grid, x, y, x + 1, y);
+
+  // Spread sideways: find the farthest reachable empty cell in a random direction,
+  // treating any stems in the way as see-through rather than a stopping obstacle.
+  const lastJump = grid.getWaterLiquidMemory(x, y);
+  for (const dx of [dir, -dir] as const) {
+    let farthest = -1;
+    for (let step = 1; step <= flowRate; step++) {
+      const target = grid.get(x + dx * step, y);
+      if (target === MaterialId.Empty) {
+        farthest = step;
+      } else if (MATERIALS[target].permeable) {
+        continue;
+      } else {
+        break;
+      }
+    }
+    if (farthest <= 0) continue;
+
+    const delta = dx * farthest;
+    // Only refuse the exact move that would undo the jump that just brought
+    // this cell here — a different-length or different-direction move is
+    // still allowed. Without this a droplet with open space on both sides
+    // (e.g. flanking a stem) can ping-pong back and forth forever; blocking
+    // the whole direction (rather than just the exact undo) was overkill and
+    // made normal pool leveling feel sticky.
+    if (delta === -lastJump) continue;
+
+    moveCell(grid, x, y, x + delta, y);
+    grid.setWaterLiquidMemory(x + delta, y, nextBool(random, SPREAD_MEMORY_DECAY_CHANCE) ? 0 : delta);
     return;
   }
 
-  const skipLeft = skipPlants(grid, x, y, -1, 0);
-  const skipRight = skipPlants(grid, x, y, 1, 0);
-  const canFlowLeft = canDisplace(skipLeft.id, density);
-  const canFlowRight = canDisplace(skipRight.id, density);
-  if (flowRate > 0 && canFlowLeft && canFlowRight) {
-    const target = dir === -1 ? skipLeft : skipRight;
-    moveCell(grid, x, y, target.x, target.y);
-    return;
-  }
-
-  if (flowRate > 0 && canFlowLeft) {
-    moveCell(grid, x, y, skipLeft.x, skipLeft.y);
-    return;
-  }
-  if (flowRate > 0 && canFlowRight) {
-    moveCell(grid, x, y, skipRight.x, skipRight.y);
-    return;
+  // Nowhere left to go this step — fully settled. Only evaporates if exposed
+  // to something other than water (air, a wall, a stem...); water buried
+  // deep inside a pool, with water on every side, never evaporates.
+  if (isExposed(grid, x, y) && nextBool(random, EVAPORATION_CHANCE)) {
+    grid.set(x, y, MaterialId.Empty);
+    grid.markUpdated(x, y);
   }
 }

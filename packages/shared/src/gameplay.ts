@@ -191,29 +191,31 @@ function sweepMiningArc(world: WorldState, player: PlayerState, fromProgress: nu
 function handleSwing(world: WorldState, player: PlayerState, input: PlayerInputState): void {
   if (!hasPickaxeEquipped(player)) return;
   const active = player.swingElapsedTicks !== null;
-  const priorProgress = active ? Math.min(player.swingElapsedTicks! / SWING_DURATION_TICKS, 1) : 0;
-  let nextElapsed: number | null = null;
-  let nextProgress = 0;
+  const previousElapsed = active ? player.swingElapsedTicks! : 0;
+  const previousProgress = Math.min(previousElapsed / SWING_DURATION_TICKS, 1);
+  const segments: Array<[number, number]> = [];
+
   if (!active && input.mineHeld) {
     player.swingElapsedTicks = 0;
-    nextElapsed = 0;
-    nextProgress = 1 / SWING_DURATION_TICKS;
+    segments.push([0, 1 / SWING_DURATION_TICKS]);
   } else if (active) {
-    nextElapsed = player.swingElapsedTicks! + 1;
+    const nextElapsed = previousElapsed + 1;
     if (nextElapsed >= SWING_DURATION_TICKS) {
+      segments.push([previousProgress, 1]);
       if (input.mineHeld) {
         player.swingElapsedTicks = 0;
-        nextProgress = 1 / SWING_DURATION_TICKS;
+        segments.push([0, 1 / SWING_DURATION_TICKS]);
       } else {
         player.swingElapsedTicks = null;
       }
     } else {
       player.swingElapsedTicks = nextElapsed;
-      nextProgress = nextElapsed / SWING_DURATION_TICKS;
+      segments.push([previousProgress, nextElapsed / SWING_DURATION_TICKS]);
     }
   }
-  if (player.swingElapsedTicks !== null) {
-    sweepMiningArc(world, player, priorProgress, nextProgress);
+
+  for (const [fromProgress, toProgress] of segments) {
+    sweepMiningArc(world, player, fromProgress, toProgress);
   }
 }
 

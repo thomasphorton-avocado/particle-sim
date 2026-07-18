@@ -269,7 +269,7 @@ test("starter worlds expose a fixed topology fixture while differing only by sha
 test("restored allocation skips IDs already in players, falling objects, and membership", () => {
   const dto = createValidWorldDto({
     players: {
-      player_1: { id: "player_1", x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 },
+      player_1: { id: "player_1", x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTicks: 0, previousJumpHeld: false, swingElapsedTicks: null, faucetCooldownUntilTick: 0, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 },
     },
     fallingObjects: {
       object_1: { id: "object_1", materialId: MaterialId.Stone, x: 0, y: 0, restY: 0, vy: 0, offsets: [[0, 0]] },

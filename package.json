@@ -18,7 +18,7 @@
     "test:client": "vitest run",
     "test": "npm run build:shared && npm run test:client && npm run test:shared",
     "preview": "vite preview",
-    "benchmark": "node ./scripts/benchmark-shared.mjs"
+    "benchmark": "node --expose-gc ./scripts/benchmark-shared.mjs"
   },
   "dependencies": {
     "@particle-sim/shared": "0.0.0"

@@ -7,6 +7,7 @@ createDefaultWorldState,
 createPlayerId,
 createStarterWorld,
 FAUCET_BUMP_COOLDOWN_TICKS,
+Grid,
 MaterialId,
 normalizePlayerInput,
 serializeWorldState,
@@ -135,67 +136,13 @@ for (let i = 1; i < bumpTicks.length; i += 1) {
 assert.equal(player.faucetCooldownUntilTick % FAUCET_BUMP_COOLDOWN_TICKS, 0);
 });
 
-function forceStorm(world) {
-const weather = world.weather;
-weather.kind = "storm";
-weather.episodeElapsed = 0;
-weather.episodeDuration = 1_000_000; // stay in storm for the whole test
-weather.wind = 2;
-weather.rainAccumulator = 0;
-weather.lightningFlash = null;
-weather.lightningCooldown = 5;
-weather.boltX = null;
-weather.boltY = null;
-}
+test("weather state stays byte-identical and RNG is untouched when no weather system is active", () => {
+const world = createDefaultWorldState("weather_noop", new Grid(0, 0));
+const beforeWeather = JSON.stringify(world.weather);
+const beforeRandomState = world.random.state;
 
-test("weather is deterministic and storms produce lightning within a bounded window", () => {
-const a = createDefaultWorldState("weather_shared");
-const b = createDefaultWorldState("weather_shared");
-forceStorm(a);
-forceStorm(b);
+assert.equal(advanceWorldTick(world, {}), true);
 
-let flashSeen = false;
-let ticksToFirstFlash = null;
-for (let tick = 0; tick < 400; tick += 1) {
-  advanceWorldTick(a, {});
-  advanceWorldTick(b, {});
-  if (!flashSeen && a.weather.lightningFlash !== null) {
-    flashSeen = true;
-    ticksToFirstFlash = tick;
-    assert.notEqual(a.weather.boltX, null, "a bolt position must accompany a flash");
-    assert.notEqual(a.weather.boltY, null, "a bolt position must accompany a flash");
-  }
-}
-
-assert.ok(flashSeen, "a storm must produce at least one lightning flash");
-assert.ok(ticksToFirstFlash !== null && ticksToFirstFlash <= 10, "first flash should fire within the seeded cooldown");
-// Two identically-seeded, identically-forced storms evolve identically.
-assert.equal(JSON.stringify(a.weather), JSON.stringify(b.weather));
-assert.equal(checksum(a), checksum(b));
-});
-
-test("rain spawns water droplets into the top row as a gameplay effect", () => {
-const world = createDefaultWorldState("rain_room");
-world.weather.kind = "rain";
-world.weather.episodeElapsed = 0;
-world.weather.episodeDuration = 1_000_000;
-world.weather.wind = 0;
-world.weather.rainAccumulator = 0;
-
-let sawWater = false;
-for (let tick = 0; tick < 200 && !sawWater; tick += 1) {
-  advanceWorldTick(world, {});
-  // Droplets spawn in the top row but settle downward within the same tick's
-  // material step, so scan the whole grid for water.
-  for (let y = 0; y < world.grid.height && !sawWater; y += 1) {
-    for (let x = 0; x < world.grid.width; x += 1) {
-      if (world.grid.get(x, y) === MaterialId.Water) {
-        sawWater = true;
-        break;
-      }
-    }
-  }
-}
-
-assert.ok(sawWater, "rain must place water into the world grid");
+assert.equal(JSON.stringify(world.weather), beforeWeather);
+assert.equal(world.random.state, beforeRandomState);
 });

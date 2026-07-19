@@ -1,4 +1,5 @@
 import { SWING_DURATION_TICKS, type Grid, type PlayerId, type PlayerState } from "@particle-sim/shared";
+import { setInputEdgeBufferHeld, type InputEdgeBuffer } from "./input-buffer";
 import { getLocalPlayer } from "./state";
 
 export interface CharacterRuntime {
@@ -64,54 +65,76 @@ function isEditable(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
 }
 
-export function attachCharacterInput(): void {
+export function attachCharacterInput(buffer: InputEdgeBuffer): void {
+  const setHeld = (control: keyof CharacterInput, pressed: boolean): void => {
+    keys[control] = pressed;
+    if (control === "jump") {
+      setInputEdgeBufferHeld(buffer, "jump", pressed);
+    }
+    if (control === "mine") {
+      setInputEdgeBufferHeld(buffer, "mine", pressed);
+    }
+  };
+
   window.addEventListener("keydown", (e) => {
     if (isEditable(e.target)) return;
     let handled = false;
     if (e.key === "ArrowLeft" || e.key === "a") {
-      keys.left = true;
+      setHeld("left", true);
       handled = true;
     }
     if (e.key === "ArrowRight" || e.key === "d") {
-      keys.right = true;
+      setHeld("right", true);
       handled = true;
     }
     if (e.key === " ") {
-      keys.jump = true;
+      setHeld("jump", true);
       handled = true;
     }
     if (e.key === "ArrowUp" || e.key === "w") {
-      keys.lookUp = true;
+      setHeld("lookUp", true);
       handled = true;
     }
     if (e.key === "ArrowDown" || e.key === "s") {
-      keys.crouch = true;
+      setHeld("crouch", true);
       handled = true;
     }
     if (e.key === "f") {
-      keys.mine = true;
+      setHeld("mine", true);
       handled = true;
     }
     if (handled) e.preventDefault();
   });
   window.addEventListener("keyup", (e) => {
     if (isEditable(e.target)) return;
-    if (e.key === "ArrowLeft" || e.key === "a") keys.left = false;
-    if (e.key === "ArrowRight" || e.key === "d") keys.right = false;
-    if (e.key === " ") keys.jump = false;
-    if (e.key === "ArrowUp" || e.key === "w") keys.lookUp = false;
-    if (e.key === "ArrowDown" || e.key === "s") keys.crouch = false;
-    if (e.key === "f") keys.mine = false;
+    if (e.key === "ArrowLeft" || e.key === "a") setHeld("left", false);
+    if (e.key === "ArrowRight" || e.key === "d") setHeld("right", false);
+    if (e.key === " ") setHeld("jump", false);
+    if (e.key === "ArrowUp" || e.key === "w") setHeld("lookUp", false);
+    if (e.key === "ArrowDown" || e.key === "s") setHeld("crouch", false);
+    if (e.key === "f") setHeld("mine", false);
   });
   window.addEventListener("mousedown", (e) => {
     if (e.button === 0) {
-      keys.mine = true;
+      setHeld("mine", true);
       e.preventDefault();
     }
   });
   window.addEventListener("mouseup", (e) => {
     if (e.button === 0) {
-      keys.mine = false;
+      setHeld("mine", false);
+      e.preventDefault();
+    }
+  });
+  window.addEventListener("pointerdown", (e) => {
+    if (e.button === 0 || e.pointerType === "touch") {
+      setHeld("mine", true);
+      e.preventDefault();
+    }
+  });
+  window.addEventListener("pointerup", (e) => {
+    if (e.button === 0 || e.pointerType === "touch") {
+      setHeld("mine", false);
       e.preventDefault();
     }
   });

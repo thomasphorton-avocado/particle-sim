@@ -3,8 +3,6 @@ export interface InputEdgeBuffer {
   heldMine: boolean;
   latchedJump: boolean;
   latchedMine: boolean;
-  previousJump: boolean;
-  previousMine: boolean;
 }
 
 export interface RawClientInputs {
@@ -23,28 +21,33 @@ export function createInputEdgeBuffer(): InputEdgeBuffer {
     heldMine: false,
     latchedJump: false,
     latchedMine: false,
-    previousJump: false,
-    previousMine: false,
   };
 }
 
-export function updateInputEdgeBuffer(buffer: InputEdgeBuffer, inputs: RawClientInputs): void {
-  if (inputs.jump && !buffer.previousJump) {
-    buffer.latchedJump = true;
+export function setInputEdgeBufferHeld(buffer: InputEdgeBuffer, control: keyof Pick<RawClientInputs, "jump" | "mine">, pressed: boolean): void {
+  if (control === "jump") {
+    if (pressed && !buffer.heldJump) {
+      buffer.latchedJump = true;
+    }
+    buffer.heldJump = pressed;
+    return;
   }
-  if (inputs.mine && !buffer.previousMine) {
+
+  if (pressed && !buffer.heldMine) {
     buffer.latchedMine = true;
   }
-  buffer.previousJump = inputs.jump;
-  buffer.previousMine = inputs.mine;
-  buffer.heldJump = inputs.jump;
-  buffer.heldMine = inputs.mine;
+  buffer.heldMine = pressed;
+}
+
+export function updateInputEdgeBuffer(buffer: InputEdgeBuffer, inputs: RawClientInputs): void {
+  setInputEdgeBufferHeld(buffer, "jump", inputs.jump);
+  setInputEdgeBufferHeld(buffer, "mine", inputs.mine);
 }
 
 export function consumeBufferedInputs(buffer: InputEdgeBuffer): BufferedClientInputs {
   const jumpHeld = buffer.latchedJump || buffer.heldJump;
   const mineHeld = buffer.latchedMine || buffer.heldMine;
-  if (buffer.latchedJump) buffer.latchedJump = false;
-  if (buffer.latchedMine) buffer.latchedMine = false;
+  buffer.latchedJump = false;
+  buffer.latchedMine = false;
   return { jumpHeld, mineHeld };
 }

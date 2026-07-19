@@ -1,5 +1,6 @@
 import { Grid, FLOWER_PALETTE, MATERIALS, MaterialId } from "@particle-sim/shared";
 import type { ObjectPlacement } from "@particle-sim/shared";
+import type { PresentationSnapshot } from "./render-snapshots";
 import { state } from "./state";
 
 interface CloudPuff {
@@ -210,7 +211,7 @@ export class Renderer {
     return this.ctx;
   }
 
-  draw(grid: Grid): void {
+  draw(grid: Grid, presentationSnapshot?: PresentationSnapshot): void {
     const data = this.imageData.data;
     for (let i = 0; i < grid.ids.length; i++) {
       const id = grid.ids[i] as MaterialId;
@@ -255,7 +256,7 @@ export class Renderer {
     this.drawTorchLights(grid);
     this.drawTorchHandles(grid);
     this.drawTorchFlames(grid);
-    this.drawFallingObjects();
+    this.drawFallingObjects(presentationSnapshot);
     this.drawClockFaces(grid);
     this.drawObjectOutlines(grid);
     this.drawFaucetDials(grid);
@@ -387,25 +388,29 @@ export class Renderer {
    * position. Torches also get their glow/handle/flame overlays so they look
    * identical to placed torches during the fall.
    */
-  private drawFallingObjects(): void {
+  private drawFallingObjects(presentationSnapshot?: PresentationSnapshot): void {
     const cs = this.cellSize;
-    for (const o of Object.values(state.world.fallingObjects)) {
-      // Base footprint block, drawn using the material color.
-      const [r, g, b] = MATERIALS[o.materialId].color;
+    const snapshotObjects = presentationSnapshot?.fallingObjects;
+    const items = snapshotObjects
+      ? Array.from(snapshotObjects.entries()).map(([id, object]) => ({ id, ...object }))
+      : Object.values(state.world.fallingObjects);
+
+    for (const object of items) {
+      const materialId = object.materialId as MaterialId;
+      const [r, g, b] = MATERIALS[materialId].color;
       this.ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-      for (const [dx, dy] of o.offsets) {
-        this.ctx.fillRect((o.x + dx) * cs, (o.y + dy) * cs, cs, cs);
+      for (const [dx, dy] of object.offsets) {
+        this.ctx.fillRect((object.x + dx) * cs, (object.y + dy) * cs, cs, cs);
       }
 
-      if (o.materialId === MaterialId.Torch) {
-        const flameCx = o.x * cs + cs / 2;
-        const flameCy = (o.y - 1) * cs + cs * 0.6; // top-center cell
-        // Glow (screen blend), then handle and flame on top.
+      if (object.materialId === MaterialId.Torch) {
+        const flameCx = object.x * cs + cs / 2;
+        const flameCy = (object.y - 1) * cs + cs * 0.6;
         this.ctx.save();
         this.ctx.globalCompositeOperation = "screen";
         this.drawTorchGlowAt(flameCx, flameCy);
         this.ctx.restore();
-        this.drawTorchHandleAt(o.x * cs + cs / 2, (o.y + 1) * cs + cs * 0.5);
+        this.drawTorchHandleAt(object.x * cs + cs / 2, (object.y + 1) * cs + cs * 0.5);
         this.drawTorchFlameAt(flameCx, flameCy);
       }
     }

@@ -10,6 +10,8 @@ export interface FallingObjectPresentationSnapshot {
   x: number;
   y: number;
   vy: number;
+  materialId: number;
+  offsets: [number, number][];
 }
 
 export interface PresentationSnapshot {
@@ -26,9 +28,67 @@ export function createPresentationSnapshot(world: WorldState): PresentationSnaps
     snapshot.players.set(playerId, { x: player.x, y: player.y, vy: player.vy });
   }
   for (const [objectId, object] of Object.entries(world.fallingObjects)) {
-    snapshot.fallingObjects.set(objectId, { x: object.x, y: object.y, vy: object.vy });
+    snapshot.fallingObjects.set(objectId, { x: object.x, y: object.y, vy: object.vy, materialId: object.materialId, offsets: object.offsets.map(([dx, dy]) => [dx, dy] as [number, number]) });
   }
   return snapshot;
+}
+
+function interpolatePlayerSnapshot(
+  previous: PlayerPresentationSnapshot | undefined,
+  current: PlayerPresentationSnapshot | undefined,
+  alpha: number,
+): PlayerPresentationSnapshot | undefined {
+  const clampedAlpha = Math.max(0, Math.min(1, alpha));
+  if (!previous && !current) {
+    return undefined;
+  }
+  if (!previous) {
+    return clampedAlpha <= 0 ? undefined : { ...current! };
+  }
+  if (!current) {
+    return clampedAlpha >= 1 ? undefined : { ...previous };
+  }
+  return {
+    x: previous.x + (current.x - previous.x) * clampedAlpha,
+    y: previous.y + (current.y - previous.y) * clampedAlpha,
+    vy: previous.vy + (current.vy - previous.vy) * clampedAlpha,
+  };
+}
+
+function interpolateFallingObjectSnapshot(
+  previous: FallingObjectPresentationSnapshot | undefined,
+  current: FallingObjectPresentationSnapshot | undefined,
+  alpha: number,
+): FallingObjectPresentationSnapshot | undefined {
+  const clampedAlpha = Math.max(0, Math.min(1, alpha));
+  if (!previous && !current) {
+    return undefined;
+  }
+  if (!previous) {
+    return clampedAlpha <= 0 ? undefined : {
+      x: current!.x,
+      y: current!.y,
+      vy: current!.vy,
+      materialId: current!.materialId,
+      offsets: current!.offsets.map(([dx, dy]) => [dx, dy] as [number, number]),
+    };
+  }
+  if (!current) {
+    return clampedAlpha >= 1 ? undefined : {
+      x: previous.x,
+      y: previous.y,
+      vy: previous.vy,
+      materialId: previous.materialId,
+      offsets: previous.offsets.map(([dx, dy]) => [dx, dy] as [number, number]),
+    };
+  }
+  return {
+    x: previous.x + (current.x - previous.x) * clampedAlpha,
+    y: previous.y + (current.y - previous.y) * clampedAlpha,
+    vy: previous.vy + (current.vy - previous.vy) * clampedAlpha,
+    materialId: current.materialId,
+    offsets: current.offsets.length > 0 ? current.offsets.map(([dx, dy]) => [dx, dy] as [number, number]) : previous.offsets.map(([dx, dy]) => [dx, dy] as [number, number]),
+  };
 }
 
 export function interpolatePresentationSnapshot(
@@ -40,24 +100,23 @@ export function interpolatePresentationSnapshot(
     players: new Map(),
     fallingObjects: new Map(),
   };
-  for (const [playerId, prevPlayer] of previous.players.entries()) {
-    const nextPlayer = current.players.get(playerId);
-    if (!nextPlayer) continue;
-    interpolated.players.set(playerId, {
-      x: prevPlayer.x + (nextPlayer.x - prevPlayer.x) * alpha,
-      y: prevPlayer.y + (nextPlayer.y - prevPlayer.y) * alpha,
-      vy: prevPlayer.vy + (nextPlayer.vy - prevPlayer.vy) * alpha,
-    });
+
+  const playerIds = new Set([...previous.players.keys(), ...current.players.keys()]);
+  for (const playerId of playerIds) {
+    const entry = interpolatePlayerSnapshot(previous.players.get(playerId), current.players.get(playerId), alpha);
+    if (entry) {
+      interpolated.players.set(playerId, entry);
+    }
   }
-  for (const [objectId, prevObject] of previous.fallingObjects.entries()) {
-    const nextObject = current.fallingObjects.get(objectId);
-    if (!nextObject) continue;
-    interpolated.fallingObjects.set(objectId, {
-      x: prevObject.x + (nextObject.x - prevObject.x) * alpha,
-      y: prevObject.y + (nextObject.y - prevObject.y) * alpha,
-      vy: prevObject.vy + (nextObject.vy - prevObject.vy) * alpha,
-    });
+
+  const objectIds = new Set([...previous.fallingObjects.keys(), ...current.fallingObjects.keys()]);
+  for (const objectId of objectIds) {
+    const entry = interpolateFallingObjectSnapshot(previous.fallingObjects.get(objectId), current.fallingObjects.get(objectId), alpha);
+    if (entry) {
+      interpolated.fallingObjects.set(objectId, entry);
+    }
   }
+
   return interpolated;
 }
 
@@ -69,10 +128,7 @@ export function getInterpolatedPlayerSnapshot(
 ): PlayerPresentationSnapshot | null {
   const previousPlayer = previous.players.get(playerId);
   const currentPlayer = current.players.get(playerId);
-  if (!previousPlayer || !currentPlayer) return null;
-  return {
-    x: previousPlayer.x + (currentPlayer.x - previousPlayer.x) * alpha,
-    y: previousPlayer.y + (currentPlayer.y - previousPlayer.y) * alpha,
-    vy: previousPlayer.vy + (currentPlayer.vy - previousPlayer.vy) * alpha,
-  };
+  if (!previousPlayer && !currentPlayer) return null;
+  const interpolated = interpolatePlayerSnapshot(previousPlayer, currentPlayer, alpha);
+  return interpolated ?? null;
 }

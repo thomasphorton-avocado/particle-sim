@@ -5,8 +5,8 @@ import { attachInput } from "./input";
 import { buildUi } from "./ui";
 import { state, getActiveHotbarMaterial, getLocalPlayer } from "./state";
 import { createCharacter, attachCharacterInput, getCharacterInputState, drawCharacter } from "./character";
-import { createInputEdgeBuffer, consumeBufferedInputs, updateInputEdgeBuffer } from "./input-buffer";
-import { createPresentationSnapshot, getInterpolatedPlayerSnapshot } from "./render-snapshots";
+import { createInputEdgeBuffer, consumeBufferedInputs } from "./input-buffer";
+import { createPresentationSnapshot, getInterpolatedPlayerSnapshot, interpolatePresentationSnapshot } from "./render-snapshots";
 
 const CELL_SIZE = 5;
 const TICK_MS = 1000 / 60;
@@ -24,19 +24,18 @@ attachInput(canvas, state.world, CELL_SIZE);
 
 const runtime = createCharacter(grid);
 state.character = runtime;
-attachCharacterInput();
-
 let lastTime = performance.now();
 let accumulatorMs = 0;
 let wasPaused = state.world.paused;
+let wasHidden = document.hidden;
 let hidden = document.hidden;
 const inputBuffer = createInputEdgeBuffer();
+attachCharacterInput(inputBuffer);
 let previousPresentationSnapshot = createPresentationSnapshot(state.world);
 let currentPresentationSnapshot = createPresentationSnapshot(state.world);
 
 function getBufferedInputs(): Record<string, PlayerInputState> {
   const localInput = getCharacterInputState();
-  updateInputEdgeBuffer(inputBuffer, { jump: localInput.jump, mine: localInput.mine });
   const bufferedInputs = consumeBufferedInputs(inputBuffer);
   return {
     [state.localPlayerId]: normalizePlayerInput({
@@ -56,12 +55,17 @@ function loop(): void {
   lastTime = now;
 
   const paused = state.world.paused;
-  if (paused !== wasPaused) {
+  const visibilityChanged = hidden !== wasHidden;
+  const shouldResetClockAnchor = paused !== wasPaused || visibilityChanged;
+  if (shouldResetClockAnchor) {
+    previousPresentationSnapshot = currentPresentationSnapshot;
     lastTime = now;
     wasPaused = paused;
+    wasHidden = hidden;
   }
 
-  if (hidden || paused) {
+  const shouldRenderCurrentSnapshot = paused || hidden || shouldResetClockAnchor;
+  if (shouldRenderCurrentSnapshot) {
     accumulatorMs = 0;
   } else {
     accumulatorMs += frameDeltaMs;
@@ -76,8 +80,15 @@ function loop(): void {
     ticksThisFrame += 1;
   }
 
-  renderer.draw(grid);
-  const displayAlpha = accumulatorMs >= TICK_MS ? 1 : Math.min(Math.max(accumulatorMs / TICK_MS, 0), 1);
+  const displayAlpha = shouldRenderCurrentSnapshot
+    ? 1
+    : accumulatorMs >= TICK_MS
+      ? 1
+      : Math.min(Math.max(accumulatorMs / TICK_MS, 0), 1);
+  const interpolatedPresentationSnapshot = shouldRenderCurrentSnapshot
+    ? currentPresentationSnapshot
+    : interpolatePresentationSnapshot(previousPresentationSnapshot, currentPresentationSnapshot, displayAlpha);
+  renderer.draw(grid, interpolatedPresentationSnapshot);
   const interpolatedPlayer = getInterpolatedPlayerSnapshot(
     previousPresentationSnapshot,
     currentPresentationSnapshot,
@@ -190,6 +201,7 @@ function loop(): void {
 function updateVisibility(): void {
   hidden = document.hidden;
   if (!hidden) {
+    previousPresentationSnapshot = currentPresentationSnapshot;
     lastTime = performance.now();
     accumulatorMs = 0;
   }

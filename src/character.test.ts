@@ -67,9 +67,46 @@ describe("character mine input aggregation", () => {
     expect(getCharacterInputState().mine).toBe(false);
   });
 
+  it("rejects secondary mouse button pointer events while preserving primary mouse and touch behavior", () => {
+    dispatchPointerEvent("pointerdown", { pointerId: 7, pointerType: "mouse", button: 1 });
+    expect(getCharacterInputState().mine).toBe(false);
+
+    dispatchPointerEvent("pointerdown", { pointerId: 8, pointerType: "mouse", button: 0 });
+    expect(getCharacterInputState().mine).toBe(true);
+
+    dispatchPointerEvent("pointerup", { pointerId: 7, pointerType: "mouse", button: 2 });
+    expect(getCharacterInputState().mine).toBe(true);
+
+    dispatchPointerEvent("pointerdown", { pointerId: 9, pointerType: "touch" });
+    expect(getCharacterInputState().mine).toBe(true);
+
+    dispatchPointerEvent("pointercancel", { pointerId: 7, pointerType: "mouse", button: 1 });
+    expect(getCharacterInputState().mine).toBe(true);
+
+    dispatchPointerEvent("pointerup", { pointerId: 8, pointerType: "mouse", button: 0 });
+    expect(getCharacterInputState().mine).toBe(true);
+
+    dispatchPointerEvent("pointerup", { pointerId: 9, pointerType: "touch" });
+    expect(getCharacterInputState().mine).toBe(false);
+  });
+
+  it("rejects secondary pen button pointer events while preserving primary pen behavior", () => {
+    dispatchPointerEvent("pointerdown", { pointerId: 10, pointerType: "pen", button: 2 });
+    expect(getCharacterInputState().mine).toBe(false);
+
+    dispatchPointerEvent("pointerdown", { pointerId: 11, pointerType: "pen", button: 0 });
+    expect(getCharacterInputState().mine).toBe(true);
+
+    dispatchPointerEvent("pointerup", { pointerId: 10, pointerType: "pen", button: 2 });
+    expect(getCharacterInputState().mine).toBe(true);
+
+    dispatchPointerEvent("pointerup", { pointerId: 11, pointerType: "pen", button: 0 });
+    expect(getCharacterInputState().mine).toBe(false);
+  });
+
   it("emits exactly one consumed mine edge for a fast touch tap", () => {
-    dispatchPointerEvent("pointerdown", { pointerId: 7, pointerType: "touch" });
-    dispatchPointerEvent("pointerup", { pointerId: 7, pointerType: "touch" });
+    dispatchPointerEvent("pointerdown", { pointerId: 12, pointerType: "touch" });
+    dispatchPointerEvent("pointerup", { pointerId: 12, pointerType: "touch" });
 
     expect(consumeBufferedInputs(buffer).mineHeld).toBe(true);
     expect(consumeBufferedInputs(buffer).mineHeld).toBe(false);

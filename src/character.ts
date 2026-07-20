@@ -78,6 +78,17 @@ function updateMinePointerSource(pointerType: string, pointerId: number, pressed
   syncInputBuffer("mine");
 }
 
+function shouldHandleMinePointerEvent(pointerType: string | undefined, button: number | undefined): boolean {
+  const resolvedPointerType = pointerType || "mouse";
+  if (resolvedPointerType === "touch") {
+    return true;
+  }
+  if (resolvedPointerType === "mouse" || resolvedPointerType === "pen") {
+    return (button ?? 0) === 0;
+  }
+  return false;
+}
+
 export function setPointerControl(control: keyof CharacterInput, pressed: boolean): void {
   if (control !== "mine") return;
   mouseMineHeld = pressed;
@@ -209,22 +220,22 @@ export function attachCharacterInput(buffer: InputEdgeBuffer): void {
     }
   });
   window.addEventListener("pointerdown", (e) => {
-    if (e.button === 0 || e.pointerType === "touch" || e.pointerType === "pen" || e.pointerType === "mouse") {
-      updateMinePointerSource(e.pointerType || "mouse", e.pointerId, true);
-      e.preventDefault();
-    }
+    if (!shouldHandleMinePointerEvent(e.pointerType, e.button)) return;
+    updateMinePointerSource(e.pointerType || "mouse", e.pointerId, true);
+    e.preventDefault();
   });
   window.addEventListener("pointerup", (e) => {
-    if (e.button === 0 || e.pointerType === "touch" || e.pointerType === "pen" || e.pointerType === "mouse") {
-      updateMinePointerSource(e.pointerType || "mouse", e.pointerId, false);
-      e.preventDefault();
-    }
+    if (!shouldHandleMinePointerEvent(e.pointerType, e.button)) return;
+    updateMinePointerSource(e.pointerType || "mouse", e.pointerId, false);
+    e.preventDefault();
   });
   window.addEventListener("pointercancel", (e) => {
+    if (!shouldHandleMinePointerEvent(e.pointerType, e.button)) return;
     updateMinePointerSource(e.pointerType || "mouse", e.pointerId, false);
     e.preventDefault();
   });
   window.addEventListener("lostpointercapture", (e) => {
+    if (!shouldHandleMinePointerEvent(e.pointerType, e.button)) return;
     updateMinePointerSource(e.pointerType || "mouse", e.pointerId, false);
   });
 }

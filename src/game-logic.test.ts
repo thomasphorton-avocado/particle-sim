@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { Grid, advanceWorldTick, createDefaultFallingObjectState, createDefaultWorldState, createGameplayRandomState, createObjectId, createStarterWorld, deserializeWorldState, harvestFlowerCluster, MaterialId, placeWorldCell, serializeWorldState } from "@particle-sim/shared";
 import { handleHarvestInputAt, placeHotbarMaterialAt } from "./input";
 import { getLocalPlayer, state } from "./state";
+import { processProductionTick } from "./production-tick";
 
 describe("game logic", () => {
   beforeEach(() => {
@@ -92,9 +93,15 @@ describe("game logic", () => {
 
     state.world = restoredWorldA;
     handleHarvestInputAt(restoredWorldA, 2, 2);
+    processProductionTick(restoredWorldA, {
+      [state.localPlayerId]: restoredWorldA.players[state.localPlayerId].input,
+    });
 
     state.world = worldB;
     handleHarvestInputAt(worldB, 2, 2);
+    processProductionTick(worldB, {
+      [state.localPlayerId]: worldB.players[state.localPlayerId].input,
+    });
 
     const restoredPlayer = restoredWorldA.players[state.localPlayerId];
     const originalPlayer = worldB.players[state.localPlayerId];
@@ -161,15 +168,20 @@ describe("game logic", () => {
     const grid = world.grid;
     const player = getLocalPlayer();
     player.hotbar = [
+      { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Wood, count: 1 },
-      ...Array(9).fill({ kind: "empty" }),
+      ...Array(8).fill({ kind: "empty" }),
     ];
-    player.activeHotbarSlot = 0;
+    player.activeHotbarSlot = 1;
     player.x = 24;
     player.y = 4;
     state.toolMode = "play";
+    state.brushSize = 1;
 
     const placed = placeHotbarMaterialAt(world, 24, 4);
+    processProductionTick(world, {
+      [state.localPlayerId]: world.players[state.localPlayerId].input,
+    });
 
     expect(placed).toBe(true);
     const objectId = grid.getObjectId(24, 4);
@@ -182,13 +194,18 @@ describe("game logic", () => {
     const world = state.world;
     const player = getLocalPlayer();
     player.hotbar = [
+      { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Torch, count: 1 },
-      ...Array(9).fill({ kind: "empty" }),
+      ...Array(8).fill({ kind: "empty" }),
     ];
-    player.activeHotbarSlot = 0;
+    player.activeHotbarSlot = 1;
     state.toolMode = "play";
+    state.brushSize = 1;
 
     const placed = placeHotbarMaterialAt(world, 3, 1);
+    processProductionTick(world, {
+      [state.localPlayerId]: world.players[state.localPlayerId].input,
+    });
     expect(placed).toBe(true);
 
     const objectId = Object.keys(world.fallingObjects)[0];
@@ -213,16 +230,21 @@ describe("game logic", () => {
     const world = state.world;
     const player = getLocalPlayer();
     player.hotbar = [
+      { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Torch, count: 1 },
-      ...Array(9).fill({ kind: "empty" }),
+      ...Array(8).fill({ kind: "empty" }),
     ];
-    player.activeHotbarSlot = 0;
+    player.activeHotbarSlot = 1;
     player.x = 0;
     player.y = 0;
     state.toolMode = "play";
+    state.brushSize = 1;
     world.grid.set(3, 40, MaterialId.Wall);
 
     const placed = placeHotbarMaterialAt(world, 3, 1);
+    processProductionTick(world, {
+      [state.localPlayerId]: world.players[state.localPlayerId].input,
+    });
 
     expect(placed).toBe(true);
     const objectId = Object.keys(world.fallingObjects)[0];
@@ -234,16 +256,21 @@ describe("game logic", () => {
     const world = state.world;
     const player = getLocalPlayer();
     player.hotbar = [
+      { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Torch, count: 1 },
-      ...Array(9).fill({ kind: "empty" }),
+      ...Array(8).fill({ kind: "empty" }),
     ];
-    player.activeHotbarSlot = 0;
+    player.activeHotbarSlot = 1;
     player.x = 0;
     player.y = 0;
     state.toolMode = "play";
+    state.brushSize = 1;
     world.grid.set(3, 3, MaterialId.Water);
 
     const placed = placeHotbarMaterialAt(world, 3, 1);
+    processProductionTick(world, {
+      [state.localPlayerId]: world.players[state.localPlayerId].input,
+    });
 
     expect(placed).toBe(true);
     expect(Object.keys(world.fallingObjects)).toHaveLength(0);
@@ -256,20 +283,25 @@ describe("game logic", () => {
     const grid = world.grid;
     const player = getLocalPlayer();
     player.hotbar = [
+      { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Wood, count: 1 },
-      ...Array(9).fill({ kind: "empty" }),
+      ...Array(8).fill({ kind: "empty" }),
     ];
-    player.activeHotbarSlot = 0;
+    player.activeHotbarSlot = 1;
     player.x = 24;
     player.y = 4;
     state.toolMode = "play";
+    state.brushSize = 1;
     grid.set(24, 4, MaterialId.Wall);
     const beforeOrdinal = world.nextObjectOrdinal;
 
     const placed = placeHotbarMaterialAt(world, 24, 4);
+    processProductionTick(world, {
+      [state.localPlayerId]: world.players[state.localPlayerId].input,
+    });
 
-    expect(placed).toBe(false);
-    expect(player.hotbar[0]).toEqual({ kind: "material", materialId: MaterialId.Wood, count: 1 });
+    expect(placed).toBe(true);
+    expect(player.hotbar[1]).toEqual({ kind: "material", materialId: MaterialId.Wood, count: 1 });
     expect(grid.get(24, 4)).toBe(MaterialId.Wall);
     expect(Object.keys(world.fallingObjects)).toHaveLength(0);
     expect(grid.getObjectId(24, 4)).toBeNull();

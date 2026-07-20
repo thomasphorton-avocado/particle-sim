@@ -147,17 +147,30 @@ export class Grid {
   }
 
   clear(): void {
+    for (let i = 0; i < this.ids.length; i++) {
+      if (this.ids[i] === MaterialId.Empty && this.shade[i] === 0 && this.auxiliary[i] === 0 && this.objectIds[i] === null) continue;
+      this.incrementCellRevision(i);
+    }
     this.ids.fill(MaterialId.Empty);
     this.shade.fill(0);
     this.auxiliary.fill(0);
     this.objectIds.fill(null);
     this.objectCellIndex.clear();
-    this.cellRevisions.fill(0);
   }
 
   swap(x1: number, y1: number, x2: number, y2: number): void {
     const i1 = this.index(x1, y1);
     const i2 = this.index(x2, y2);
+    const nextTuple1 = { id: this.ids[i2]!, shade: this.shade[i2]!, auxiliary: this.auxiliary[i2]!, objectId: this.objectIds[i2]! };
+    const nextTuple2 = { id: this.ids[i1]!, shade: this.shade[i1]!, auxiliary: this.auxiliary[i1]!, objectId: this.objectIds[i1]! };
+    const currentTuple1 = { id: this.ids[i1]!, shade: this.shade[i1]!, auxiliary: this.auxiliary[i1]!, objectId: this.objectIds[i1]! };
+    const currentTuple2 = { id: this.ids[i2]!, shade: this.shade[i2]!, auxiliary: this.auxiliary[i2]!, objectId: this.objectIds[i2]! };
+    if (currentTuple1.id !== nextTuple1.id || currentTuple1.shade !== nextTuple1.shade || currentTuple1.auxiliary !== nextTuple1.auxiliary || currentTuple1.objectId !== nextTuple1.objectId) {
+      this.incrementCellRevision(i1);
+    }
+    if (currentTuple2.id !== nextTuple2.id || currentTuple2.shade !== nextTuple2.shade || currentTuple2.auxiliary !== nextTuple2.auxiliary || currentTuple2.objectId !== nextTuple2.objectId) {
+      this.incrementCellRevision(i2);
+    }
     const tmpId = this.ids[i1]!;
     const tmpShade = this.shade[i1]!;
     const tmpAuxiliary = this.auxiliary[i1]!;
@@ -170,9 +183,8 @@ export class Grid {
     this.shade[i2] = tmpShade;
     this.auxiliary[i2] = tmpAuxiliary;
     this.objectIds[i2] = tmpObjectId;
-    this.incrementCellRevision(i1);
-    this.incrementCellRevision(i2);
-    this.rebuildObjectCellIndex();
+    this.setObjectIndexEntry(i1, this.objectIds[i1]);
+    this.setObjectIndexEntry(i2, this.objectIds[i2]);
   }
 
   setObjectCell(x: number, y: number, objectId: ObjectId): void {

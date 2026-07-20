@@ -2,8 +2,9 @@ import { createCommandId, createPlayerId, parseCommandId, parseObjectId, parsePl
 import { cloneHotbar, type HotbarItem, type InventoryCounts } from "./inventory.js";
 import { Grid } from "./grid.js";
 import { MATERIALS, MaterialId } from "./materials.js";
-import { harvestFlowerCluster } from "./harvest.js";
-import type { PersistedPlayerInputState, PlayerState, WorldState } from "./world-state.js";
+import { findFlowerCluster } from "./harvest.js";
+import { hashVisualShade } from "./random.js";
+import { allocateObjectId, type PersistedPlayerInputState, type PlayerState, type WorldState } from "./world-state.js";
 
 export type GameplayCommandType =
   | "set_input_state"
@@ -156,6 +157,24 @@ export interface CommandGridWrite {
   objectId: ObjectId | null;
 }
 
+export interface CommandFallingObjectCreate {
+  id: ObjectId;
+  materialId: MaterialId;
+  x: number;
+  y: number;
+  restY: number;
+  vy: number;
+  offsets: [number, number][];
+  provenance: {
+    kind: "placement";
+    actorId: PlayerId;
+    commandId: CommandId;
+    sourceSlot: number;
+    materialId: MaterialId;
+    amount: 1;
+  };
+}
+
 export interface CommandPlayerPatch {
   id: PlayerId;
   input?: PersistedPlayerInputState;
@@ -181,6 +200,7 @@ export interface ValidatedCommandPlan {
   acceptedEffect: string | null;
   playerPatch?: CommandPlayerPatch;
   gridWrites: CommandGridWrite[];
+  fallingObjects: CommandFallingObjectCreate[];
   paused?: boolean;
   worldRevisionDelta: number;
   inventoryRevisionDelta: number;
@@ -244,12 +264,27 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function sanitizeCommandFingerprint(command: GameplayCommand): string {
-  return stableStringify(command);
+function sanitizeCommandFingerprint(envelope: CommandEnvelope): string {
+  return stableStringify({
+    commandId: envelope.commandId,
+    actorId: envelope.actorId,
+    actorSequence: envelope.actorSequence,
+    issuedTick: envelope.issuedTick,
+    command: envelope.command,
+  });
 }
 
 function createRejection(envelope: CommandEnvelope, code: CommandResultCode, admitted = false, authorityOrder: number | null = null): CommandRejection {
   return { kind: "rejection", envelope, code, admitted, authorityOrder };
+}
+
+export function getNextActorSequence(world: WorldState, actorId: PlayerId): number {
+  const pendingSequences = (world.commandInbox ?? [])
+    .filter((entry): entry is CommandEnvelope => typeof entry === "object" && entry !== null && "actorId" in entry && "actorSequence" in entry)
+    .filter((entry) => entry.actorId === actorId)
+    .map((entry) => entry.actorSequence);
+  const highWater = world.commandLedger.actorHighWater[actorId] ?? 0;
+  return Math.max(highWater, ...pendingSequences, 0) + 1;
 }
 
 function createCommandResult(planOrRejection: ValidatedCommandPlan | CommandRejection, world: WorldState): CommandResult {
@@ -295,7 +330,7 @@ function createCommandResult(planOrRejection: ValidatedCommandPlan | CommandReje
 }
 
 function getCommandFingerprint(envelope: CommandEnvelope): string {
-  return sanitizeCommandFingerprint(envelope.command);
+  return sanitizeCommandFingerprint(envelope);
 }
 
 function createResultFromReceipt(receipt: CommandReceipt, envelope: CommandEnvelope): CommandResult {
@@ -320,11 +355,15 @@ function createResultFromReceipt(receipt: CommandReceipt, envelope: CommandEnvel
 }
 
 function findDuplicateReceipt(world: WorldState, envelope: CommandEnvelope): CommandReceipt | undefined {
-  return world.commandLedger.recent.find((receipt) => receipt.actorId === envelope.actorId && receipt.actorSequence === envelope.actorSequence && receipt.commandId === envelope.commandId && receipt.fingerprint === sanitizeCommandFingerprint(envelope.command));
+  return world.commandLedger.recent.find((receipt) => receipt.actorId === envelope.actorId && receipt.actorSequence === envelope.actorSequence && receipt.commandId === envelope.commandId && receipt.fingerprint === getCommandFingerprint(envelope));
 }
 
 function findConflictingReceipt(world: WorldState, envelope: CommandEnvelope): CommandReceipt | undefined {
-  return world.commandLedger.recent.find((receipt) => receipt.actorId === envelope.actorId && receipt.actorSequence === envelope.actorSequence && receipt.commandId !== envelope.commandId);
+  return world.commandLedger.recent.find((receipt) => {
+    if (receipt.actorId !== envelope.actorId || receipt.actorSequence !== envelope.actorSequence) return false;
+    if (receipt.commandId !== envelope.commandId) return true;
+    return receipt.fingerprint !== getCommandFingerprint(envelope);
+  });
 }
 
 function recordReceipt(world: WorldState, envelope: CommandEnvelope, result: CommandResult, authorityOrder: number | null): void {
@@ -353,77 +392,99 @@ function recordReceipt(world: WorldState, envelope: CommandEnvelope, result: Com
   }
 }
 
+function assertAllowedFields(value: Record<string, unknown>, allowedFields: ReadonlySet<string>, label: string): void {
+  for (const key of Object.keys(value)) {
+    if (!allowedFields.has(key)) {
+      throw new TypeError(`${label} contains unknown field ${key}`);
+    }
+  }
+}
+
 function parseGameplayCommand(value: unknown): GameplayCommand | null {
   if (!isPlainObject(value)) return null;
-  const type = value["type"];
-  if (typeof type !== "string") return null;
-  switch (type) {
-    case "set_input_state": {
-      return {
-        type,
-        left: assertBoolean(value["left"], "left"),
-        right: assertBoolean(value["right"], "right"),
-        jumpHeld: assertBoolean(value["jumpHeld"], "jumpHeld"),
-        crouchHeld: assertBoolean(value["crouchHeld"], "crouchHeld"),
-        lookUpHeld: assertBoolean(value["lookUpHeld"], "lookUpHeld"),
-      };
+  try {
+    const type = value["type"];
+    if (typeof type !== "string") return null;
+    switch (type) {
+      case "set_input_state": {
+        assertAllowedFields(value, new Set(["type", "left", "right", "jumpHeld", "crouchHeld", "lookUpHeld"]), "set_input_state");
+        return {
+          type,
+          left: assertBoolean(value["left"], "left"),
+          right: assertBoolean(value["right"], "right"),
+          jumpHeld: assertBoolean(value["jumpHeld"], "jumpHeld"),
+          crouchHeld: assertBoolean(value["crouchHeld"], "crouchHeld"),
+          lookUpHeld: assertBoolean(value["lookUpHeld"], "lookUpHeld"),
+        };
+      }
+      case "mine_start":
+      case "mine_stop": {
+        assertAllowedFields(value, new Set(["type"]), type);
+        return { type };
+      }
+      case "select_slot": {
+        assertAllowedFields(value, new Set(["type", "slot", "expectedInventoryRevision"]), "select_slot");
+        return {
+          type,
+          slot: assertSafeInteger(value["slot"], "slot"),
+          expectedInventoryRevision: assertSafeInteger(value["expectedInventoryRevision"], "expectedInventoryRevision"),
+        };
+      }
+      case "place": {
+        assertAllowedFields(value, new Set(["type", "x", "y", "brushRadius", "expectedInventoryRevision", "expectedAnchorRevision"]), "place");
+        return {
+          type,
+          x: assertSafeInteger(value["x"], "x"),
+          y: assertSafeInteger(value["y"], "y"),
+          brushRadius: assertSafeInteger(value["brushRadius"], "brushRadius"),
+          expectedInventoryRevision: assertSafeInteger(value["expectedInventoryRevision"], "expectedInventoryRevision"),
+          expectedAnchorRevision: assertSafeInteger(value["expectedAnchorRevision"], "expectedAnchorRevision"),
+        };
+      }
+      case "harvest": {
+        assertAllowedFields(value, new Set(["type", "x", "y", "expectedTargetRevision"]), "harvest");
+        return {
+          type,
+          x: assertSafeInteger(value["x"], "x"),
+          y: assertSafeInteger(value["y"], "y"),
+          expectedTargetRevision: assertSafeInteger(value["expectedTargetRevision"], "expectedTargetRevision"),
+        };
+      }
+      case "cycle_faucet": {
+        assertAllowedFields(value, new Set(["type", "x", "y", "objectId", "expectedTargetRevision"]), "cycle_faucet");
+        return {
+          type,
+          x: assertSafeInteger(value["x"], "x"),
+          y: assertSafeInteger(value["y"], "y"),
+          objectId: parseObjectId(value["objectId"]),
+          expectedTargetRevision: assertSafeInteger(value["expectedTargetRevision"], "expectedTargetRevision"),
+        };
+      }
+      case "pause_world":
+      case "resume_world": {
+        assertAllowedFields(value, new Set(["type", "expectedWorldRevision"]), type);
+        return {
+          type,
+          expectedWorldRevision: assertSafeInteger(value["expectedWorldRevision"], "expectedWorldRevision"),
+        };
+      }
+      default:
+        return null;
     }
-    case "mine_start":
-    case "mine_stop":
-      return { type };
-    case "select_slot": {
-      return {
-        type,
-        slot: assertSafeInteger(value["slot"], "slot"),
-        expectedInventoryRevision: assertSafeInteger(value["expectedInventoryRevision"], "expectedInventoryRevision"),
-      };
-    }
-    case "place": {
-      return {
-        type,
-        x: assertSafeInteger(value["x"], "x"),
-        y: assertSafeInteger(value["y"], "y"),
-        brushRadius: assertSafeInteger(value["brushRadius"], "brushRadius"),
-        expectedInventoryRevision: assertSafeInteger(value["expectedInventoryRevision"], "expectedInventoryRevision"),
-        expectedAnchorRevision: assertSafeInteger(value["expectedAnchorRevision"], "expectedAnchorRevision"),
-      };
-    }
-    case "harvest": {
-      return {
-        type,
-        x: assertSafeInteger(value["x"], "x"),
-        y: assertSafeInteger(value["y"], "y"),
-        expectedTargetRevision: assertSafeInteger(value["expectedTargetRevision"], "expectedTargetRevision"),
-      };
-    }
-    case "cycle_faucet": {
-      return {
-        type,
-        x: assertSafeInteger(value["x"], "x"),
-        y: assertSafeInteger(value["y"], "y"),
-        objectId: parseObjectId(value["objectId"]),
-        expectedTargetRevision: assertSafeInteger(value["expectedTargetRevision"], "expectedTargetRevision"),
-      };
-    }
-    case "pause_world":
-    case "resume_world": {
-      return {
-        type,
-        expectedWorldRevision: assertSafeInteger(value["expectedWorldRevision"], "expectedWorldRevision"),
-      };
-    }
-    default:
-      return null;
+  } catch {
+    return null;
   }
 }
 
 function parseEnvelope(value: unknown): CommandEnvelope | null {
   if (!isPlainObject(value)) return null;
   try {
+    assertAllowedFields(value, new Set(["commandId", "actorId", "actorSequence", "issuedTick", "command"]), "command envelope");
     const commandId = parseCommandId(value["commandId"]);
     const actorId = parsePlayerId(value["actorId"]);
     const actorSequence = assertSafeInteger(value["actorSequence"], "actorSequence");
     const issuedTick = assertSafeInteger(value["issuedTick"], "issuedTick");
+    if (actorSequence < 0 || issuedTick < 0) throw new TypeError("negative sequence/tick");
     const command = parseGameplayCommand(value["command"]);
     if (!command) return null;
     return { commandId, actorId, actorSequence, issuedTick, command };
@@ -437,7 +498,211 @@ function getTargetRevision(grid: Grid, x: number, y: number): number {
   return grid.cellRevisions[index] ?? 0;
 }
 
-function createPlan(envelope: CommandEnvelope, resultCode: CommandResultCode, accepted: boolean, beforeWorldRevision: number, afterWorldRevision: number, beforeInventoryRevision: number, afterInventoryRevision: number, beforeTargetRevision: number, afterTargetRevision: number, acceptedEffect: string | null, playerPatch?: CommandPlayerPatch, gridWrites: CommandGridWrite[] = [], paused?: boolean, worldRevisionDelta = 0, inventoryRevisionDelta = 0, targetRevisionDelta = 0): ValidatedCommandPlan {
+function collectHarvestPlan(grid: Grid, startX: number, startY: number): { cells: Array<[number, number]>; bloomCount: number } | null {
+  const cluster = findFlowerCluster(grid, startX, startY);
+  if (!cluster || cluster.size === 0) return null;
+
+  const cells = Array.from(cluster, (idx) => {
+    const x = idx % grid.width;
+    const y = Math.floor(idx / grid.width);
+    return [x, y] as [number, number];
+  });
+
+  const flowerIndices = new Set<number>();
+  for (const idx of cluster) {
+    if ((grid.ids[idx] as MaterialId) === MaterialId.Flower) {
+      flowerIndices.add(idx);
+    }
+  }
+
+  if (flowerIndices.size === 0) {
+    return { cells, bloomCount: 0 };
+  }
+
+  let bloomCount = 0;
+  const visited = new Set<number>();
+  for (const idx of flowerIndices) {
+    if (visited.has(idx)) continue;
+    bloomCount += 1;
+    const colorVariant = grid.getFlowerPalette(idx % grid.width, Math.floor(idx / grid.width));
+    const queue = [idx];
+    visited.add(idx);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const cx = current % grid.width;
+      const cy = (current - cx) / grid.width;
+      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+        const nx = cx + dx;
+        const ny = cy + dy;
+        const nextIndex = ny * grid.width + nx;
+        if (!flowerIndices.has(nextIndex) || visited.has(nextIndex)) continue;
+        const nextColorVariant = grid.getFlowerPalette(nx, ny);
+        if (nextColorVariant !== colorVariant) continue;
+        visited.add(nextIndex);
+        queue.push(nextIndex);
+      }
+    }
+  }
+
+  return { cells, bloomCount };
+}
+
+function withinPlacementRange(actor: PlayerState, gx: number, gy: number): boolean {
+  const cx = actor.x + actor.width / 2;
+  const cy = actor.y + actor.height / 2;
+  const dx = gx - cx;
+  const dy = gy - cy;
+  return dx * dx + dy * dy <= 30 * 30;
+}
+
+function canPlaceOver(grid: Grid, x: number, y: number, materialId: MaterialId): boolean {
+  const existing = grid.get(x, y);
+  if (existing === MaterialId.Empty) return true;
+  if (materialId === MaterialId.Empty) return true;
+  if (existing === MaterialId.Water && !MATERIALS[materialId].permeable) return true;
+  return false;
+}
+
+function getObjectOffsets(materialId: MaterialId): [number, number][] {
+  const material = MATERIALS[materialId];
+  if (material.placement.kind !== "object") return [];
+  const { shape, width, height } = material.placement;
+  const halfW = width / 2;
+  const halfH = height / 2;
+  const offsets: [number, number][] = [];
+  for (let dy = -Math.floor(halfH); dy < height - Math.floor(halfH); dy++) {
+    for (let dx = -Math.floor(halfW); dx < width - Math.floor(halfW); dx++) {
+      if (shape === "circle" && (dx / halfW) ** 2 + (dy / halfH) ** 2 > 1) continue;
+      offsets.push([dx, dy]);
+    }
+  }
+  return offsets;
+}
+
+function canPlaceObjectFootprint(world: WorldState, actor: PlayerState, materialId: MaterialId, anchorX: number, anchorY: number, offsets: [number, number][]): boolean {
+  const grid = world.grid;
+  for (const [dx, dy] of offsets) {
+    const x = anchorX + dx;
+    const y = anchorY + dy;
+    if (!grid.inBounds(x, y)) return false;
+    if (!withinPlacementRange(actor, x, y)) return false;
+    if (!canPlaceOver(grid, x, y, materialId)) return false;
+  }
+  return true;
+}
+
+function canDescendObjectFootprint(world: WorldState, anchorX: number, anchorY: number, offsets: [number, number][]): boolean {
+  const grid = world.grid;
+  for (const [dx, dy] of offsets) {
+    const x = anchorX + dx;
+    const y = anchorY + dy;
+    if (!grid.inBounds(x, y)) return false;
+    if (grid.get(x, y) !== MaterialId.Empty) return false;
+  }
+  return true;
+}
+
+function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: CommandId, command: PlaceCommand, materialId: MaterialId): { gridWrites: CommandGridWrite[]; fallingObjects: CommandFallingObjectCreate[]; playerPatch?: CommandPlayerPatch; inventoryRevisionDelta: number; worldRevisionDelta: number; acceptedEffect: string | null; resultCode: CommandResultCode } {
+  const slot = actor.activeHotbarSlot;
+  const hotbarEntry = actor.hotbar[slot];
+  if (hotbarEntry?.kind !== "material") {
+    return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "tool" };
+  }
+  if (command.brushRadius < 1 || command.brushRadius > 16) {
+    return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "range" };
+  }
+  if (command.expectedInventoryRevision !== actor.inventoryRevision) {
+    return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "revision" };
+  }
+  const anchorIndex = world.grid.index(command.x, command.y);
+  if (command.expectedAnchorRevision !== (world.grid.cellRevisions[anchorIndex] ?? 0)) {
+    return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "revision" };
+  }
+
+  const placementCount = Math.min(hotbarEntry.count, 1);
+  if (placementCount <= 0) {
+    return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "inventory" };
+  }
+
+  const material = MATERIALS[materialId];
+  if (material.placement.kind === "object") {
+    const offsets = getObjectOffsets(materialId);
+    if (offsets.length === 0) {
+      return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "bounds" };
+    }
+    if (!canPlaceObjectFootprint(world, actor, materialId, command.x, command.y, offsets)) {
+      return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "footprint" };
+    }
+    const objectId = allocateObjectId(world);
+    const fallsWhenAirborne = materialId === MaterialId.Torch || materialId === MaterialId.Stone;
+    let restY = command.y;
+    if (fallsWhenAirborne) {
+      while (canDescendObjectFootprint(world, command.x, restY + 1, offsets)) {
+        restY += 1;
+      }
+    }
+    const gridWrites: CommandGridWrite[] = [];
+    if (!fallsWhenAirborne || restY <= command.y) {
+      for (const [dx, dy] of offsets) {
+        const x = command.x + dx;
+        const y = command.y + dy;
+        if (!world.grid.inBounds(x, y)) continue;
+        gridWrites.push({ x, y, id: materialId, shade: hashVisualShade(world.random.seed, x, y, materialId), auxiliary: 0, objectId });
+      }
+    }
+    const fallingObjects: CommandFallingObjectCreate[] = [];
+    if (fallsWhenAirborne && restY > command.y) {
+      fallingObjects.push({
+        id: objectId,
+        materialId,
+        x: command.x,
+        y: command.y,
+        restY,
+        vy: 0,
+        offsets,
+        provenance: { kind: "placement", actorId: actor.id, commandId, sourceSlot: slot, materialId, amount: 1 },
+      });
+    }
+    const nextHotbar = cloneHotbar(actor.hotbar);
+    nextHotbar[slot] = { kind: "material", materialId: hotbarEntry.materialId, count: hotbarEntry.count - 1 };
+    const playerPatch: CommandPlayerPatch = {
+      id: actor.id,
+      hotbar: nextHotbar,
+      inventoryRevision: actor.inventoryRevision + 1,
+    };
+    return { gridWrites, fallingObjects, playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 1, acceptedEffect: "inventory", resultCode: "accepted" };
+  }
+
+  const candidates: Array<[number, number]> = [];
+  for (let dy = -command.brushRadius; dy <= command.brushRadius; dy += 1) {
+    for (let dx = -command.brushRadius; dx <= command.brushRadius; dx += 1) {
+      if (dx * dx + dy * dy > command.brushRadius * command.brushRadius) continue;
+      const px = command.x + dx;
+      const py = command.y + dy;
+      if (!world.grid.inBounds(px, py)) continue;
+      if (!canPlaceOver(world.grid, px, py, materialId)) continue;
+      candidates.push([px, py]);
+    }
+  }
+  if (candidates.length === 0) {
+    return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "bounds" };
+  }
+  const actualPlacementCount = Math.min(hotbarEntry.count, candidates.length);
+  const gridWrites = candidates.slice(0, actualPlacementCount).map(([x, y]) => ({ x, y, id: materialId, shade: hashVisualShade(world.random.seed, x, y, materialId), auxiliary: 0, objectId: null }));
+  if (gridWrites.length === 0) {
+    return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "inventory" };
+  }
+  const nextHotbar = cloneHotbar(actor.hotbar);
+  nextHotbar[slot] = { kind: "material", materialId: hotbarEntry.materialId, count: hotbarEntry.count - gridWrites.length };
+  const playerPatch: CommandPlayerPatch = {
+    id: actor.id,
+    hotbar: nextHotbar,
+    inventoryRevision: actor.inventoryRevision + 1,
+  };
+  return { gridWrites, fallingObjects: [], playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 1, acceptedEffect: "inventory", resultCode: "accepted" };
+}
+
+function createPlan(envelope: CommandEnvelope, resultCode: CommandResultCode, accepted: boolean, beforeWorldRevision: number, afterWorldRevision: number, beforeInventoryRevision: number, afterInventoryRevision: number, beforeTargetRevision: number, afterTargetRevision: number, acceptedEffect: string | null, playerPatch?: CommandPlayerPatch, gridWrites: CommandGridWrite[] = [], fallingObjects: CommandFallingObjectCreate[] = [], paused?: boolean, worldRevisionDelta = 0, inventoryRevisionDelta = 0, targetRevisionDelta = 0): ValidatedCommandPlan {
   return {
     kind: "plan",
     envelope,
@@ -453,6 +718,7 @@ function createPlan(envelope: CommandEnvelope, resultCode: CommandResultCode, ac
     acceptedEffect,
     playerPatch,
     gridWrites,
+    fallingObjects,
     paused,
     worldRevisionDelta,
     inventoryRevisionDelta,
@@ -513,6 +779,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
   const beforeTargetRevision = world.worldRevision;
   let playerPatch: CommandPlayerPatch | undefined;
   let gridWrites: CommandGridWrite[] = [];
+  let fallingObjects: CommandFallingObjectCreate[] = [];
   let paused: boolean | undefined;
   let worldRevisionDelta = 0;
   let inventoryRevisionDelta = 0;
@@ -561,64 +828,25 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
       break;
     }
     case "place": {
-      const slot = actor.activeHotbarSlot;
-      const hotbarEntry = actor.hotbar[slot];
-      if (hotbarEntry?.kind !== "material") {
+      const hotbarItem = actor.hotbar[actor.activeHotbarSlot];
+      const materialId = hotbarItem?.kind === "material"
+        ? hotbarItem.materialId
+        : null;
+      if (!materialId) {
         resultCode = "tool";
         break;
       }
-      if (envelope.command.expectedInventoryRevision !== actor.inventoryRevision) {
-        resultCode = "revision";
+      const placementResult = buildPlacementPlan(world, actor, envelope.commandId, envelope.command, materialId);
+      if (placementResult.resultCode !== "accepted") {
+        resultCode = placementResult.resultCode;
         break;
       }
-      if (envelope.command.brushRadius < 1 || envelope.command.brushRadius > 16) {
-        resultCode = "range";
-        break;
-      }
-      const anchorIndex = world.grid.index(envelope.command.x, envelope.command.y);
-      if (envelope.command.expectedAnchorRevision !== (world.grid.cellRevisions[anchorIndex] ?? 0)) {
-        resultCode = "revision";
-        break;
-      }
-      const candidates: Array<[number, number]> = [];
-      for (let dy = -envelope.command.brushRadius; dy <= envelope.command.brushRadius; dy += 1) {
-        for (let dx = -envelope.command.brushRadius; dx <= envelope.command.brushRadius; dx += 1) {
-          if (dx * dx + dy * dy > envelope.command.brushRadius * envelope.command.brushRadius) continue;
-          const px = envelope.command.x + dx;
-          const py = envelope.command.y + dy;
-          if (!world.grid.inBounds(px, py)) continue;
-          if (world.grid.get(px, py) !== MaterialId.Empty) continue;
-          candidates.push([px, py]);
-        }
-      }
-      if (candidates.length === 0) {
-        resultCode = "bounds";
-        break;
-      }
-      if (hotbarEntry.count < candidates.length) {
-        resultCode = "inventory";
-        break;
-      }
-      const materialId = hotbarEntry.materialId;
-      if (MATERIALS[materialId].placement.kind === "object") {
-        for (const [px, py] of candidates) {
-          const cellObjectId = world.grid.getObjectId(px, py);
-          if (cellObjectId !== null) {
-            resultCode = "collision";
-            break;
-          }
-        }
-        if (resultCode === "collision") break;
-      }
-      if (resultCode !== "accepted") break;
-      gridWrites = candidates.map(([px, py]) => ({ x: px, y: py, id: materialId, shade: 0, auxiliary: 0, objectId: null }));
-      playerPatch = clonePlayerStateForPatch(actor);
-      playerPatch.hotbar = cloneHotbar(actor.hotbar);
-      playerPatch.hotbar[slot] = { kind: "material", materialId: hotbarEntry.materialId, count: hotbarEntry.count - candidates.length };
-      playerPatch.inventoryRevision = actor.inventoryRevision + 1;
-      acceptedEffect = "inventory";
-      inventoryRevisionDelta = 1;
-      worldRevisionDelta = 1;
+      playerPatch = placementResult.playerPatch;
+      gridWrites = placementResult.gridWrites;
+      fallingObjects = placementResult.fallingObjects;
+      acceptedEffect = placementResult.acceptedEffect;
+      inventoryRevisionDelta = placementResult.inventoryRevisionDelta;
+      worldRevisionDelta = placementResult.worldRevisionDelta;
       break;
     }
     case "harvest": {
@@ -627,15 +855,16 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
         resultCode = "revision";
         break;
       }
-      const harvested = harvestFlowerCluster(world.grid, envelope.command.x, envelope.command.y);
-      if (harvested <= 0) {
+      const harvestPlan = collectHarvestPlan(world.grid, envelope.command.x, envelope.command.y);
+      if (!harvestPlan || harvestPlan.cells.length === 0) {
         resultCode = "target";
         break;
       }
       playerPatch = clonePlayerStateForPatch(actor);
       playerPatch.inventory = cloneInventoryCounts(actor.inventory);
-      playerPatch.inventory.flowers = (playerPatch.inventory.flowers ?? 0) + harvested;
+      playerPatch.inventory.flowers = (playerPatch.inventory.flowers ?? 0) + harvestPlan.bloomCount;
       playerPatch.inventoryRevision = actor.inventoryRevision + 1;
+      gridWrites = harvestPlan.cells.map(([x, y]) => ({ x, y, id: MaterialId.Empty, shade: 0, auxiliary: 0, objectId: null }));
       acceptedEffect = "inventory";
       inventoryRevisionDelta = 1;
       worldRevisionDelta = 1;
@@ -720,6 +949,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
     acceptedEffect,
     playerPatch,
     gridWrites,
+    fallingObjects,
     paused,
     worldRevisionDelta,
     inventoryRevisionDelta,
@@ -741,6 +971,21 @@ export function commitValidatedPlan(world: WorldState, plan: ValidatedCommandPla
   }
   for (const write of plan.gridWrites) {
     world.grid.set(write.x, write.y, write.id, { shade: write.shade, objectId: write.objectId });
+    if (write.id === MaterialId.Faucet && write.auxiliary !== 0) {
+      world.grid.setAuxiliaryValue(write.x, write.y, write.auxiliary);
+    }
+  }
+  for (const fallingObject of plan.fallingObjects) {
+    world.fallingObjects[fallingObject.id] = {
+      id: fallingObject.id,
+      materialId: fallingObject.materialId,
+      x: fallingObject.x,
+      y: fallingObject.y,
+      restY: fallingObject.restY,
+      vy: fallingObject.vy,
+      offsets: fallingObject.offsets.map(([dx, dy]) => [dx, dy] as [number, number]),
+      provenance: fallingObject.provenance,
+    };
   }
   if (plan.paused !== undefined) {
     world.paused = plan.paused;
@@ -772,10 +1017,10 @@ export function processCommand(world: WorldState, envelopeInput: unknown): Comma
 
   const validation = validateCommand(world, envelope);
   if (validation.kind === "rejection") {
-    const authorityOrder = validation.admitted ? world.nextAuthorityOrder + 1 : null;
+    const authorityOrder = validation.admitted ? world.nextAuthorityOrder : null;
     if (authorityOrder !== null) {
       validation.authorityOrder = authorityOrder;
-      world.nextAuthorityOrder = authorityOrder;
+      world.nextAuthorityOrder = authorityOrder + 1;
       world.commandLedger.actorHighWater[envelope.actorId] = envelope.actorSequence;
     }
     const result = createCommandResult(validation, world);
@@ -783,9 +1028,9 @@ export function processCommand(world: WorldState, envelopeInput: unknown): Comma
     return result;
   }
 
-  const authorityOrder = world.nextAuthorityOrder + 1;
+  const authorityOrder = world.nextAuthorityOrder;
   validation.authorityOrder = authorityOrder;
-  world.nextAuthorityOrder = authorityOrder;
+  world.nextAuthorityOrder = authorityOrder + 1;
   world.commandLedger.actorHighWater[envelope.actorId] = envelope.actorSequence;
   const result = createCommandResult(validation, world);
   commitValidatedPlan(world, validation);

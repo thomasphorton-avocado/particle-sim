@@ -1,8 +1,18 @@
+import type { CommandEnvelope, CommandReceipt } from "./commands.js";
 import { Grid } from "./grid.js";
 import { createDefaultHotbar, createDefaultInventory, type HotbarItem, type InventoryCounts } from "./inventory.js";
-import { createObjectId, createPlayerId, createRoomId, type ObjectId, type PlayerId, type RoomId } from "./ids.js";
+import { createObjectId, createPlayerId, createRoomId, type CommandId, type ObjectId, type PlayerId, type RoomId } from "./ids.js";
 import { MaterialId } from "./materials.js";
 import { createGameplayRandomState, type GameplayRandomState } from "./random.js";
+
+export interface PersistedPlayerInputState {
+  left: boolean;
+  right: boolean;
+  jumpHeld: boolean;
+  crouchHeld: boolean;
+  lookUpHeld: boolean;
+  mineHeld: boolean;
+}
 
 export interface WeatherState {
   kind: "clear" | "rain" | "storm";
@@ -18,6 +28,21 @@ export interface WeatherState {
   boltSeed: number;
 }
 
+export interface FallingPlacementProvenance {
+  kind: "placement";
+  actorId: PlayerId;
+  commandId: CommandId;
+  sourceSlot: number;
+  materialId: MaterialId;
+  amount: 1;
+}
+
+export interface LegacyFallingProvenance {
+  kind: "legacy";
+}
+
+export type FallingObjectProvenance = FallingPlacementProvenance | LegacyFallingProvenance;
+
 export interface FallingObjectState {
   id: ObjectId;
   materialId: MaterialId;
@@ -26,6 +51,7 @@ export interface FallingObjectState {
   restY: number;
   vy: number;
   offsets: [number, number][];
+  provenance: FallingObjectProvenance;
 }
 
 export interface PlayerState {
@@ -46,14 +72,22 @@ export interface PlayerState {
   crouching: boolean;
   lookingUp: boolean;
   swimming: boolean;
+  input: PersistedPlayerInputState;
   inventory: InventoryCounts;
   hotbar: HotbarItem[];
   activeHotbarSlot: number;
+  inventoryRevision: number;
+  pendingRefunds: Record<string, number>;
 }
 
 export interface WorldTimeState {
   dayNightCycle: number;
   dayNightTick: number;
+}
+
+export interface CommandLedgerState {
+  actorHighWater: Record<string, number>;
+  recent: CommandReceipt[];
 }
 
 export interface WorldState {
@@ -68,6 +102,11 @@ export interface WorldState {
   weather: WeatherState;
   nextPlayerOrdinal: number;
   nextObjectOrdinal: number;
+  ownerPlayerId: PlayerId | null;
+  worldRevision: number;
+  nextAuthorityOrder: number;
+  commandLedger: CommandLedgerState;
+  commandInbox: CommandEnvelope[];
 }
 
 export function createDefaultWeatherState(): WeatherState {
@@ -83,6 +122,24 @@ export function createDefaultWeatherState(): WeatherState {
     boltX: null,
     boltY: null,
     boltSeed: 0,
+  };
+}
+
+export function createDefaultPlayerInputState(): PersistedPlayerInputState {
+  return {
+    left: false,
+    right: false,
+    jumpHeld: false,
+    crouchHeld: false,
+    lookUpHeld: false,
+    mineHeld: false,
+  };
+}
+
+export function createDefaultCommandLedger(): CommandLedgerState {
+  return {
+    actorHighWater: {},
+    recent: [],
   };
 }
 
@@ -105,14 +162,26 @@ export function createDefaultPlayerState(id: PlayerId): PlayerState {
     crouching: false,
     lookingUp: false,
     swimming: false,
+    input: createDefaultPlayerInputState(),
     inventory: createDefaultInventory(),
     hotbar: createDefaultHotbar(),
     activeHotbarSlot: 0,
+    inventoryRevision: 0,
+    pendingRefunds: {},
   };
 }
 
 export function createDefaultFallingObjectState(id: ObjectId, materialId: MaterialId, x: number, y: number, restY: number, vy: number, offsets: [number, number][]): FallingObjectState {
-  return { id, materialId, x, y, restY, vy, offsets: offsets.map(([dx, dy]) => [dx, dy] as [number, number]) };
+  return {
+    id,
+    materialId,
+    x,
+    y,
+    restY,
+    vy,
+    offsets: offsets.map(([dx, dy]) => [dx, dy] as [number, number]),
+    provenance: { kind: "legacy" },
+  };
 }
 
 export function createDefaultWorldState(roomId: RoomId | string = "room_default", grid?: Grid): WorldState {
@@ -131,6 +200,11 @@ export function createDefaultWorldState(roomId: RoomId | string = "room_default"
     weather: createDefaultWeatherState(),
     nextPlayerOrdinal: 1,
     nextObjectOrdinal: 1,
+    ownerPlayerId: null,
+    worldRevision: 0,
+    nextAuthorityOrder: 1,
+    commandLedger: createDefaultCommandLedger(),
+    commandInbox: [],
   };
   return world;
 }

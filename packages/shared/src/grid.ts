@@ -1,6 +1,6 @@
-import { type ObjectId } from "./ids.js";
 import { FLOWER_PALETTE, MaterialId } from "./materials.js";
 import { hashVisualShade } from "./random.js";
+import type { ObjectId } from "./ids.js";
 import type { WorldState } from "./world-state.js";
 
 function assertFiniteNumber(value: number, label: string): number {
@@ -10,7 +10,7 @@ function assertFiniteNumber(value: number, label: string): number {
   return value;
 }
 
-function assertInteger(value: number, label: string): number {
+function assertInteger(value: number, label = "value"): number {
   const finite = assertFiniteNumber(value, label);
   if (!Number.isInteger(finite)) {
     throw new RangeError(`${label} must be an integer`);
@@ -59,10 +59,6 @@ export function placeWorldCell(world: WorldState, x: number, y: number, material
   world.grid.set(x, y, materialId, { ...options, shade });
 }
 
-/**
- * Backing store for the simulation. `shade` is a per-cell random offset
- * (baked in when the cell is filled) so same-material regions aren't flat blocks.
- */
 export class Grid {
   readonly width: number;
   readonly height: number;
@@ -70,7 +66,9 @@ export class Grid {
   shade: Int8Array;
   auxiliary: Int8Array;
   objectIds: Array<ObjectId | null>;
+  cellRevisions: Uint32Array;
   private updated: Uint8Array;
+  private objectCellIndex: Map<string, Set<number>>;
 
   constructor(width: number, height: number) {
     this.width = width;
@@ -79,7 +77,9 @@ export class Grid {
     this.shade = new Int8Array(width * height);
     this.auxiliary = new Int8Array(width * height);
     this.objectIds = new Array(width * height).fill(null);
+    this.cellRevisions = new Uint32Array(width * height);
     this.updated = new Uint8Array(width * height);
+    this.objectCellIndex = new Map();
   }
 
   index(x: number, y: number): number {
@@ -102,13 +102,48 @@ export class Grid {
     return this.ids[this.index(x, y)] as MaterialId;
   }
 
+  private setObjectIndexEntry(index: number, objectId: ObjectId | null): void {
+    const previous = this.objectIds[index];
+    if (previous === objectId) return;
+    if (previous) {
+      const cells = this.objectCellIndex.get(previous);
+      if (cells) {
+        cells.delete(index);
+        if (cells.size === 0) this.objectCellIndex.delete(previous);
+      }
+    }
+    if (objectId) {
+      let cells = this.objectCellIndex.get(objectId);
+      if (!cells) {
+        cells = new Set<number>();
+        this.objectCellIndex.set(objectId, cells);
+      }
+      cells.add(index);
+    }
+    this.objectIds[index] = objectId;
+  }
+
+  private incrementCellRevision(index: number): void {
+    this.cellRevisions[index] = (this.cellRevisions[index] + 1) >>> 0;
+  }
+
+  private tupleChanged(index: number, id: MaterialId, shade: number, auxiliary: number, objectId: ObjectId | null): boolean {
+    return this.ids[index] !== id || this.shade[index] !== shade || this.auxiliary[index] !== auxiliary || this.objectIds[index] !== objectId;
+  }
+
   set(x: number, y: number, id: MaterialId, options?: GridSetOptions): void {
     if (!this.inBounds(x, y)) return;
     const i = this.index(x, y);
+    const nextShade = options?.shade ?? 0;
+    const nextAuxiliary = 0;
+    const nextObjectId = options?.objectId ?? null;
+    if (this.tupleChanged(i, id, nextShade, nextAuxiliary, nextObjectId)) {
+      this.incrementCellRevision(i);
+    }
     this.ids[i] = id;
-    this.shade[i] = options?.shade ?? 0;
-    this.auxiliary[i] = 0;
-    this.objectIds[i] = options?.objectId ?? null;
+    this.shade[i] = nextShade;
+    this.auxiliary[i] = nextAuxiliary;
+    this.setObjectIndexEntry(i, nextObjectId);
   }
 
   clear(): void {
@@ -116,6 +151,8 @@ export class Grid {
     this.shade.fill(0);
     this.auxiliary.fill(0);
     this.objectIds.fill(null);
+    this.objectCellIndex.clear();
+    this.cellRevisions.fill(0);
   }
 
   swap(x1: number, y1: number, x2: number, y2: number): void {
@@ -133,11 +170,17 @@ export class Grid {
     this.shade[i2] = tmpShade;
     this.auxiliary[i2] = tmpAuxiliary;
     this.objectIds[i2] = tmpObjectId;
+    this.incrementCellRevision(i1);
+    this.incrementCellRevision(i2);
+    this.rebuildObjectCellIndex();
   }
 
   setObjectCell(x: number, y: number, objectId: ObjectId): void {
     const i = this.assertInBounds(x, y);
-    this.objectIds[i] = objectId;
+    const previousObjectId = this.objectIds[i];
+    const nextObjectId = objectId;
+    if (previousObjectId !== nextObjectId) this.incrementCellRevision(i);
+    this.setObjectIndexEntry(i, nextObjectId);
   }
 
   getObjectId(x: number, y: number): ObjectId | null {
@@ -147,30 +190,29 @@ export class Grid {
 
   clearObjectCell(x: number, y: number): void {
     const i = this.assertInBounds(x, y);
-    this.objectIds[i] = null;
+    if (this.objectIds[i] !== null) this.incrementCellRevision(i);
+    this.setObjectIndexEntry(i, null);
   }
 
   hasObjectId(objectId: ObjectId): boolean {
-    return this.objectIds.includes(objectId);
+    return this.objectCellIndex.has(objectId);
   }
 
   clearObjectById(objectId: ObjectId): void {
-    for (let i = 0; i < this.objectIds.length; i++) {
-      if (this.objectIds[i] === objectId) {
-        const x = i % this.width;
-        const y = Math.floor(i / this.width);
-        this.set(x, y, MaterialId.Empty);
-      }
+    const cells = this.objectCellIndex.get(objectId);
+    if (!cells) return;
+    for (const index of Array.from(cells)) {
+      const x = index % this.width;
+      const y = Math.floor(index / this.width);
+      this.set(x, y, MaterialId.Empty);
     }
   }
 
   getCellForObjectId(objectId: ObjectId): [number, number] | null {
-    for (let i = 0; i < this.objectIds.length; i++) {
-      if (this.objectIds[i] === objectId) {
-        return [i % this.width, Math.floor(i / this.width)];
-      }
-    }
-    return null;
+    const cells = this.objectCellIndex.get(objectId);
+    if (!cells || cells.size === 0) return null;
+    const index = Array.from(cells)[0]!;
+    return [index % this.width, Math.floor(index / this.width)];
   }
 
   getAuxiliaryValue(x: number, y: number): number {
@@ -179,7 +221,9 @@ export class Grid {
 
   setAuxiliaryValue(x: number, y: number, value: number): void {
     const i = this.assertInBounds(x, y);
-    this.auxiliary[i] = assertAuxiliaryValueForMaterial(this.get(x, y), value);
+    const integer = assertAuxiliaryValueForMaterial(this.get(x, y), value);
+    if (this.auxiliary[i] !== integer) this.incrementCellRevision(i);
+    this.auxiliary[i] = integer;
   }
 
   getVx(x: number, y: number): number {
@@ -228,7 +272,7 @@ export class Grid {
 
   setWaterLiquidMemory(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Water) throw new TypeError("water liquid memory requires a water cell");
-    const integer = assertInteger(value, "water liquid memory");
+    const integer = assertInteger(value);
     if (integer < -4 || integer > 4) throw new RangeError("water liquid memory must be between -4 and 4");
     this.setAuxiliaryValue(x, y, integer);
   }
@@ -248,7 +292,7 @@ export class Grid {
 
   setFaucetFlow(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Faucet) throw new TypeError("faucet flow requires a faucet cell");
-    const integer = assertInteger(value, "faucet flow");
+    const integer = assertInteger(value);
     if (integer < 0 || integer > 2) throw new RangeError("faucet flow must be between 0 and 2");
     this.setAuxiliaryValue(x, y, integer);
   }
@@ -260,7 +304,7 @@ export class Grid {
 
   setFlowerPalette(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Flower) throw new TypeError("flower palette requires a flower cell");
-    const integer = assertInteger(value, "flower palette index");
+    const integer = assertInteger(value);
     if (integer < 0 || integer >= FLOWER_PALETTE.length) throw new RangeError("flower palette index is out of range");
     this.setAuxiliaryValue(x, y, integer);
   }
@@ -280,7 +324,7 @@ export class Grid {
 
   setDirtMoisture(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Dirt) throw new TypeError("dirt moisture requires a dirt cell");
-    const integer = assertInteger(value, "dirt moisture");
+    const integer = assertInteger(value);
     if (integer < 0 || integer > 12) throw new RangeError("dirt moisture must be between 0 and 12");
     this.setAuxiliaryValue(x, y, integer);
   }
@@ -292,7 +336,7 @@ export class Grid {
 
   setStemBudget(x: number, y: number, value: number): void {
     if (this.get(x, y) !== MaterialId.Stem) throw new TypeError("stem budget requires a stem cell");
-    const integer = assertInteger(value, "stem budget");
+    const integer = assertInteger(value);
     if (integer < 0 || integer > 10) throw new RangeError("stem budget must be between 0 and 10");
     this.setAuxiliaryValue(x, y, integer);
   }
@@ -307,5 +351,19 @@ export class Grid {
 
   resetUpdated(): void {
     this.updated.fill(0);
+  }
+
+  rebuildObjectCellIndex(): void {
+    this.objectCellIndex.clear();
+    for (let i = 0; i < this.objectIds.length; i++) {
+      const objectId = this.objectIds[i];
+      if (!objectId) continue;
+      let cells = this.objectCellIndex.get(objectId);
+      if (!cells) {
+        cells = new Set<number>();
+        this.objectCellIndex.set(objectId, cells);
+      }
+      cells.add(i);
+    }
   }
 }

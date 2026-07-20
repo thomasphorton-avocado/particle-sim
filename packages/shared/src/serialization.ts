@@ -1,12 +1,13 @@
 import { Grid, assertAuxiliaryValueForMaterial } from "./grid.js";
 import { cloneHotbar, createDefaultInventory, type HotbarItem, type InventoryCounts } from "./inventory.js";
-import { parseObjectId, parsePlayerId, parseRoomId } from "./ids.js";
+import { parseCommandId, parseObjectId, parsePlayerId, parseRoomId } from "./ids.js";
 import { MATERIALS, MaterialId } from "./materials.js";
-import { createDefaultFallingObjectState, createDefaultPlayerState, createDefaultWeatherState, createDefaultWorldState, type FallingObjectState, type PlayerState, type WeatherState, type WorldState } from "./world-state.js";
+import { createDefaultFallingObjectState, createDefaultPlayerState, createDefaultWeatherState, createDefaultWorldState, type CommandLedgerState, type FallingObjectState, type FallingObjectProvenance, type PlayerState, type WeatherState, type WorldState } from "./world-state.js";
 import { createGameplayRandomState, type GameplayRandomState } from "./random.js";
 import { DAY_NIGHT_CYCLE_TICKS } from "./gameplay.js";
+import type { CommandReceipt } from "./commands.js";
 
-export const WORLD_STATE_SCHEMA_VERSION = 3;
+export const WORLD_STATE_SCHEMA_VERSION = 4;
 
 export interface GameplayRandomStateDto {
   algorithm: "mulberry32-v1";
@@ -21,6 +22,7 @@ export interface GridDto {
   shade: number[];
   auxiliary: number[];
   objectMembership: Array<{ x: number; y: number; objectId: string }>;
+  cellRevisions: number[];
 }
 
 export interface PlayerStateDto {
@@ -40,9 +42,12 @@ export interface PlayerStateDto {
   crouching: boolean;
   lookingUp: boolean;
   swimming: boolean;
+  input: { left: boolean; right: boolean; jumpHeld: boolean; crouchHeld: boolean; lookUpHeld: boolean; mineHeld: boolean };
   inventory: InventoryCounts;
   hotbar: HotbarItem[];
   activeHotbarSlot: number;
+  inventoryRevision: number;
+  pendingRefunds: Record<string, number>;
 }
 
 export interface FallingObjectStateDto {
@@ -53,6 +58,7 @@ export interface FallingObjectStateDto {
   restY: number;
   vy: number;
   offsets: [number, number][];
+  provenance: FallingObjectProvenance;
 }
 
 export interface WeatherStateDto {
@@ -69,8 +75,13 @@ export interface WeatherStateDto {
   boltSeed: number;
 }
 
+export interface CommandLedgerDto {
+  actorHighWater: Record<string, number>;
+  recent: CommandReceipt[];
+}
+
 export interface WorldStateDto {
-  schemaVersion: 3;
+  schemaVersion: 4;
   roomId: string;
   grid: GridDto;
   random: GameplayRandomStateDto;
@@ -82,6 +93,10 @@ export interface WorldStateDto {
   weather: WeatherStateDto;
   nextPlayerOrdinal: number;
   nextObjectOrdinal: number;
+  ownerPlayerId: string | null;
+  worldRevision: number;
+  nextAuthorityOrder: number;
+  commandLedger: CommandLedgerDto;
 }
 
 const MAX_GRID_CELLS = 1_000_000;
@@ -201,6 +216,27 @@ function validateInventory(value: unknown): InventoryCounts {
   return normalized;
 }
 
+function validatePersistedInput(value: unknown): PlayerState["input"] {
+  const obj = assertObject(value, "input");
+  return {
+    left: assertBoolean(requireField(obj, "left", "input.left"), "input.left"),
+    right: assertBoolean(requireField(obj, "right", "input.right"), "input.right"),
+    jumpHeld: assertBoolean(requireField(obj, "jumpHeld", "input.jumpHeld"), "input.jumpHeld"),
+    crouchHeld: assertBoolean(requireField(obj, "crouchHeld", "input.crouchHeld"), "input.crouchHeld"),
+    lookUpHeld: assertBoolean(requireField(obj, "lookUpHeld", "input.lookUpHeld"), "input.lookUpHeld"),
+    mineHeld: assertBoolean(requireField(obj, "mineHeld", "input.mineHeld"), "input.mineHeld"),
+  };
+}
+
+function validatePendingRefunds(value: unknown): Record<string, number> {
+  const obj = assertObject(value, "pendingRefunds");
+  const normalized: Record<string, number> = {};
+  for (const [key, entry] of Object.entries(obj)) {
+    normalized[key] = assertInteger(entry, `pendingRefunds.${key}`, 0, 1000000);
+  }
+  return normalized;
+}
+
 function validatePlayerState(value: unknown, version: number): PlayerState {
   const obj = assertObject(value, "player");
   const id = parsePlayerId(requireField(obj, "id", "player.id"));
@@ -215,36 +251,41 @@ function validatePlayerState(value: unknown, version: number): PlayerState {
   const facing = requireField(obj, "facing", "player.facing");
   if (facing !== -1 && facing !== 1) throw new TypeError("player.facing must be -1 or 1");
   player.facing = facing as -1 | 1;
-  if (version === WORLD_STATE_SCHEMA_VERSION) {
+  if (version >= 3) {
     player.airTicks = assertInteger(requireField(obj, "airTicks", "player.airTicks"), "player.airTicks", 0, MAX_SAFE_INTEGER);
     player.airTime = player.airTicks;
     player.previousJumpHeld = assertBoolean(requireField(obj, "previousJumpHeld", "player.previousJumpHeld"), "player.previousJumpHeld");
     const swingElapsedTicks = requireField(obj, "swingElapsedTicks", "player.swingElapsedTicks");
     player.swingElapsedTicks = swingElapsedTicks === null ? null : assertInteger(swingElapsedTicks, "player.swingElapsedTicks", 0, MAX_SAFE_INTEGER);
     player.faucetCooldownUntilTick = assertInteger(requireField(obj, "faucetCooldownUntilTick", "player.faucetCooldownUntilTick"), "player.faucetCooldownUntilTick", 0, MAX_SAFE_INTEGER);
-  } else if (version === 1 || version === 2) {
+  } else {
     const legacyAirTime = assertFiniteNumber(requireField(obj, "airTime", "player.airTime"), "player.airTime");
-    if (legacyAirTime < 0) {
-      throw new TypeError("player.airTime must be >= 0");
-    }
+    if (legacyAirTime < 0) throw new TypeError("player.airTime must be >= 0");
     player.airTime = normalizeLegacyAirTicksSeconds(legacyAirTime);
     player.airTicks = player.airTime;
     player.previousJumpHeld = false;
     player.swingElapsedTicks = null;
     player.faucetCooldownUntilTick = 0;
-  } else {
-    throw new TypeError("unsupported world state schema version");
   }
   player.crouching = assertBoolean(requireField(obj, "crouching", "player.crouching"), "player.crouching");
   player.lookingUp = assertBoolean(requireField(obj, "lookingUp", "player.lookingUp"), "player.lookingUp");
   player.swimming = assertBoolean(requireField(obj, "swimming", "player.swimming"), "player.swimming");
+  if (version >= WORLD_STATE_SCHEMA_VERSION) {
+    player.input = validatePersistedInput(requireField(obj, "input", "player.input"));
+    player.inventoryRevision = assertInteger(requireField(obj, "inventoryRevision", "player.inventoryRevision"), "player.inventoryRevision", 0, MAX_SAFE_INTEGER);
+    player.pendingRefunds = validatePendingRefunds(requireField(obj, "pendingRefunds", "player.pendingRefunds"));
+  } else {
+    player.input = Object.prototype.hasOwnProperty.call(obj, "input") ? validatePersistedInput(obj["input"]) : createDefaultPlayerState(id).input;
+    player.inventoryRevision = Object.prototype.hasOwnProperty.call(obj, "inventoryRevision") ? assertInteger(obj["inventoryRevision"], "player.inventoryRevision", 0, MAX_SAFE_INTEGER) : 0;
+    player.pendingRefunds = Object.prototype.hasOwnProperty.call(obj, "pendingRefunds") ? validatePendingRefunds(obj["pendingRefunds"]) : {};
+  }
   player.inventory = validateInventory(requireField(obj, "inventory", "player.inventory"));
   player.hotbar = validateHotbar(requireField(obj, "hotbar", "player.hotbar"));
   player.activeHotbarSlot = assertInteger(requireField(obj, "activeHotbarSlot", "player.activeHotbarSlot"), "player.activeHotbarSlot", 0, 9);
   return player;
 }
 
-function validateFallingObjectState(value: unknown): FallingObjectState {
+function validateFallingObjectState(value: unknown, version: number): FallingObjectState {
   const obj = assertObject(value, "falling object");
   const id = parseObjectId(requireField(obj, "id", "fallingObject.id"));
   const materialId = assertMaterialId(requireField(obj, "materialId", "fallingObject.materialId"), "fallingObject.materialId");
@@ -256,7 +297,7 @@ function validateFallingObjectState(value: unknown): FallingObjectState {
     if (pair.length !== 2) throw new TypeError("fallingObject.offsets entries must be length 2");
     return [assertInteger(pair[0], "fallingObject.offsets[0]"), assertInteger(pair[1], "fallingObject.offsets[1]")] as [number, number];
   });
-  return createDefaultFallingObjectState(
+  const falling = createDefaultFallingObjectState(
     id,
     materialId,
     assertInteger(requireField(obj, "x", "fallingObject.x"), "fallingObject.x"),
@@ -265,6 +306,28 @@ function validateFallingObjectState(value: unknown): FallingObjectState {
     assertFiniteNumber(requireField(obj, "vy", "fallingObject.vy"), "fallingObject.vy"),
     offsets,
   );
+  const provenanceValue = Object.prototype.hasOwnProperty.call(obj, "provenance")
+    ? obj["provenance"]
+    : (version >= WORLD_STATE_SCHEMA_VERSION ? requireField(obj, "provenance", "fallingObject.provenance") : { kind: "legacy" });
+  falling.provenance = validateFallingProvenance(provenanceValue);
+  return falling;
+}
+
+function validateFallingProvenance(value: unknown): FallingObjectProvenance {
+  if (value === null || typeof value !== "object") throw new TypeError("fallingObject.provenance must be an object");
+  const obj = value as Record<string, unknown>;
+  if (obj["kind"] === "legacy") return { kind: "legacy" };
+  if (obj["kind"] === "placement") {
+    return {
+      kind: "placement",
+      actorId: parsePlayerId(requireField(obj, "actorId", "fallingObject.provenance.actorId")),
+      commandId: parseCommandId(requireField(obj, "commandId", "fallingObject.provenance.commandId")),
+      sourceSlot: assertInteger(requireField(obj, "sourceSlot", "fallingObject.provenance.sourceSlot"), "fallingObject.provenance.sourceSlot", 0, 9),
+      materialId: assertMaterialId(requireField(obj, "materialId", "fallingObject.provenance.materialId"), "fallingObject.provenance.materialId"),
+      amount: 1,
+    };
+  }
+  throw new TypeError("fallingObject.provenance.kind must be legacy or placement");
 }
 
 function validateWeatherState(value: unknown): WeatherState {
@@ -293,16 +356,16 @@ function validateGrid(value: unknown): Grid {
   const width = assertInteger(requireField(obj, "width", "grid.width"), "grid.width", 1, 10000);
   const height = assertInteger(requireField(obj, "height", "grid.height"), "grid.height", 1, 10000);
   const totalCells = width * height;
-  if (totalCells > MAX_GRID_CELLS) {
-    throw new TypeError("grid dimensions exceed the maximum allowed cell count");
-  }
+  if (totalCells > MAX_GRID_CELLS) throw new TypeError("grid dimensions exceed the maximum allowed cell count");
   const ids = assertArray(requireField(obj, "ids", "grid.ids"), "grid.ids");
   const shade = assertArray(requireField(obj, "shade", "grid.shade"), "grid.shade");
   const auxiliary = assertArray(requireField(obj, "auxiliary", "grid.auxiliary"), "grid.auxiliary");
   const objectMembership = assertArray(requireField(obj, "objectMembership", "grid.objectMembership"), "grid.objectMembership");
+  const cellRevisions = Object.prototype.hasOwnProperty.call(obj, "cellRevisions") ? assertArray(obj["cellRevisions"], "grid.cellRevisions") : Array(totalCells).fill(0);
   if (ids.length !== totalCells) throw new TypeError("grid.ids length mismatch");
   if (shade.length !== totalCells) throw new TypeError("grid.shade length mismatch");
   if (auxiliary.length !== totalCells) throw new TypeError("grid.auxiliary length mismatch");
+  if (cellRevisions.length !== totalCells) throw new TypeError("grid.cellRevisions length mismatch");
 
   const grid = new Grid(width, height);
   for (let i = 0; i < ids.length; i++) {
@@ -313,6 +376,7 @@ function validateGrid(value: unknown): Grid {
     grid.shade[i] = shadeValue;
     grid.auxiliary[i] = assertAuxiliaryValueForMaterialId(materialId, auxValue, `grid.auxiliary[${i}]`);
     grid.objectIds[i] = null;
+    grid.cellRevisions[i] = assertInteger(cellRevisions[i], `grid.cellRevisions[${i}]`, 0, MAX_SAFE_INTEGER) >>> 0;
   }
   const seenCoordinates = new Set<string>();
   const materialByObjectId = new Map<string, MaterialId>();
@@ -329,12 +393,11 @@ function validateGrid(value: unknown): Grid {
     if (materialId === MaterialId.Empty) throw new TypeError("grid.objectMembership must target a non-empty cell");
     if (MATERIALS[materialId].placement.kind !== "object") throw new TypeError("grid.objectMembership must target an object-material cell");
     const previousMaterial = materialByObjectId.get(objectId);
-    if (previousMaterial !== undefined && previousMaterial !== materialId) {
-      throw new TypeError("grid.objectMembership contains inconsistent materials for the same object ID");
-    }
+    if (previousMaterial !== undefined && previousMaterial !== materialId) throw new TypeError("grid.objectMembership contains inconsistent materials for the same object ID");
     materialByObjectId.set(objectId, materialId);
-    grid.setObjectCell(x, y, objectId);
+    grid.objectIds[grid.index(x, y)] = objectId;
   }
+  grid.rebuildObjectCellIndex();
   return grid;
 }
 
@@ -367,6 +430,35 @@ function validateGameplayRandomState(value: unknown): GameplayRandomState {
   return random;
 }
 
+function validateCommandLedger(value: unknown): CommandLedgerState {
+  const obj = assertObject(value, "commandLedger");
+  const actorHighWater = assertObject(requireField(obj, "actorHighWater", "commandLedger.actorHighWater"), "commandLedger.actorHighWater");
+  const recent = assertArray(requireField(obj, "recent", "commandLedger.recent"), "commandLedger.recent");
+  const normalized: CommandLedgerState = { actorHighWater: {}, recent: [] };
+  for (const [key, entry] of Object.entries(actorHighWater)) {
+    normalized.actorHighWater[key] = assertInteger(entry, `commandLedger.actorHighWater.${key}`, 0, MAX_SAFE_INTEGER);
+  }
+  for (const entry of recent) {
+    const receipt = entry as Record<string, unknown>;
+    normalized.recent.push({
+      commandId: parseCommandId(receipt["commandId"]),
+      actorId: parsePlayerId(receipt["actorId"]),
+      actorSequence: assertInteger(receipt["actorSequence"], "commandLedger.recent[].actorSequence", 0, MAX_SAFE_INTEGER),
+      authorityOrder: receipt["authorityOrder"] === null ? null : assertInteger(receipt["authorityOrder"], "commandLedger.recent[].authorityOrder", 0, MAX_SAFE_INTEGER),
+      issuedTick: assertInteger(receipt["issuedTick"], "commandLedger.recent[].issuedTick", 0, MAX_SAFE_INTEGER),
+      processedTick: assertInteger(receipt["processedTick"], "commandLedger.recent[].processedTick", 0, MAX_SAFE_INTEGER),
+      commandType: receipt["commandType"] as any,
+      code: receipt["code"] as any,
+      accepted: assertBoolean(receipt["accepted"], "commandLedger.recent[].accepted"),
+      worldRevision: assertInteger(receipt["worldRevision"], "commandLedger.recent[].worldRevision", 0, MAX_SAFE_INTEGER),
+      inventoryRevision: assertInteger(receipt["inventoryRevision"], "commandLedger.recent[].inventoryRevision", 0, MAX_SAFE_INTEGER),
+      targetRevision: assertInteger(receipt["targetRevision"], "commandLedger.recent[].targetRevision", 0, MAX_SAFE_INTEGER),
+      fingerprint: receipt["fingerprint"] as string,
+    });
+  }
+  return normalized;
+}
+
 export function serializeWorldState(world: WorldState): WorldStateDto {
   const grid = world.grid;
   const objectMembership: Array<{ x: number; y: number; objectId: string }> = [];
@@ -388,6 +480,7 @@ export function serializeWorldState(world: WorldState): WorldStateDto {
       shade: Array.from(grid.shade),
       auxiliary: Array.from(grid.auxiliary),
       objectMembership,
+      cellRevisions: Array.from(grid.cellRevisions),
     },
     random: cloneGameplayRandomState(world.random),
     players: Object.fromEntries(Object.entries(world.players).sort(([left], [right]) => compareStringCodeUnits(left, right)).map(([key, value]) => [key, serializePlayerState(value)])),
@@ -398,10 +491,22 @@ export function serializeWorldState(world: WorldState): WorldStateDto {
     weather: serializeWeatherState(world.weather),
     nextPlayerOrdinal: world.nextPlayerOrdinal,
     nextObjectOrdinal: world.nextObjectOrdinal,
+    ownerPlayerId: world.ownerPlayerId,
+    worldRevision: world.worldRevision,
+    nextAuthorityOrder: world.nextAuthorityOrder,
+    commandLedger: serializeCommandLedger(world.commandLedger),
   };
 }
 
 export function serializePlayerState(player: PlayerState): PlayerStateDto {
+  const input = player.input ?? {
+    left: false,
+    right: false,
+    jumpHeld: false,
+    crouchHeld: false,
+    lookUpHeld: false,
+    mineHeld: false,
+  };
   return {
     id: player.id,
     x: player.x,
@@ -419,9 +524,19 @@ export function serializePlayerState(player: PlayerState): PlayerStateDto {
     crouching: player.crouching,
     lookingUp: player.lookingUp,
     swimming: player.swimming,
+    input: {
+      left: Boolean(input.left),
+      right: Boolean(input.right),
+      jumpHeld: Boolean(input.jumpHeld),
+      crouchHeld: Boolean(input.crouchHeld),
+      lookUpHeld: Boolean(input.lookUpHeld),
+      mineHeld: Boolean(input.mineHeld),
+    },
     inventory: cloneInventoryCounts(player.inventory),
     hotbar: cloneHotbar(player.hotbar),
-    activeHotbarSlot: player.activeHotbarSlot,
+    activeHotbarSlot: typeof player.activeHotbarSlot === "number" ? player.activeHotbarSlot : 0,
+    inventoryRevision: typeof player.inventoryRevision === "number" ? player.inventoryRevision : 0,
+    pendingRefunds: { ...(player.pendingRefunds ?? {}) },
   };
 }
 
@@ -434,6 +549,7 @@ export function serializeFallingObjectState(objectState: FallingObjectState): Fa
     restY: objectState.restY,
     vy: objectState.vy,
     offsets: objectState.offsets.map(([dx, dy]) => [dx, dy] as [number, number]),
+    provenance: objectState.provenance ?? { kind: "legacy" },
   };
 }
 
@@ -453,20 +569,23 @@ export function serializeWeatherState(weather: WeatherState): WeatherStateDto {
   };
 }
 
+export function serializeCommandLedger(commandLedger: CommandLedgerState): CommandLedgerDto {
+  return {
+    actorHighWater: { ...commandLedger.actorHighWater },
+    recent: commandLedger.recent.map((receipt) => ({ ...receipt })),
+  };
+}
+
 function validateObjectIdentityInvariants(world: WorldState): void {
   const fallingIds = new Set<string>();
   for (const objectState of Object.values(world.fallingObjects)) {
-    if (fallingIds.has(objectState.id)) {
-      throw new TypeError("falling object IDs must be unique");
-    }
+    if (fallingIds.has(objectState.id)) throw new TypeError("falling object IDs must be unique");
     fallingIds.add(objectState.id);
   }
   for (let i = 0; i < world.grid.objectIds.length; i++) {
     const objectId = world.grid.objectIds[i];
     if (!objectId) continue;
-    if (fallingIds.has(objectId)) {
-      throw new TypeError("falling and placed object IDs must be disjoint");
-    }
+    if (fallingIds.has(objectId)) throw new TypeError("falling and placed object IDs must be disjoint");
   }
 }
 
@@ -481,7 +600,7 @@ export function deserializeWorldState(input: unknown): WorldState {
     }
   }
   const version = requireField(obj, "schemaVersion", "schemaVersion");
-  if (version !== 1 && version !== 2 && version !== WORLD_STATE_SCHEMA_VERSION) {
+  if (version !== 1 && version !== 2 && version !== 3 && version !== WORLD_STATE_SCHEMA_VERSION) {
     throw new TypeError("unsupported world state schema version");
   }
 
@@ -491,52 +610,48 @@ export function deserializeWorldState(input: unknown): WorldState {
   world.players = {};
   const players = assertObject(requireField(obj, "players", "players"), "players");
   for (const [key, playerEntry] of Object.entries(players)) {
-    const player = validatePlayerState(playerEntry, version);
+    const player = validatePlayerState(playerEntry, version as number);
     world.players[player.id] = player;
-    if (key !== player.id) {
-      throw new TypeError("player key mismatch");
-    }
+    if (key !== player.id) throw new TypeError("player key mismatch");
   }
   world.fallingObjects = {};
   const fallingObjects = assertObject(requireField(obj, "fallingObjects", "fallingObjects"), "fallingObjects");
   for (const [key, objectEntry] of Object.entries(fallingObjects)) {
-    const objectState = validateFallingObjectState(objectEntry);
+    const objectState = validateFallingObjectState(objectEntry, version as number);
     world.fallingObjects[objectState.id] = objectState;
-    if (key !== objectState.id) {
-      throw new TypeError("falling object key mismatch");
-    }
+    if (key !== objectState.id) throw new TypeError("falling object key mismatch");
   }
   world.paused = assertBoolean(requireField(obj, "paused", "paused"), "paused");
   const timeValue = requireField(obj, "time", "time");
   const timeObj = typeof timeValue === "object" && timeValue !== null ? (timeValue as Record<string, unknown>) : undefined;
-  if (!timeObj) {
-    throw new TypeError("time is required");
-  }
+  if (!timeObj) throw new TypeError("time is required");
   if (version === 1 || version === 2) {
-    if (!Object.prototype.hasOwnProperty.call(timeObj, "dayNightCycle")) {
-      throw new TypeError("time.dayNightCycle is required");
-    }
+    if (!Object.prototype.hasOwnProperty.call(timeObj, "dayNightCycle")) throw new TypeError("time.dayNightCycle is required");
     world.time.dayNightCycle = assertFiniteNumber(timeObj["dayNightCycle"], "time.dayNightCycle");
     world.tick = 0;
     world.time.dayNightTick = normalizeDayNightTick(world.time.dayNightCycle);
-  } else if (version === WORLD_STATE_SCHEMA_VERSION) {
-    if (!Object.prototype.hasOwnProperty.call(timeObj, "dayNightTick")) {
-      throw new TypeError("time.dayNightTick is required");
-    }
+  } else {
+    if (!Object.prototype.hasOwnProperty.call(timeObj, "dayNightTick")) throw new TypeError("time.dayNightTick is required");
     world.tick = assertInteger(requireField(obj, "tick", "tick"), "tick", 0, MAX_SAFE_INTEGER);
     world.time.dayNightTick = assertInteger(timeObj["dayNightTick"], "time.dayNightTick", 0, DAY_NIGHT_CYCLE_TICKS - 1);
-  } else {
-    throw new TypeError("unsupported world state schema version");
   }
   world.time.dayNightCycle = world.time.dayNightTick / DAY_NIGHT_CYCLE_TICKS;
   world.weather = validateWeatherState(requireField(obj, "weather", "weather"));
   world.nextPlayerOrdinal = assertInteger(requireField(obj, "nextPlayerOrdinal", "nextPlayerOrdinal"), "nextPlayerOrdinal", 1, MAX_SAFE_INTEGER);
   world.nextObjectOrdinal = assertInteger(requireField(obj, "nextObjectOrdinal", "nextObjectOrdinal"), "nextObjectOrdinal", 1, MAX_SAFE_INTEGER);
-  if (version === 1) {
-    world.random = createGameplayRandomState(DEFAULT_RANDOM_SEED);
-  } else {
-    world.random = validateGameplayRandomState(requireField(obj, "random", "random"));
+  world.ownerPlayerId = Object.prototype.hasOwnProperty.call(obj, "ownerPlayerId") ? (obj["ownerPlayerId"] === null ? null : parsePlayerId(obj["ownerPlayerId"])) : (Object.keys(world.players).length > 0 ? parsePlayerId(Object.keys(world.players).sort(compareStringCodeUnits)[0]!) : null);
+  world.worldRevision = Object.prototype.hasOwnProperty.call(obj, "worldRevision") ? assertInteger(obj["worldRevision"], "worldRevision", 0, MAX_SAFE_INTEGER) : 0;
+  world.nextAuthorityOrder = Object.prototype.hasOwnProperty.call(obj, "nextAuthorityOrder") ? assertInteger(obj["nextAuthorityOrder"], "nextAuthorityOrder", 1, MAX_SAFE_INTEGER) : 1;
+  world.commandLedger = Object.prototype.hasOwnProperty.call(obj, "commandLedger") ? validateCommandLedger(obj["commandLedger"]) : { actorHighWater: {}, recent: [] };
+  if (version === WORLD_STATE_SCHEMA_VERSION) {
+    for (const key of ["ownerPlayerId", "worldRevision", "nextAuthorityOrder", "commandLedger"]) {
+      if (!Object.prototype.hasOwnProperty.call(obj, key)) {
+        throw new TypeError(`${key} is required for schema v4`);
+      }
+    }
   }
+  world.random = version === 1 ? createGameplayRandomState(DEFAULT_RANDOM_SEED) : validateGameplayRandomState(requireField(obj, "random", "random"));
+  world.grid.rebuildObjectCellIndex();
   validateObjectIdentityInvariants(world);
   return world;
 }

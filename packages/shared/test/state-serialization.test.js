@@ -4,7 +4,7 @@ import { FLOWER_PALETTE, Grid, MaterialId, allocateObjectId, allocatePlayerId, c
 
 function createValidWorldDto(overrides = {}) {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     roomId: "room_test",
     grid: {
       width: 4,
@@ -23,6 +23,10 @@ function createValidWorldDto(overrides = {}) {
     random: { algorithm: "mulberry32-v1", seed: 0, state: 0 },
     nextPlayerOrdinal: 1,
     nextObjectOrdinal: 1,
+    ownerPlayerId: null,
+    worldRevision: 0,
+    nextAuthorityOrder: 1,
+    commandLedger: { actorHighWater: {}, recent: [] },
     ...overrides,
   };
 }
@@ -31,8 +35,8 @@ test("inventory and hotbar stay independent across players", () => {
   const world = createDefaultWorldState("room_test");
   const playerA = createPlayerId("player_1");
   const playerB = createPlayerId("player_2");
-  const stateA = { id: playerA, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "material", materialId: MaterialId.Seed, count: 1 }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 };
-  const stateB = { id: playerB, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 };
+  const stateA = { id: playerA, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, input: { left: false, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false, mineHeld: false }, inventory: { flowers: 0 }, hotbar: [{ kind: "material", materialId: MaterialId.Seed, count: 1 }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0, inventoryRevision: 0, pendingRefunds: {} };
+  const stateB = { id: playerB, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, input: { left: false, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false, mineHeld: false }, inventory: { flowers: 0 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0, inventoryRevision: 0, pendingRefunds: {} };
   world.players[playerA] = stateA;
   world.players[playerB] = stateB;
   stateA.inventory.flowers += 1;
@@ -73,7 +77,7 @@ test("falling-to-placed transition preserves object ID", () => {
 test("serialize and deserialize preserves world state", () => {
   const world = createDefaultWorldState("room_roundtrip");
   const playerId = allocatePlayerId(world);
-  const player = { id: playerId, x: 3, y: 4, vx: 1, vy: 2, width: 3, height: 5, grounded: true, facing: -1, airTime: 2, crouching: false, lookingUp: true, swimming: false, inventory: { flowers: 2, stone: 4 }, hotbar: [{ kind: "material", materialId: MaterialId.Stone, count: 2 }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 };
+  const player = { id: playerId, x: 3, y: 4, vx: 1, vy: 2, width: 3, height: 5, grounded: true, facing: -1, airTime: 2, crouching: false, lookingUp: true, swimming: false, input: { left: false, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false, mineHeld: false }, inventory: { flowers: 2, stone: 4 }, hotbar: [{ kind: "material", materialId: MaterialId.Stone, count: 2 }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0, inventoryRevision: 0, pendingRefunds: {} };
   world.players[player.id] = player;
   const objectId = allocateObjectId(world);
   world.fallingObjects[objectId] = { id: objectId, materialId: MaterialId.Stone, x: 2, y: 1, restY: 5, vy: 0, offsets: [[0, 0], [1, 0]] };
@@ -160,7 +164,7 @@ test("semantic auxiliary values are validated during deserialization", () => {
 test("serialization DTO mutations do not mutate world state", () => {
   const world = createDefaultWorldState("room_mutation");
   const playerId = allocatePlayerId(world);
-  world.players[playerId] = { id: playerId, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "material", materialId: MaterialId.Stone, count: 2 }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 };
+  world.players[playerId] = { id: playerId, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, input: { left: false, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false, mineHeld: false }, inventory: { flowers: 0 }, hotbar: [{ kind: "material", materialId: MaterialId.Stone, count: 2 }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0, inventoryRevision: 0, pendingRefunds: {} };
   const objectId = allocateObjectId(world);
   world.fallingObjects[objectId] = { id: objectId, materialId: MaterialId.Stone, x: 1, y: 2.5, restY: 4, vy: 0.5, offsets: [[0, 0]] };
   const dto = serializeWorldState(world);
@@ -182,7 +186,7 @@ test("serialization uses deterministic code-unit ordering for canonical JSON", (
   const world = createDefaultWorldState("room_canonical");
   const playerIds = ["player_i", "player_I", "player_1", "player_a", "player_A"];
   for (const id of playerIds) {
-    world.players[id] = { id, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0, zeta: 1, Alpha: 2, beta: 3 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 };
+    world.players[id] = { id, x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, input: { left: false, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false, mineHeld: false }, inventory: { flowers: 0, zeta: 1, Alpha: 2, beta: 3 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0, inventoryRevision: 0, pendingRefunds: {} };
   }
   const objectId = allocateObjectId(world);
   world.fallingObjects[objectId] = { id: objectId, materialId: MaterialId.Stone, x: 0, y: 0, restY: 0, vy: 0, offsets: [[0, 0]] };
@@ -219,7 +223,7 @@ test("schema-v1 migration defaults the RNG state and serializes as v2", () => {
   };
   const restored = deserializeWorldState(dto);
   assert.deepEqual(restored.random, { algorithm: "mulberry32-v1", seed: 0, state: 0 });
-  assert.equal(serializeWorldState(restored).schemaVersion, 3);
+  assert.equal(serializeWorldState(restored).schemaVersion, 4);
   assert.deepEqual(serializeWorldState(restored).random, { algorithm: "mulberry32-v1", seed: 0, state: 0 });
 });
 
@@ -269,10 +273,10 @@ test("starter worlds expose a fixed topology fixture while differing only by sha
 test("restored allocation skips IDs already in players, falling objects, and membership", () => {
   const dto = createValidWorldDto({
     players: {
-      player_1: { id: "player_1", x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTicks: 0, previousJumpHeld: false, swingElapsedTicks: null, faucetCooldownUntilTick: 0, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 },
+      player_1: { id: "player_1", x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTicks: 0, previousJumpHeld: false, swingElapsedTicks: null, faucetCooldownUntilTick: 0, airTime: 0, crouching: false, lookingUp: false, swimming: false, input: { left: false, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false, mineHeld: false }, inventory: { flowers: 0 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0, inventoryRevision: 0, pendingRefunds: {} },
     },
     fallingObjects: {
-      object_1: { id: "object_1", materialId: MaterialId.Stone, x: 0, y: 0, restY: 0, vy: 0, offsets: [[0, 0]] },
+      object_1: { id: "object_1", materialId: MaterialId.Stone, x: 0, y: 0, restY: 0, vy: 0, offsets: [[0, 0]], provenance: { kind: "legacy" } },
     },
     grid: {
       width: 4,

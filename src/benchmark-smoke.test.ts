@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 
 // @ts-expect-error - the benchmark script is ESM and intentionally typed via a declaration file.
 const benchmarkModule = await import("../scripts/benchmark-shared.mjs");
-const { runBenchmark: typedRunBenchmark } = benchmarkModule as { runBenchmark: (options?: { warmupTicks?: number; totalTicks?: number }) => Array<{ scenario: string; hz: number; digest: string }> };
+const { runBenchmark: typedRunBenchmark } = benchmarkModule as { runBenchmark: (options?: { warmupTicks?: number; totalTicks?: number; gc?: () => void }) => Array<{ scenario: string; hz: number; digest: string }> };
 
 describe("benchmark self-verification", () => {
   it("keeps 60Hz and 30Hz cadences canonically identical", () => {
-    const results = typedRunBenchmark({ warmupTicks: 20, totalTicks: 60 });
+    const results = typedRunBenchmark({ warmupTicks: 20, totalTicks: 60, gc: () => undefined });
     expect(results).toHaveLength(4);
 
     const byScenario = new Map<string, { hz: number; digest: string }>();

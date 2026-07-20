@@ -16,7 +16,8 @@
     "build": "npm run build:shared && npm run build:client",
     "test:shared": "npm --workspace @particle-sim/shared run test:smoke",
     "test:client": "vitest run",
-    "test": "npm run build:shared && npm run test:client && npm run test:shared",
+    "test:benchmark": "node --expose-gc --test ./scripts/benchmark-shared.test.mjs",
+    "test": "npm run build:shared && npm run test:client && npm run test:shared && npm run test:benchmark",
     "preview": "vite preview",
     "benchmark": "node --expose-gc ./scripts/benchmark-shared.mjs"
   },

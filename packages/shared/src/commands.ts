@@ -876,7 +876,8 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
         resultCode = "target";
         break;
       }
-      if (envelope.command.objectId !== world.grid.getObjectId(envelope.command.x, envelope.command.y)) {
+      const faucetObjectId = world.grid.getObjectId(envelope.command.x, envelope.command.y);
+      if (envelope.command.objectId !== faucetObjectId) {
         resultCode = "target";
         break;
       }
@@ -886,7 +887,20 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
         break;
       }
       const nextAux = (world.grid.getAuxiliaryValue(envelope.command.x, envelope.command.y) + 1) % 3;
-      gridWrites = [{ x: envelope.command.x, y: envelope.command.y, id: MaterialId.Faucet, shade: world.grid.shade[world.grid.index(envelope.command.x, envelope.command.y)] ?? 0, auxiliary: nextAux, objectId: world.grid.getObjectId(envelope.command.x, envelope.command.y) }];
+      gridWrites = [];
+      for (let y = 0; y < world.grid.height; y++) {
+        for (let x = 0; x < world.grid.width; x++) {
+          if (world.grid.getObjectId(x, y) !== faucetObjectId) continue;
+          gridWrites.push({
+            x,
+            y,
+            id: MaterialId.Faucet,
+            shade: world.grid.shade[world.grid.index(x, y)] ?? 0,
+            auxiliary: nextAux,
+            objectId: faucetObjectId
+          });
+        }
+      }
       acceptedEffect = "target";
       worldRevisionDelta = 1;
       break;

@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 import { beforeEach, describe, expect, it } from "vitest";
-import { attachCharacterInput, getCharacterInputState, resetCharacterInputState } from "./character";
+import { createDefaultPlayerState, createPlayerId, SWING_DURATION_TICKS } from "@particle-sim/shared";
+import { attachCharacterInput, drawCharacter, getCharacterInputState, resetCharacterInputState } from "./character";
 import { consumeBufferedInputs, createInputEdgeBuffer, type InputEdgeBuffer } from "./input-buffer";
 
 function dispatchMouseEvent(type: "mousedown" | "mouseup"): void {
@@ -138,5 +139,57 @@ describe("character mine input aggregation", () => {
 
     expect(consumeBufferedInputs(buffer).mineHeld).toBe(true);
     expect(consumeBufferedInputs(buffer).mineHeld).toBe(false);
+  });
+});
+
+describe("character pickaxe rendering", () => {
+  class RecordingContext {
+    fillStyle: string | CanvasGradient | CanvasPattern = "";
+    readonly transforms: Array<[string, ...number[]]> = [];
+    readonly rectangles: Array<[number, number, number, number]> = [];
+
+    save(): void {}
+    restore(): void {}
+    translate(x: number, y: number): void {
+      this.transforms.push(["translate", x, y]);
+    }
+    scale(x: number, y: number): void {
+      this.transforms.push(["scale", x, y]);
+    }
+    rotate(angle: number): void {
+      this.transforms.push(["rotate", angle]);
+    }
+    fillRect(x: number, y: number, width: number, height: number): void {
+      this.rectangles.push([x, y, width, height]);
+    }
+  }
+
+  it.each([
+    { facing: 1 as const, shoulderX: 50, scaleX: 1 },
+    { facing: -1 as const, shoulderX: 20, scaleX: -1 },
+  ])("draws a full-size swing toward facing $facing", ({ facing, shoulderX, scaleX }) => {
+    const player = createDefaultPlayerState(createPlayerId(`player_pickaxe_${facing}`));
+    player.x = 2;
+    player.y = 3;
+    player.facing = facing;
+    player.swingElapsedTicks = Math.floor(SWING_DURATION_TICKS / 2);
+    const ctx = new RecordingContext();
+
+    drawCharacter(ctx, player, { playerId: player.id }, 10);
+
+    expect(ctx.transforms[0]).toEqual(["translate", shoulderX, 55]);
+    expect(ctx.transforms[1]).toEqual(["scale", scaleX, 1]);
+    expect(ctx.rectangles).toContainEqual([0, -4, 40, 8]);
+    expect(ctx.rectangles).toContainEqual([32, -12, 12, 8]);
+  });
+
+  it("hides the pickaxe between swings", () => {
+    const player = createDefaultPlayerState(createPlayerId("player_pickaxe_idle"));
+    player.swingElapsedTicks = null;
+    const ctx = new RecordingContext();
+
+    drawCharacter(ctx, player, { playerId: player.id }, 10);
+
+    expect(ctx.transforms).toEqual([]);
   });
 });

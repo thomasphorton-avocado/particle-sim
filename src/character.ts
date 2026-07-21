@@ -18,6 +18,11 @@ export interface CharacterInput {
   mine: boolean;
 }
 
+type CharacterDrawingContext = Pick<
+  CanvasRenderingContext2D,
+  "fillStyle" | "fillRect" | "restore" | "rotate" | "save" | "scale" | "translate"
+>;
+
 const keyboardControls: CharacterInput = { left: false, right: false, jump: false, crouch: false, lookUp: false, mine: false };
 const touchControls: CharacterInput = { left: false, right: false, jump: false, crouch: false, lookUp: false, mine: false };
 let mouseMineHeld = false;
@@ -288,7 +293,7 @@ function getSwingProgress(player: PlayerState): number {
 }
 
 export function drawCharacter(
-  ctx: CanvasRenderingContext2D,
+  ctx: CharacterDrawingContext,
   player: PlayerState,
   _runtime: CharacterRuntime,
   cellSize: number,
@@ -301,12 +306,6 @@ export function drawCharacter(
   const pants = "#3a5a3a";
   const hair = "#5a3322";
 
-  const swingProgress = getSwingProgress(player);
-  const angle = swingAngle(swingProgress);
-  const pickaxeColor = "#8c8c8c";
-  const dx = Math.cos(angle);
-  const dy = Math.sin(angle);
-
   ctx.fillStyle = hair;
   ctx.fillRect(px, py, cs * 3, cs);
   ctx.fillStyle = skin;
@@ -316,12 +315,27 @@ export function drawCharacter(
   ctx.fillStyle = pants;
   ctx.fillRect(px, py + cs * 4, cs * 3, cs);
 
-  ctx.strokeStyle = pickaxeColor;
-  ctx.lineWidth = Math.max(2, cs / 6);
-  ctx.beginPath();
-  ctx.moveTo(px + cs * 1.5, py + cs * 2.5);
-  ctx.lineTo(px + cs * 1.5 + dx * cs * 2, py + cs * 2.5 + dy * cs * 2);
-  ctx.stroke();
+  if (player.swingElapsedTicks !== null) {
+    const angle = swingAngle(getSwingProgress(player));
+
+    ctx.save();
+    const shoulderX = px + (player.facing === 1 ? cs * 3 : 0);
+    const shoulderY = py + cs * 2.5;
+    ctx.translate(shoulderX, shoulderY);
+    ctx.scale(player.facing, 1);
+    ctx.rotate(angle);
+
+    ctx.fillStyle = "#8B6914";
+    ctx.fillRect(0, -cs * 0.4, cs * 4, cs * 0.8);
+
+    ctx.fillStyle = "#666";
+    ctx.fillRect(cs * 3.2, -cs * 1.2, cs * 1.2, cs * 0.8);
+    ctx.fillRect(cs * 3.2, cs * 0.4, cs * 1.2, cs * 0.8);
+    ctx.fillStyle = "#888";
+    ctx.fillRect(cs * 3, -cs * 0.6, cs * 0.8, cs * 1.2);
+
+    ctx.restore();
+  }
 
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(px + cs * 1.1, py + cs * 1.2, cs * 0.3, cs * 0.3);

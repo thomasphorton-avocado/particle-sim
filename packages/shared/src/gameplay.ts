@@ -3,6 +3,7 @@ import { type Grid } from "./grid.js";
 import { type PlayerId } from "./ids.js";
 import { MATERIALS, MaterialId, MaterialPhase } from "./materials.js";
 import { stepMaterial } from "./material-step.js";
+import { stepWeather } from "./weather-step.js";
 import { type PlayerState, type WorldState } from "./world-state.js";
 
 export const GAMEPLAY_HZ = 60;
@@ -398,6 +399,9 @@ export function advanceWorldTick(world: WorldState, inputs: Readonly<Record<stri
 
   world.time.dayNightTick = (world.time.dayNightTick + 1) % DAY_NIGHT_CYCLE_TICKS;
   world.time.dayNightCycle = world.time.dayNightTick / DAY_NIGHT_CYCLE_TICKS;
+
+  // Weather runs before materials so rain droplets settle within the same tick.
+  stepWeather(world);
 
   stepMaterial(world);
 

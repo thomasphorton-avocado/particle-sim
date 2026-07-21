@@ -8,4 +8,5 @@ export * from "./serialization.js";
 export * from "./random.js";
 export * from "./starter-world.js";
 export * from "./gameplay.js";
+export * from "./weather-step.js";
 export * from "./commands.js";

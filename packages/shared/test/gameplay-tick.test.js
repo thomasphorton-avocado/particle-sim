@@ -6,6 +6,7 @@ createDefaultPlayerState,
 createDefaultWorldState,
 createPlayerId,
 createStarterWorld,
+deserializeWorldState,
 FAUCET_BUMP_COOLDOWN_TICKS,
 Grid,
 MaterialId,
@@ -39,6 +40,19 @@ player.x = x;
 player.y = y;
 world.players[id] = player;
 return id;
+}
+
+function forceStorm(world) {
+  const weather = world.weather;
+  weather.kind = "storm";
+  weather.episodeElapsed = 0;
+  weather.episodeDuration = 1_000_000;
+  weather.wind = 2;
+  weather.rainAccumulator = 0;
+  weather.lightningFlash = null;
+  weather.lightningCooldown = 5;
+  weather.boltX = null;
+  weather.boltY = null;
 }
 
 test("same seed + identical input sequence produces identical checksums", () => {
@@ -145,4 +159,97 @@ assert.equal(advanceWorldTick(world, {}), true);
 
 assert.equal(JSON.stringify(world.weather), beforeWeather);
 assert.equal(world.random.state, beforeRandomState);
+});
+
+test("weather episodes are deterministic across equivalent worlds", () => {
+  const a = createDefaultWorldState("weather_episode");
+  const b = createDefaultWorldState("weather_episode");
+
+  for (let tick = 0; tick < 240; tick += 1) {
+    advanceWorldTick(a, {});
+    advanceWorldTick(b, {});
+  }
+
+  assert.equal(JSON.stringify(a.weather), JSON.stringify(b.weather));
+  assert.equal(checksum(a), checksum(b));
+  assert.ok(["clear", "rain", "storm"].includes(a.weather.kind));
+  assert.ok(a.weather.episodeDuration >= 0);
+});
+
+test("rain spawns water droplets into the world during the same tick", () => {
+  const world = createDefaultWorldState("rain_room");
+  world.weather.kind = "rain";
+  world.weather.episodeElapsed = 0;
+  world.weather.episodeDuration = 1_000_000;
+  world.weather.wind = 0;
+  world.weather.rainAccumulator = 0;
+
+  let sawWater = false;
+  for (let tick = 0; tick < 200 && !sawWater; tick += 1) {
+    advanceWorldTick(world, {});
+    for (let y = 0; y < world.grid.height && !sawWater; y += 1) {
+      for (let x = 0; x < world.grid.width; x += 1) {
+        if (world.grid.get(x, y) === MaterialId.Water) {
+          sawWater = true;
+          break;
+        }
+      }
+    }
+  }
+
+  assert.ok(sawWater, "rain must place water into the world grid");
+});
+
+test("storm lightning is bounded and stays within the grid", () => {
+  const world = createDefaultWorldState("storm_room");
+  forceStorm(world);
+
+  let flashes = 0;
+  let sawValidBolt = false;
+  for (let tick = 0; tick < 80; tick += 1) {
+    advanceWorldTick(world, {});
+    if (world.weather.lightningFlash !== null) {
+      flashes += 1;
+      const boltX = world.weather.boltX;
+      const boltY = world.weather.boltY;
+      assert.notEqual(boltX, null);
+      assert.notEqual(boltY, null);
+      assert.ok(boltX >= 0 && boltX < world.grid.width);
+      assert.ok(boltY >= 0 && boltY < world.grid.height);
+      sawValidBolt = true;
+    }
+  }
+
+  assert.ok(flashes > 0, "storm weather should produce at least one lightning flash");
+  assert.ok(sawValidBolt, "storm lightning should include a bounded bolt position");
+});
+
+test("zero-sized grids stay inert and deterministic", () => {
+  const world = createDefaultWorldState("weather_empty", new Grid(0, 0));
+  const beforeWeather = JSON.stringify(world.weather);
+  const beforeRandomState = world.random.state;
+
+  for (let tick = 0; tick < 12; tick += 1) {
+    advanceWorldTick(world, {});
+  }
+
+  assert.equal(JSON.stringify(world.weather), beforeWeather);
+  assert.equal(world.random.state, beforeRandomState);
+});
+
+test("weather state round-trips through serialization and continues deterministically", () => {
+  const world = createDefaultWorldState("weather_roundtrip");
+  forceStorm(world);
+  for (let tick = 0; tick < 30; tick += 1) {
+    advanceWorldTick(world, {});
+  }
+
+  const payload = serializeWorldState(world);
+  const restored = deserializeWorldState(payload);
+  for (let tick = 0; tick < 20; tick += 1) {
+    advanceWorldTick(world, {});
+    advanceWorldTick(restored, {});
+  }
+
+  assert.equal(JSON.stringify(serializeWorldState(world)), JSON.stringify(serializeWorldState(restored)));
 });

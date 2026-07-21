@@ -1,7 +1,5 @@
-import { Grid } from "./grid";
-import { MATERIALS, MaterialId } from "./materials";
-import { setDayNightPreset, state } from "./state";
-import type { HotbarItem } from "./state";
+import { Grid, MATERIALS, MaterialId, createCommandEnvelope, enqueueCommand, getNextActorSequence, type HotbarItem } from "@particle-sim/shared";
+import { getLocalPlayer, setDayNightPreset, state } from "./state";
 import { setTouchControl } from "./character";
 
 const PALETTE: MaterialId[] = [
@@ -73,13 +71,21 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   const pauseBtn = document.createElement("button");
   pauseBtn.textContent = "Pause";
   pauseBtn.addEventListener("click", () => {
-    state.paused = !state.paused;
-    pauseBtn.textContent = state.paused ? "Resume" : "Pause";
+    const actorId = state.localPlayerId;
+    const command = state.world.paused
+      ? { type: "resume_world" as const, expectedWorldRevision: state.world.worldRevision }
+      : { type: "pause_world" as const, expectedWorldRevision: state.world.worldRevision };
+    const envelope = createCommandEnvelope(actorId, getNextActorSequence(state.world, actorId), state.world.tick, command);
+    enqueueCommand(state.world, envelope);
+    pauseBtn.textContent = state.world.paused ? "Resume" : "Pause";
   });
 
   const clearBtn = document.createElement("button");
   clearBtn.textContent = "Clear";
-  clearBtn.addEventListener("click", () => grid.clear());
+  clearBtn.addEventListener("click", () => {
+    if (state.toolMode === "play") return;
+    grid.clear();
+  });
 
   actionGroup.append(pauseBtn, clearBtn);
 
@@ -152,7 +158,7 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   flowerCounter.className = "flower-counter";
   flowerCounter.textContent = "🌸 0";
   const updateFlowerCounter = () => {
-    flowerCounter.textContent = `🌸 ${state.inventory.flowers}`;
+    flowerCounter.textContent = `🌸 ${getLocalPlayer().inventory.flowers}`;
     requestAnimationFrame(updateFlowerCounter);
   };
   requestAnimationFrame(updateFlowerCounter);
@@ -268,21 +274,30 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   }
 
   function refreshHotbarSlots(): void {
+    const player = getLocalPlayer();
     for (let i = 0; i < 10; i++) {
-      const item = state.hotbar[i];
+      const item = player.hotbar[i];
       iconElements[i].textContent = slotLabel(item);
       countElements[i].textContent = slotCount(item);
-      slotElements[i].classList.toggle("active", i === state.activeSlot);
+      slotElements[i].classList.toggle("active", i === player.activeHotbarSlot);
     }
   }
 
   function selectSlot(index: number): void {
-    state.activeSlot = index;
+    const player = getLocalPlayer();
+    const actorId = state.localPlayerId;
+    const envelope = createCommandEnvelope(
+      actorId,
+      getNextActorSequence(state.world, actorId),
+      state.world.tick,
+      { type: "select_slot", slot: index, expectedInventoryRevision: player.inventoryRevision },
+    );
+    enqueueCommand(state.world, envelope);
     for (let j = 0; j < slotElements.length; j++) {
       slotElements[j].classList.toggle("active", j === index);
     }
     // Auto-switch tool mode based on item
-    const item = state.hotbar[index];
+    const item = player.hotbar[index];
     if (item.kind === "pickaxe" || item.kind === "material") {
       setToolMode("play", pickaxeBtn);
     }
@@ -296,7 +311,7 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   requestAnimationFrame(updateHotbar);
 
   // Initial selection
-  selectSlot(state.activeSlot);
+  selectSlot(getLocalPlayer().activeHotbarSlot);
 
   // Number keys 1-0 select hotbar slots
   window.addEventListener("keydown", (e) => {
@@ -317,7 +332,7 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
     const dir = e.deltaY > 0 ? 1 : e.deltaY < 0 ? -1 : 0;
     if (dir === 0) return;
     e.preventDefault();
-    const next = ((state.activeSlot + dir) % 10 + 10) % 10;
+    const next = ((getLocalPlayer().activeHotbarSlot + dir) % 10 + 10) % 10;
     selectSlot(next);
   }, { passive: false });
 

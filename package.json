@@ -3,11 +3,26 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "typecheck:shared": "tsc -p packages/shared/tsconfig.json --pretty false --noEmit",
+    "typecheck:client": "tsc -p tsconfig.json --pretty false",
+    "typecheck": "npm run typecheck:shared && npm run typecheck:client",
+    "build:shared": "npm --workspace @particle-sim/shared run build",
+    "build:client": "tsc -p tsconfig.json --pretty false && vite build",
+    "build": "npm run build:shared && npm run build:client",
+    "test:shared": "npm --workspace @particle-sim/shared run test:smoke",
+    "test:client": "vitest run",
+    "test:benchmark": "node --expose-gc --test ./scripts/benchmark-shared.test.mjs",
+    "test": "npm run build:shared && npm run test:client && npm run test:shared && npm run test:benchmark",
     "preview": "vite preview",
-    "test": "vitest run"
+    "benchmark": "node --expose-gc ./scripts/benchmark-shared.mjs"
+  },
+  "dependencies": {
+    "@particle-sim/shared": "0.0.0"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.1.10",

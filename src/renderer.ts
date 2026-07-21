@@ -1,6 +1,6 @@
-import { Grid } from "./grid";
-import { FLOWER_PALETTE, MATERIALS, MaterialId } from "./materials";
-import type { ObjectPlacement } from "./materials";
+import { Grid, FLOWER_PALETTE, MATERIALS, MaterialId } from "@particle-sim/shared";
+import type { ObjectPlacement } from "@particle-sim/shared";
+import type { PresentationSnapshot } from "./render-snapshots";
 import { state } from "./state";
 
 interface CloudPuff {
@@ -102,7 +102,7 @@ export class Renderer {
   /** Paints a day/night sky gradient with pixelated drifting clouds. */
   private drawBackground(): void {
     const { width, height } = this.ctx.canvas;
-    const phase = (state.dayNightCycle % 1 + 1) % 1;
+    const phase = (state.world.time.dayNightCycle % 1 + 1) % 1;
     const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
     const ease = (t: number) => 0.5 - Math.cos(Math.PI * t) / 2;
 
@@ -211,17 +211,17 @@ export class Renderer {
     return this.ctx;
   }
 
-  draw(grid: Grid): void {
+  draw(grid: Grid, presentationSnapshot?: PresentationSnapshot): void {
     const data = this.imageData.data;
     for (let i = 0; i < grid.ids.length; i++) {
       const id = grid.ids[i] as MaterialId;
       const material = MATERIALS[id];
       const shade = grid.shade[i];
       const o = i * 4;
-      // Flowers store their randomly-chosen bloom color's palette index in `vx`.
-      const color = id === MaterialId.Flower ? FLOWER_PALETTE[grid.vx[i]] : material.color;
-      // Wet dirt gets progressively darker based on moisture (vx 0-8)
-      const wetOffset = id === MaterialId.Dirt ? -(grid.vx[i] * 5) : 0;
+      // Flowers store their randomly-chosen bloom color's palette index in material-specific auxiliary state.
+      const color = id === MaterialId.Flower ? FLOWER_PALETTE[grid.getFlowerPalette(Math.floor(i % grid.width), Math.floor(i / grid.width))] : material.color;
+      // Wet dirt gets progressively darker based on moisture (0-12)
+      const wetOffset = id === MaterialId.Dirt ? -(grid.getDirtMoisture(Math.floor(i % grid.width), Math.floor(i / grid.width)) * 5) : 0;
       // Darken bottom edge (where material meets different/empty below)
       let edgeOffset = 0;
       if ((id === MaterialId.Dirt || id === MaterialId.Grass || id === MaterialId.Stone || id === MaterialId.Wood) && i + grid.width < grid.ids.length) {
@@ -256,7 +256,7 @@ export class Renderer {
     this.drawTorchLights(grid);
     this.drawTorchHandles(grid);
     this.drawTorchFlames(grid);
-    this.drawFallingObjects();
+    this.drawFallingObjects(presentationSnapshot);
     this.drawClockFaces(grid);
     this.drawObjectOutlines(grid);
     this.drawFaucetDials(grid);
@@ -267,7 +267,7 @@ export class Renderer {
    * 1 at midnight (phase 0.75), easing smoothly through dawn and dusk.
    */
   private nightStrength(): number {
-    const phase = (state.dayNightCycle % 1 + 1) % 1;
+    const phase = (state.world.time.dayNightCycle % 1 + 1) % 1;
     return (1 - Math.cos(2 * Math.PI * (phase - 0.25))) / 2;
   }
 
@@ -388,25 +388,29 @@ export class Renderer {
    * position. Torches also get their glow/handle/flame overlays so they look
    * identical to placed torches during the fall.
    */
-  private drawFallingObjects(): void {
+  private drawFallingObjects(presentationSnapshot?: PresentationSnapshot): void {
     const cs = this.cellSize;
-    for (const o of state.fallingObjects) {
-      // Base footprint block, drawn using the material color.
-      const [r, g, b] = MATERIALS[o.materialId].color;
+    const snapshotObjects = presentationSnapshot?.fallingObjects;
+    const items = snapshotObjects
+      ? Array.from(snapshotObjects.entries()).map(([id, object]) => ({ id, ...object }))
+      : Object.values(state.world.fallingObjects);
+
+    for (const object of items) {
+      const materialId = object.materialId as MaterialId;
+      const [r, g, b] = MATERIALS[materialId].color;
       this.ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-      for (const [dx, dy] of o.offsets) {
-        this.ctx.fillRect((o.x + dx) * cs, (o.y + dy) * cs, cs, cs);
+      for (const [dx, dy] of object.offsets) {
+        this.ctx.fillRect((object.x + dx) * cs, (object.y + dy) * cs, cs, cs);
       }
 
-      if (o.materialId === MaterialId.Torch) {
-        const flameCx = o.x * cs + cs / 2;
-        const flameCy = (o.y - 1) * cs + cs * 0.6; // top-center cell
-        // Glow (screen blend), then handle and flame on top.
+      if (object.materialId === MaterialId.Torch) {
+        const flameCx = object.x * cs + cs / 2;
+        const flameCy = (object.y - 1) * cs + cs * 0.6;
         this.ctx.save();
         this.ctx.globalCompositeOperation = "screen";
         this.drawTorchGlowAt(flameCx, flameCy);
         this.ctx.restore();
-        this.drawTorchHandleAt(o.x * cs + cs / 2, (o.y + 1) * cs + cs * 0.5);
+        this.drawTorchHandleAt(object.x * cs + cs / 2, (object.y + 1) * cs + cs * 0.5);
         this.drawTorchFlameAt(flameCx, flameCy);
       }
     }
@@ -415,7 +419,7 @@ export class Renderer {
 
   private drawClockFaces(grid: Grid): void {
     const cs = this.cellSize;
-    const cycle = state.dayNightCycle % 1;
+    const cycle = state.world.time.dayNightCycle % 1;
     const angle = (cycle * Math.PI * 2 + Math.PI / 2) % (Math.PI * 2);
     const handLength = cs * 4.2;
 
@@ -464,7 +468,7 @@ export class Renderer {
         let minX = x, maxX = x, minY = y, maxY = y;
         const queue: [number, number][] = [[x, y]];
         visited[idx] = 1;
-        let flowState = grid.vx[idx];
+        let flowState = grid.getFaucetFlow(x, y);
         while (queue.length > 0) {
           const [cx, cy] = queue.shift()!;
           if (cx < minX) minX = cx;

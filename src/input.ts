@@ -1,6 +1,5 @@
 import { Grid, MATERIALS, MaterialId, allocateObjectId, createDefaultFallingObjectState, harvestFlowerCluster, nextBool, placeWorldCell, type WorldState } from "@particle-sim/shared";
 import { state, hasPickaxeEquipped, addToHotbar, getActiveHotbarMaterial, removeFromActiveSlot, getLocalPlayer } from "./state";
-import { startSwing, setSwingHeld } from "./character";
 
 /** Maximum placement distance from character center (in grid cells). */
 const PLACEMENT_RADIUS = 30;
@@ -268,12 +267,6 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
       return;
     }
     if (state.toolMode === "play" && hasPickaxeEquipped()) {
-      // Mining now happens continuously along the pickaxe arc during the swing
-      // (see mineSwingArc in character.ts). Holding the button auto-repeats swings.
-      if (state.character) {
-        startSwing(state.character);
-        setSwingHeld(state.character, true);
-      }
       painting = false;
       lastGridPos = null;
       return;
@@ -309,7 +302,6 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
   const end = () => {
     painting = false;
     lastGridPos = null;
-    if (state.character) setSwingHeld(state.character, false);
   };
 
   canvas.addEventListener("mousedown", (e) => start(e.clientX, e.clientY));

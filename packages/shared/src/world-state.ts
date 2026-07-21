@@ -39,6 +39,10 @@ export interface PlayerState {
   grounded: boolean;
   facing: -1 | 1;
   airTime: number;
+  airTicks: number;
+  previousJumpHeld: boolean;
+  swingElapsedTicks: number | null;
+  faucetCooldownUntilTick: number;
   crouching: boolean;
   lookingUp: boolean;
   swimming: boolean;
@@ -49,6 +53,7 @@ export interface PlayerState {
 
 export interface WorldTimeState {
   dayNightCycle: number;
+  dayNightTick: number;
 }
 
 export interface WorldState {
@@ -58,6 +63,7 @@ export interface WorldState {
   players: Record<string, PlayerState>;
   fallingObjects: Record<string, FallingObjectState>;
   paused: boolean;
+  tick: number;
   time: WorldTimeState;
   weather: WeatherState;
   nextPlayerOrdinal: number;
@@ -92,6 +98,10 @@ export function createDefaultPlayerState(id: PlayerId): PlayerState {
     grounded: false,
     facing: 1,
     airTime: 0,
+    airTicks: 0,
+    previousJumpHeld: false,
+    swingElapsedTicks: null,
+    faucetCooldownUntilTick: 0,
     crouching: false,
     lookingUp: false,
     swimming: false,
@@ -116,7 +126,8 @@ export function createDefaultWorldState(roomId: RoomId | string = "room_default"
     players: {},
     fallingObjects: {},
     paused: false,
-    time: { dayNightCycle: 0.5 },
+    tick: 0,
+    time: { dayNightCycle: 0.5, dayNightTick: 9000 },
     weather: createDefaultWeatherState(),
     nextPlayerOrdinal: 1,
     nextObjectOrdinal: 1,

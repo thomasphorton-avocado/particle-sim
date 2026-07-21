@@ -1,14 +1,16 @@
 import "./style.css";
-import { MATERIALS, MaterialId, createStarterWorld, findFlowerCluster } from "@particle-sim/shared";
+import { MATERIALS, MaterialId, advanceWorldTick, createStarterWorld, findFlowerCluster, normalizePlayerInput, type PlayerInputState } from "@particle-sim/shared";
 import { Renderer } from "./renderer";
-import { step } from "./simulation";
 import { attachInput } from "./input";
 import { buildUi } from "./ui";
 import { state, getActiveHotbarMaterial, getLocalPlayer } from "./state";
-import { createCharacter, attachCharacterInput, updateCharacter, drawCharacter } from "./character";
-import { updateFallingObjects } from "./falling";
+import { createCharacter, attachCharacterInput, getCharacterInputState, drawCharacter } from "./character";
+import { createInputEdgeBuffer, consumeBufferedInputs } from "./input-buffer";
+import { createPresentationSnapshot, getInterpolatedPlayerSnapshot, interpolatePresentationSnapshot } from "./render-snapshots";
 
 const CELL_SIZE = 5;
+const TICK_MS = 1000 / 60;
+const MAX_TICKS_PER_FRAME = 8;
 
 state.world = createStarterWorld({ roomId: "room_default" });
 const grid = state.world.grid;
@@ -22,23 +24,92 @@ attachInput(canvas, state.world, CELL_SIZE);
 
 const runtime = createCharacter(grid);
 state.character = runtime;
-attachCharacterInput();
-
 let lastTime = performance.now();
+let accumulatorMs = 0;
+let wasPaused = state.world.paused;
+let wasHidden = document.hidden;
+let hidden = document.hidden;
+const inputBuffer = createInputEdgeBuffer();
+attachCharacterInput(inputBuffer);
+let previousPresentationSnapshot = createPresentationSnapshot(state.world);
+let currentPresentationSnapshot = createPresentationSnapshot(state.world);
+
+function getBufferedInputs(): Record<string, PlayerInputState> {
+  const localInput = getCharacterInputState();
+  const bufferedInputs = consumeBufferedInputs(inputBuffer);
+  return {
+    [state.localPlayerId]: normalizePlayerInput({
+      left: localInput.left,
+      right: localInput.right,
+      jumpHeld: bufferedInputs.jumpHeld,
+      crouchHeld: localInput.crouch,
+      lookUpHeld: localInput.lookUp,
+      mineHeld: bufferedInputs.mineHeld,
+    }),
+  };
+}
 
 function loop(): void {
   const now = performance.now();
-  const dt = (now - lastTime) / 1000; // seconds
+  const frameDeltaMs = now - lastTime;
   lastTime = now;
 
-  if (!state.world.paused) {
-    state.world.time.dayNightCycle += dt / 300;
-    step(state.world);
-    updateCharacter(getLocalPlayer(), runtime, grid, dt);
-    updateFallingObjects(state.world, dt);
+  const paused = state.world.paused;
+  const visibilityChanged = hidden !== wasHidden;
+  const shouldResetClockAnchor = paused !== wasPaused || visibilityChanged;
+  if (shouldResetClockAnchor) {
+    previousPresentationSnapshot = currentPresentationSnapshot;
+    lastTime = now;
+    wasPaused = paused;
+    wasHidden = hidden;
   }
-  renderer.draw(grid);
-  drawCharacter(renderer.getCtx(), getLocalPlayer(), runtime, CELL_SIZE);
+
+  const shouldRenderCurrentSnapshot = paused || hidden || shouldResetClockAnchor;
+  if (shouldRenderCurrentSnapshot) {
+    accumulatorMs = 0;
+  } else {
+    accumulatorMs += frameDeltaMs;
+  }
+
+  let ticksThisFrame = 0;
+  while (accumulatorMs >= TICK_MS && ticksThisFrame < MAX_TICKS_PER_FRAME) {
+    previousPresentationSnapshot = currentPresentationSnapshot;
+    advanceWorldTick(state.world, getBufferedInputs());
+    currentPresentationSnapshot = createPresentationSnapshot(state.world);
+    accumulatorMs -= TICK_MS;
+    ticksThisFrame += 1;
+  }
+
+  const displayAlpha = shouldRenderCurrentSnapshot
+    ? 1
+    : accumulatorMs >= TICK_MS
+      ? 1
+      : Math.min(Math.max(accumulatorMs / TICK_MS, 0), 1);
+  const interpolatedPresentationSnapshot = shouldRenderCurrentSnapshot
+    ? currentPresentationSnapshot
+    : interpolatePresentationSnapshot(previousPresentationSnapshot, currentPresentationSnapshot, displayAlpha);
+  renderer.draw(grid, interpolatedPresentationSnapshot);
+  const interpolatedPlayer = getInterpolatedPlayerSnapshot(
+    previousPresentationSnapshot,
+    currentPresentationSnapshot,
+    state.localPlayerId,
+    displayAlpha,
+  );
+  if (interpolatedPlayer) {
+    drawCharacter(
+      renderer.getCtx(),
+      {
+        ...getLocalPlayer(),
+        x: interpolatedPlayer.x,
+        y: interpolatedPlayer.y,
+        vy: interpolatedPlayer.vy,
+      },
+      runtime,
+      CELL_SIZE,
+    );
+  } else {
+    drawCharacter(renderer.getCtx(), getLocalPlayer(), runtime, CELL_SIZE);
+  }
 
   // Draw placement radius border (place mode, or play mode with material selected)
   const showRadius = state.toolMode === "place" || (state.toolMode === "play" && getActiveHotbarMaterial() != null);
@@ -126,4 +197,15 @@ function loop(): void {
 
   requestAnimationFrame(loop);
 }
+
+function updateVisibility(): void {
+  hidden = document.hidden;
+  if (!hidden) {
+    previousPresentationSnapshot = currentPresentationSnapshot;
+    lastTime = performance.now();
+    accumulatorMs = 0;
+  }
+}
+
+document.addEventListener("visibilitychange", updateVisibility);
 requestAnimationFrame(loop);

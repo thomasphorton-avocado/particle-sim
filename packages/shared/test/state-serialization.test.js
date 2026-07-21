@@ -4,7 +4,7 @@ import { FLOWER_PALETTE, Grid, MaterialId, allocateObjectId, allocatePlayerId, c
 
 function createValidWorldDto(overrides = {}) {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     roomId: "room_test",
     grid: {
       width: 4,
@@ -17,7 +17,8 @@ function createValidWorldDto(overrides = {}) {
     players: {},
     fallingObjects: {},
     paused: false,
-    time: { dayNightCycle: 0.25 },
+    tick: 0,
+    time: { dayNightCycle: 0.25, dayNightTick: 4500 },
     weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 },
     random: { algorithm: "mulberry32-v1", seed: 0, state: 0 },
     nextPlayerOrdinal: 1,
@@ -218,7 +219,7 @@ test("schema-v1 migration defaults the RNG state and serializes as v2", () => {
   };
   const restored = deserializeWorldState(dto);
   assert.deepEqual(restored.random, { algorithm: "mulberry32-v1", seed: 0, state: 0 });
-  assert.equal(serializeWorldState(restored).schemaVersion, 2);
+  assert.equal(serializeWorldState(restored).schemaVersion, 3);
   assert.deepEqual(serializeWorldState(restored).random, { algorithm: "mulberry32-v1", seed: 0, state: 0 });
 });
 
@@ -268,7 +269,7 @@ test("starter worlds expose a fixed topology fixture while differing only by sha
 test("restored allocation skips IDs already in players, falling objects, and membership", () => {
   const dto = createValidWorldDto({
     players: {
-      player_1: { id: "player_1", x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 },
+      player_1: { id: "player_1", x: 0, y: 0, vx: 0, vy: 0, width: 3, height: 5, grounded: false, facing: 1, airTicks: 0, previousJumpHeld: false, swingElapsedTicks: null, faucetCooldownUntilTick: 0, airTime: 0, crouching: false, lookingUp: false, swimming: false, inventory: { flowers: 0 }, hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })], activeHotbarSlot: 0 },
     },
     fallingObjects: {
       object_1: { id: "object_1", materialId: MaterialId.Stone, x: 0, y: 0, restY: 0, vy: 0, offsets: [[0, 0]] },
@@ -290,6 +291,103 @@ test("restored allocation skips IDs already in players, falling objects, and mem
 });
 
 test("rejects malformed schema and dangling object identities", () => {
-  assert.throws(() => deserializeWorldState({ schemaVersion: 3, roomId: "room_bad", grid: { width: 2, height: 2, ids: [0, 0, 0, 0], shade: [0, 0, 0, 0], auxiliary: [0, 0, 0, 0], objectMembership: [] }, players: {}, fallingObjects: {}, paused: false, time: { dayNightCycle: 0.5 }, weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 }, random: { algorithm: "mulberry32-v1", seed: 0, state: 0 }, nextPlayerOrdinal: 1, nextObjectOrdinal: 1 }), /unsupported/);
+  assert.throws(() => deserializeWorldState({ schemaVersion: 3, roomId: "room_bad", grid: { width: 2, height: 2, ids: [0, 0, 0, 0], shade: [0, 0, 0, 0], auxiliary: [0, 0, 0, 0], objectMembership: [] }, players: {}, fallingObjects: {}, paused: false, time: { dayNightCycle: 0.5 }, weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 }, random: { algorithm: "mulberry32-v1", seed: 0, state: 0 }, nextPlayerOrdinal: 1, nextObjectOrdinal: 1 }), /tick/i);
   assert.throws(() => deserializeWorldState({ schemaVersion: 1, roomId: "room_bad", grid: { width: 2, height: 2, ids: [0, 0, 0, 0], shade: [0, 0, 0, 0], auxiliary: [0, 0, 0, 0], objectMembership: [{ x: 0, y: 0, objectId: "bad_id" }] }, players: {}, fallingObjects: {}, paused: false, time: { dayNightCycle: 0.5 }, weather: { kind: "clear", episodeElapsed: 0, episodeDuration: 0, wind: 0, visualTime: 0, rainAccumulator: 0, lightningFlash: null, lightningCooldown: null, boltX: null, boltY: null, boltSeed: 0 }, nextPlayerOrdinal: 1, nextObjectOrdinal: 1 }), /object/i);
+});
+
+test("v3 preserves tick and per-player timing state across restore", () => {
+  const world = createDefaultWorldState("room_v3_roundtrip");
+  const playerId = allocatePlayerId(world);
+  world.tick = 17;
+  world.time.dayNightTick = 17999;
+  world.players[playerId] = {
+    id: playerId,
+    x: 1,
+    y: 2,
+    vx: 0,
+    vy: 0,
+    width: 3,
+    height: 5,
+    grounded: false,
+    facing: 1,
+    airTicks: 3,
+    previousJumpHeld: true,
+    swingElapsedTicks: 5,
+    faucetCooldownUntilTick: 12,
+    airTime: 0,
+    crouching: false,
+    lookingUp: false,
+    swimming: false,
+    inventory: { flowers: 0 },
+    hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })],
+    activeHotbarSlot: 0,
+  };
+  const restored = deserializeWorldState(serializeWorldState(world));
+  assert.equal(restored.tick, 17);
+  assert.equal(restored.time.dayNightTick, 17999);
+  assert.equal(restored.players[playerId].airTicks, 3);
+  assert.equal(restored.players[playerId].previousJumpHeld, true);
+  assert.equal(restored.players[playerId].swingElapsedTicks, 5);
+  assert.equal(restored.players[playerId].faucetCooldownUntilTick, 12);
+});
+
+test("v3 rejects malformed timing and input payloads", () => {
+  assert.throws(() => deserializeWorldState(createValidWorldDto({
+    tick: -1,
+  })), /tick/i);
+  assert.throws(() => deserializeWorldState(createValidWorldDto({
+    time: { dayNightCycle: 0.25, dayNightTick: -1 },
+  })), /dayNightTick/i);
+  assert.throws(() => deserializeWorldState(createValidWorldDto({
+    players: {
+      player_1: {
+        id: "player_1",
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        width: 3,
+        height: 5,
+        grounded: false,
+        facing: 1,
+        airTicks: -1,
+        previousJumpHeld: true,
+        swingElapsedTicks: 5,
+        faucetCooldownUntilTick: 0,
+        airTime: 0,
+        crouching: false,
+        lookingUp: false,
+        swimming: false,
+        inventory: { flowers: 0 },
+        hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })],
+        activeHotbarSlot: 0,
+      },
+    },
+  })), /airTicks/i);
+  assert.throws(() => deserializeWorldState(createValidWorldDto({
+    players: {
+      player_1: {
+        id: "player_1",
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        width: 3,
+        height: 5,
+        grounded: false,
+        facing: 1,
+        airTicks: 0,
+        previousJumpHeld: true,
+        swingElapsedTicks: -1,
+        faucetCooldownUntilTick: 0,
+        airTime: 0,
+        crouching: false,
+        lookingUp: false,
+        swimming: false,
+        inventory: { flowers: 0 },
+        hotbar: [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })],
+        activeHotbarSlot: 0,
+      },
+    },
+  })), /swingElapsedTicks/i);
 });

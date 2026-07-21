@@ -83,6 +83,7 @@ export function setDayNightPreset(preset: DayNightPreset): void {
    night: 0.75,
   };
   state.world.time.dayNightCycle = presets[preset];
+  state.world.time.dayNightTick = Math.round(presets[preset] * 18_000) % 18_000;
 }
 
 /** Returns true if the currently selected hotbar item is a pickaxe. */

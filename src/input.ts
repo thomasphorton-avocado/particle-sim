@@ -1,4 +1,4 @@
-import { Grid, MATERIALS, MaterialId, allocateObjectId, createDefaultFallingObjectState, harvestFlowerCluster, nextBool, placeWorldCell, type WorldState } from "@particle-sim/shared";
+import { Grid, MATERIALS, MaterialId, allocateObjectId, createCommandEnvelope, createDefaultFallingObjectState, enqueueCommand, findFlowerCluster, getNextActorSequence, harvestFlowerCluster, nextBool, placeWorldCell, type GameplayCommand, type WorldState } from "@particle-sim/shared";
 import { state, hasPickaxeEquipped, addToHotbar, getActiveHotbarMaterial, removeFromActiveSlot, getLocalPlayer } from "./state";
 
 /** Maximum placement distance from character center (in grid cells). */
@@ -22,6 +22,12 @@ function canPlaceOver(grid: Grid, x: number, y: number, matId: MaterialId): bool
   // Impermeable materials displace water
   if (existing === MaterialId.Water && !MATERIALS[matId].permeable) return true;
   return false;
+}
+
+function enqueuePlayCommand(world: WorldState, command: GameplayCommand): void {
+  const actorId = state.localPlayerId;
+  const envelope = createCommandEnvelope(actorId, getNextActorSequence(world, actorId), world.tick, command);
+  enqueueCommand(world, envelope);
 }
 
 function getObjectOffsets(materialId: MaterialId): [number, number][] {
@@ -66,6 +72,16 @@ function canDescendObjectFootprint(world: WorldState, anchorX: number, anchorY: 
 }
 
 export function handleHarvestInputAt(world: WorldState, gx: number, gy: number): boolean {
+  if (state.toolMode === "play") {
+    const cluster = findFlowerCluster(world.grid, gx, gy);
+    if (!cluster || cluster.size === 0) {
+      return false;
+    }
+    const targetRevision = world.grid.cellRevisions[world.grid.index(gx, gy)] ?? 0;
+    enqueuePlayCommand(world, { type: "harvest", x: gx, y: gy, expectedTargetRevision: targetRevision });
+    return true;
+  }
+
   const harvested = harvestFlowerCluster(world.grid, gx, gy);
   if (harvested <= 0) return false;
 
@@ -82,6 +98,19 @@ export function handleHarvestInputAt(world: WorldState, gx: number, gy: number):
 }
 
 export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number): boolean {
+  if (state.toolMode === "play") {
+    const player = getLocalPlayer();
+    enqueuePlayCommand(world, {
+      type: "place",
+      x: gx,
+      y: gy,
+      brushRadius: state.brushSize,
+      expectedInventoryRevision: player.inventoryRevision,
+      expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(gx, gy)] ?? 0,
+    });
+    return true;
+  }
+
   const hotbarMat = getActiveHotbarMaterial();
   if (!hotbarMat) return false;
   if (!withinPlacementRange(gx, gy)) return false;
@@ -229,6 +258,18 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
 
   /** Flood-fill all connected faucet cells and cycle their flow state. */
   const cycleFaucet = (gx: number, gy: number): boolean => {
+    if (state.toolMode === "play") {
+      const objectId = world.grid.getObjectId(gx, gy);
+      if (!objectId) return false;
+      enqueuePlayCommand(world, {
+        type: "cycle_faucet",
+        x: gx,
+        y: gy,
+        objectId,
+        expectedTargetRevision: world.grid.cellRevisions[world.grid.index(gx, gy)] ?? 0,
+      });
+      return true;
+    }
     if (grid.get(gx, gy) !== MaterialId.Faucet) return false;
     const visited = new Set<number>();
     const queue: [number, number][] = [[gx, gy]];

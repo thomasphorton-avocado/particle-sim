@@ -262,6 +262,13 @@ export function assertBenchmarkResults(results) {
   if (starter60.digest !== starter30.digest || stress60.digest !== stress30.digest) {
     throw new Error(`Benchmark cadence equality mismatch: ${starter60.digest} !== ${starter30.digest} or ${stress60.digest} !== ${stress30.digest}`);
   }
+
+  const p50ThresholdMs = 5;
+  for (const result of [starter60, starter30, stress60, stress30]) {
+    if (result.perTickMs.p50 > p50ThresholdMs) {
+      throw new Error(`Benchmark p50 exceeded ${p50ThresholdMs}ms for ${result.scenario} @ ${result.hz}Hz: ${result.perTickMs.p50}ms`);
+    }
+  }
 }
 
 function main() {

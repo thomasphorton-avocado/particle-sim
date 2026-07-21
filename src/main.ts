@@ -1,5 +1,5 @@
 import "./style.css";
-import { MATERIALS, MaterialId, advanceWorldTick, createStarterWorld, findFlowerCluster, normalizePlayerInput, type PlayerInputState } from "@particle-sim/shared";
+import { MATERIALS, MaterialId, createStarterWorld, findFlowerCluster, normalizePlayerInput, type PlayerInputState } from "@particle-sim/shared";
 import { Renderer } from "./renderer";
 import { attachInput } from "./input";
 import { buildUi } from "./ui";
@@ -7,6 +7,7 @@ import { state, getActiveHotbarMaterial, getLocalPlayer } from "./state";
 import { createCharacter, attachCharacterInput, getCharacterInputState, drawCharacter } from "./character";
 import { createInputEdgeBuffer, consumeBufferedInputs } from "./input-buffer";
 import { createPresentationSnapshot, getInterpolatedPlayerSnapshot, interpolatePresentationSnapshot } from "./render-snapshots";
+import { enqueueInputStateCommand, enqueueMineTransitionCommand, processProductionTick } from "./production-tick";
 
 const CELL_SIZE = 5;
 const TICK_MS = 1000 / 60;
@@ -33,19 +34,21 @@ const inputBuffer = createInputEdgeBuffer();
 attachCharacterInput(inputBuffer);
 let previousPresentationSnapshot = createPresentationSnapshot(state.world);
 let currentPresentationSnapshot = createPresentationSnapshot(state.world);
+let previousMineHeld = false;
 
-function getBufferedInputs(): Record<string, PlayerInputState> {
+function getBufferedInputs(): { movement: PlayerInputState; mineHeld: boolean } {
   const localInput = getCharacterInputState();
   const bufferedInputs = consumeBufferedInputs(inputBuffer);
   return {
-    [state.localPlayerId]: normalizePlayerInput({
+    movement: normalizePlayerInput({
       left: localInput.left,
       right: localInput.right,
       jumpHeld: bufferedInputs.jumpHeld,
       crouchHeld: localInput.crouch,
       lookUpHeld: localInput.lookUp,
-      mineHeld: bufferedInputs.mineHeld,
+      mineHeld: false,
     }),
+    mineHeld: bufferedInputs.mineHeld,
   };
 }
 
@@ -74,7 +77,13 @@ function loop(): void {
   let ticksThisFrame = 0;
   while (accumulatorMs >= TICK_MS && ticksThisFrame < MAX_TICKS_PER_FRAME) {
     previousPresentationSnapshot = currentPresentationSnapshot;
-    advanceWorldTick(state.world, getBufferedInputs());
+    const bufferedInputs = getBufferedInputs();
+    enqueueInputStateCommand(state.world, state.localPlayerId, bufferedInputs.movement, state.world.tick);
+    if (bufferedInputs.mineHeld !== previousMineHeld) {
+      enqueueMineTransitionCommand(state.world, state.localPlayerId, bufferedInputs.mineHeld, state.world.tick);
+      previousMineHeld = bufferedInputs.mineHeld;
+    }
+    processProductionTick(state.world);
     currentPresentationSnapshot = createPresentationSnapshot(state.world);
     accumulatorMs -= TICK_MS;
     ticksThisFrame += 1;

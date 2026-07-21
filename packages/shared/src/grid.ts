@@ -1,4 +1,4 @@
-import { MaterialId } from "./materials";
+import { MaterialId } from "./materials.js";
 
 /**
  * Backing store for the simulation. `shade` is a per-cell random offset
@@ -58,19 +58,19 @@ export class Grid {
   swap(x1: number, y1: number, x2: number, y2: number): void {
     const i1 = this.index(x1, y1);
     const i2 = this.index(x2, y2);
-    const tmpId = this.ids[i1];
-    const tmpShade = this.shade[i1];
-    const tmpVx = this.vx[i1];
-    this.ids[i1] = this.ids[i2];
-    this.shade[i1] = this.shade[i2];
-    this.vx[i1] = this.vx[i2];
+    const tmpId = this.ids[i1]!;
+    const tmpShade = this.shade[i1]!;
+    const tmpVx = this.vx[i1]!;
+    this.ids[i1] = this.ids[i2]!;
+    this.shade[i1] = this.shade[i2]!;
+    this.vx[i1] = this.vx[i2]!;
     this.ids[i2] = tmpId;
     this.shade[i2] = tmpShade;
     this.vx[i2] = tmpVx;
   }
 
   getVx(x: number, y: number): number {
-    return this.vx[this.index(x, y)];
+    return this.vx[this.index(x, y)]!;
   }
 
   setVx(x: number, y: number, v: number): void {

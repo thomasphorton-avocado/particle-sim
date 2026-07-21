@@ -1,5 +1,4 @@
-import { Grid } from "./grid";
-import { MATERIALS, MaterialId } from "./materials";
+import { Grid, MATERIALS, MaterialId } from "@particle-sim/shared";
 import { setDayNightPreset, state } from "./state";
 import type { HotbarItem } from "./state";
 import { setTouchControl } from "./character";

@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { Grid } from "./grid";
-import { harvestFlowerCluster } from "./harvest";
+import { Grid, harvestFlowerCluster, MaterialId } from "@particle-sim/shared";
 import { updateFallingObjects } from "./falling";
-import { MaterialId } from "./materials";
 import { state } from "./state";
 
 describe("game logic", () => {

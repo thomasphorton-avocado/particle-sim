@@ -1,6 +1,4 @@
-import { Grid } from "./grid";
-import { MATERIALS, MaterialId } from "./materials";
-import { harvestFlowerCluster } from "./harvest";
+import { Grid, MATERIALS, MaterialId, harvestFlowerCluster } from "@particle-sim/shared";
 import { state, hasPickaxeEquipped, addToHotbar, getActiveHotbarMaterial, removeFromActiveSlot } from "./state";
 import { startSwing, setSwingHeld } from "./character";
 

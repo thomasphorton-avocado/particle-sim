@@ -1,4 +1,4 @@
-import { MaterialId } from "./materials";
+import { MaterialId } from "@particle-sim/shared";
 import type { Character } from "./character";
 
 export type ToolMode = "editor" | "place" | "play";

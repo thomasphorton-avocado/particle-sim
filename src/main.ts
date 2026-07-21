@@ -1,12 +1,10 @@
 import "./style.css";
-import { Grid } from "./grid";
+import { Grid, MATERIALS, MaterialId, findFlowerCluster } from "@particle-sim/shared";
 import { Renderer } from "./renderer";
 import { step } from "./simulation";
 import { attachInput } from "./input";
 import { buildUi } from "./ui";
 import { state, getActiveHotbarMaterial } from "./state";
-import { MATERIALS, MaterialId } from "./materials";
-import { findFlowerCluster } from "./harvest";
 import { createCharacter, attachCharacterInput, updateCharacter, drawCharacter } from "./character";
 import { updateFallingObjects } from "./falling";
 

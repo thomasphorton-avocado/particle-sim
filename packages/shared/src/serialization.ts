@@ -1,10 +1,17 @@
 import { Grid, assertAuxiliaryValueForMaterial } from "./grid.js";
-import { cloneHotbar, cloneInventory, createDefaultInventory, type HotbarItem, type InventoryCounts } from "./inventory.js";
+import { cloneHotbar, createDefaultInventory, type HotbarItem, type InventoryCounts } from "./inventory.js";
 import { parseObjectId, parsePlayerId, parseRoomId } from "./ids.js";
 import { MATERIALS, MaterialId } from "./materials.js";
 import { createDefaultFallingObjectState, createDefaultPlayerState, createDefaultWeatherState, createDefaultWorldState, type FallingObjectState, type PlayerState, type WeatherState, type WorldState } from "./world-state.js";
+import { createGameplayRandomState, type GameplayRandomState } from "./random.js";
 
-export const WORLD_STATE_SCHEMA_VERSION = 1;
+export const WORLD_STATE_SCHEMA_VERSION = 2;
+
+export interface GameplayRandomStateDto {
+  algorithm: "mulberry32-v1";
+  seed: number;
+  state: number;
+}
 
 export interface GridDto {
   width: number;
@@ -59,9 +66,10 @@ export interface WeatherStateDto {
 }
 
 export interface WorldStateDto {
-  schemaVersion: 1;
+  schemaVersion: 2;
   roomId: string;
   grid: GridDto;
+  random: GameplayRandomStateDto;
   players: Record<string, PlayerStateDto>;
   fallingObjects: Record<string, FallingObjectStateDto>;
   paused: boolean;
@@ -72,6 +80,7 @@ export interface WorldStateDto {
 }
 
 const MAX_GRID_CELLS = 1_000_000;
+const DEFAULT_RANDOM_SEED = 0;
 
 function assertFiniteNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -113,6 +122,10 @@ function assertArray(value: unknown, label: string): unknown[] {
     throw new TypeError(`${label} must be an array`);
   }
   return value;
+}
+
+function compareStringCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function requireField<T>(obj: Record<string, unknown>, key: string, label: string): T {
@@ -291,6 +304,35 @@ function validateGrid(value: unknown): Grid {
   return grid;
 }
 
+function cloneInventoryCounts(inventory: InventoryCounts): InventoryCounts {
+  const normalized = {} as InventoryCounts;
+  for (const key of Object.keys(inventory).sort(compareStringCodeUnits)) {
+    normalized[key] = inventory[key];
+  }
+  return normalized;
+}
+
+function cloneGameplayRandomState(random: GameplayRandomState): GameplayRandomStateDto {
+  return {
+    algorithm: random.algorithm,
+    seed: random.seed,
+    state: random.state,
+  };
+}
+
+function validateGameplayRandomState(value: unknown): GameplayRandomState {
+  const obj = assertObject(value, "random");
+  const algorithm = requireField(obj, "algorithm", "random.algorithm");
+  if (algorithm !== "mulberry32-v1") {
+    throw new TypeError("random.algorithm must be 'mulberry32-v1'");
+  }
+  const seed = assertInteger(requireField(obj, "seed", "random.seed"), "random.seed", 0, 0x1_0000_0000 - 1);
+  const state = assertInteger(requireField(obj, "state", "random.state"), "random.state", 0, 0x1_0000_0000 - 1);
+  const random = createGameplayRandomState(seed);
+  random.state = state;
+  return random;
+}
+
 export function serializeWorldState(world: WorldState): WorldStateDto {
   const grid = world.grid;
   const objectMembership: Array<{ x: number; y: number; objectId: string }> = [];
@@ -313,8 +355,9 @@ export function serializeWorldState(world: WorldState): WorldStateDto {
       auxiliary: Array.from(grid.auxiliary),
       objectMembership,
     },
-    players: Object.fromEntries(Object.entries(world.players).map(([key, value]) => [key, serializePlayerState(value)])),
-    fallingObjects: Object.fromEntries(Object.entries(world.fallingObjects).map(([key, value]) => [key, serializeFallingObjectState(value)])),
+    random: cloneGameplayRandomState(world.random),
+    players: Object.fromEntries(Object.entries(world.players).sort(([left], [right]) => compareStringCodeUnits(left, right)).map(([key, value]) => [key, serializePlayerState(value)])),
+    fallingObjects: Object.fromEntries(Object.entries(world.fallingObjects).sort(([left], [right]) => compareStringCodeUnits(left, right)).map(([key, value]) => [key, serializeFallingObjectState(value)])),
     paused: world.paused,
     time: { dayNightCycle: world.time.dayNightCycle },
     weather: serializeWeatherState(world.weather),
@@ -338,7 +381,7 @@ export function serializePlayerState(player: PlayerState): PlayerStateDto {
     crouching: player.crouching,
     lookingUp: player.lookingUp,
     swimming: player.swimming,
-    inventory: cloneInventory(player.inventory),
+    inventory: cloneInventoryCounts(player.inventory),
     hotbar: cloneHotbar(player.hotbar),
     activeHotbarSlot: player.activeHotbarSlot,
   };
@@ -400,9 +443,10 @@ export function deserializeWorldState(input: unknown): WorldState {
     }
   }
   const version = requireField(obj, "schemaVersion", "schemaVersion");
-  if (version !== WORLD_STATE_SCHEMA_VERSION) {
+  if (version !== 1 && version !== WORLD_STATE_SCHEMA_VERSION) {
     throw new TypeError("unsupported world state schema version");
   }
+
   const roomId = parseRoomId(requireField(obj, "roomId", "roomId"));
   const world = createDefaultWorldState(roomId);
   world.grid = validateGrid(requireField(obj, "grid", "grid"));
@@ -434,6 +478,11 @@ export function deserializeWorldState(input: unknown): WorldState {
   world.weather = validateWeatherState(requireField(obj, "weather", "weather"));
   world.nextPlayerOrdinal = assertInteger(requireField(obj, "nextPlayerOrdinal", "nextPlayerOrdinal"), "nextPlayerOrdinal", 1, 1000000);
   world.nextObjectOrdinal = assertInteger(requireField(obj, "nextObjectOrdinal", "nextObjectOrdinal"), "nextObjectOrdinal", 1, 1000000);
+  if (version === 1) {
+    world.random = createGameplayRandomState(DEFAULT_RANDOM_SEED);
+  } else {
+    world.random = validateGameplayRandomState(requireField(obj, "random", "random"));
+  }
   validateObjectIdentityInvariants(world);
   return world;
 }

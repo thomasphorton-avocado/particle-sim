@@ -1,4 +1,4 @@
-import { type WorldState } from "@particle-sim/shared";
+import { placeWorldCell, type WorldState } from "@particle-sim/shared";
 
 // Match the character's gravity model so falling objects feel consistent.
 const GRAVITY = 0.4; // cells / frame^2
@@ -24,7 +24,7 @@ export function updateFallingObjects(world: WorldState, dt: number): void {
       for (const [dx, dy] of o.offsets) {
         const x = o.x + dx;
         const y = o.restY + dy;
-        if (grid.inBounds(x, y)) grid.set(x, y, o.materialId, { objectId: o.id });
+        if (grid.inBounds(x, y)) placeWorldCell(world, x, y, o.materialId, { objectId: o.id });
       }
       delete world.fallingObjects[objectId];
     }

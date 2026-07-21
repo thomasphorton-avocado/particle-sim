@@ -5,3 +5,5 @@ export * from "./ids.js";
 export * from "./inventory.js";
 export * from "./world-state.js";
 export * from "./serialization.js";
+export * from "./random.js";
+export * from "./starter-world.js";

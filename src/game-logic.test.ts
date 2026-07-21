@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { Grid, createDefaultFallingObjectState, createDefaultWorldState, createObjectId, deserializeWorldState, harvestFlowerCluster, MaterialId, serializeWorldState } from "@particle-sim/shared";
+import { Grid, createDefaultFallingObjectState, createDefaultWorldState, createGameplayRandomState, createObjectId, createStarterWorld, deserializeWorldState, harvestFlowerCluster, MaterialId, placeWorldCell, serializeWorldState } from "@particle-sim/shared";
 import { updateFallingObjects } from "./falling";
 import { mineCellAt } from "./character";
-import { placeHotbarMaterialAt } from "./input";
+import { handleHarvestInputAt, placeHotbarMaterialAt } from "./input";
+import { step } from "./simulation";
 import { getLocalPlayer, state } from "./state";
 
 describe("game logic", () => {
@@ -24,6 +25,90 @@ describe("game logic", () => {
       { kind: "empty" },
     ];
     player.activeHotbarSlot = 0;
+  });
+
+  it("keeps same-seed steps deterministic across serialization", () => {
+    const original = createDefaultWorldState();
+    original.random = createGameplayRandomState(12345);
+
+    const restored = createDefaultWorldState();
+    restored.random = createGameplayRandomState(12345);
+
+    for (let i = 0; i < 20; i += 1) {
+      step(original);
+      step(restored);
+    }
+
+    expect(serializeWorldState(original)).toEqual(serializeWorldState(restored));
+    expect(original.random).toEqual(restored.random);
+  });
+
+  it("continues an interrupted starter-world simulation restore with identical final bytes and random state", () => {
+    const seed = 12345;
+    let interrupted = createStarterWorld({ roomId: "interrupted_restore", seed });
+    const uninterrupted = createStarterWorld({ roomId: "interrupted_restore", seed });
+
+    for (let i = 0; i < 8; i += 1) {
+      step(interrupted);
+      step(uninterrupted);
+    }
+
+    interrupted = deserializeWorldState(serializeWorldState(interrupted));
+
+    for (let i = 0; i < 8; i += 1) {
+      step(interrupted);
+      step(uninterrupted);
+    }
+
+    const interruptedBytes = new TextEncoder().encode(JSON.stringify(serializeWorldState(interrupted)));
+    const uninterruptedBytes = new TextEncoder().encode(JSON.stringify(serializeWorldState(uninterrupted)));
+
+    expect(Array.from(interruptedBytes)).toEqual(Array.from(uninterruptedBytes));
+    expect(interrupted.random).toEqual(uninterrupted.random);
+  });
+
+  it("continues harvest RNG after restoring a world through the production input helper", () => {
+    const worldA = createDefaultWorldState("harvest_rng_restore_a");
+    worldA.grid = new Grid(8, 8);
+    worldA.random = createGameplayRandomState(4242);
+
+    const worldB = createDefaultWorldState("harvest_rng_restore_b");
+    worldB.grid = new Grid(8, 8);
+    worldB.random = createGameplayRandomState(4242);
+
+    const setupWorld = (world: typeof worldA) => {
+      world.grid.set(2, 2, MaterialId.Flower);
+      world.grid.set(2, 3, MaterialId.Stem);
+      world.grid.set(3, 2, MaterialId.Flower);
+
+      state.world = world;
+      const player = getLocalPlayer();
+      player.inventory = { flowers: 0 };
+      player.hotbar = [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })];
+      player.activeHotbarSlot = 0;
+    };
+
+    setupWorld(worldA);
+    setupWorld(worldB);
+
+    const restoredWorldA = deserializeWorldState(serializeWorldState(worldA));
+
+    state.world = restoredWorldA;
+    handleHarvestInputAt(restoredWorldA, 2, 2);
+
+    state.world = worldB;
+    handleHarvestInputAt(worldB, 2, 2);
+
+    const restoredPlayer = restoredWorldA.players[state.localPlayerId];
+    const originalPlayer = worldB.players[state.localPlayerId];
+
+    expect(restoredPlayer.inventory).toEqual(originalPlayer.inventory);
+    expect(restoredPlayer.hotbar).toEqual(originalPlayer.hotbar);
+    expect(restoredWorldA.grid.ids).toEqual(worldB.grid.ids);
+    expect(restoredWorldA.random).toEqual(worldB.random);
+    expect(restoredWorldA.grid.get(2, 2)).toBe(MaterialId.Empty);
+    expect(restoredWorldA.grid.get(2, 3)).toBe(MaterialId.Empty);
+    expect(restoredWorldA.grid.get(3, 2)).toBe(MaterialId.Empty);
   });
 
   it("harvests a connected flower cluster and clears the cells", () => {
@@ -203,5 +288,96 @@ describe("game logic", () => {
     expect(grid.get(1, 1)).toBe(MaterialId.Empty);
     expect(grid.get(2, 1)).toBe(MaterialId.Stone);
     expect(grid.getObjectId(2, 1)).toBe(rightId);
+  });
+
+  it("uses deterministic shades without consuming extra gameplay RNG for simulation-created cells", () => {
+    const findStemBloomSeed = () => {
+      for (let seed = 0; seed < 100_000; seed += 1) {
+        const world = createDefaultWorldState("stem_shade_test");
+        world.grid = new Grid(3, 3);
+        world.random = createGameplayRandomState(seed);
+        world.grid.set(1, 1, MaterialId.Stem);
+        world.grid.setStemBudget(1, 1, 1);
+        world.grid.set(1, 2, MaterialId.Dirt);
+        world.grid.setDirtMoisture(1, 2, 12);
+        step(world);
+        if (world.grid.get(1, 1) === MaterialId.Flower) return seed;
+      }
+      throw new Error("No deterministic stem bloom seed found");
+    };
+
+    const findWaterSeed = () => {
+      for (let seed = 0; seed < 100_000; seed += 1) {
+        const world = createDefaultWorldState("water_shade_test");
+        world.grid = new Grid(3, 3);
+        world.random = createGameplayRandomState(seed);
+        world.grid.set(1, 1, MaterialId.Faucet);
+        world.grid.setFaucetFlow(1, 1, 2);
+        step(world);
+        if (world.grid.get(1, 2) === MaterialId.Water) return seed;
+      }
+      throw new Error("No deterministic water seed found");
+    };
+
+    const findGrassSeed = () => {
+      for (let seed = 0; seed < 100_000; seed += 1) {
+        const world = createDefaultWorldState("grass_shade_test");
+        world.grid = new Grid(3, 3);
+        world.random = createGameplayRandomState(seed);
+        world.grid.set(1, 1, MaterialId.Dirt);
+        world.grid.setDirtMoisture(1, 1, 4);
+        step(world);
+        if (world.grid.get(1, 1) === MaterialId.Grass) return seed;
+      }
+      throw new Error("No deterministic grass seed found");
+    };
+
+    const stemSeed = findStemBloomSeed();
+    const stemWorld = createDefaultWorldState("stem_shade_test");
+    stemWorld.grid = new Grid(3, 3);
+    stemWorld.random = createGameplayRandomState(stemSeed);
+    stemWorld.grid.set(1, 1, MaterialId.Stem);
+    stemWorld.grid.setStemBudget(1, 1, 1);
+    stemWorld.grid.set(1, 2, MaterialId.Dirt);
+    stemWorld.grid.setDirtMoisture(1, 2, 12);
+
+    step(stemWorld);
+
+    expect(stemWorld.grid.get(1, 1)).toBe(MaterialId.Flower);
+    expect(stemWorld.grid.shade[stemWorld.grid.index(1, 1)]).toBe(-40);
+    expect(stemWorld.grid.shade[stemWorld.grid.index(0, 1)]).toBeGreaterThanOrEqual(-5);
+    expect(stemWorld.grid.shade[stemWorld.grid.index(0, 1)]).toBeLessThanOrEqual(4);
+    expect(stemWorld.grid.shade[stemWorld.grid.index(0, 2)]).toBeGreaterThanOrEqual(15);
+    expect(stemWorld.grid.shade[stemWorld.grid.index(0, 2)]).toBeLessThanOrEqual(24);
+
+    const visualWorld = createDefaultWorldState("visual_shade_test");
+    visualWorld.random = createGameplayRandomState(12345);
+    const beforeVisualState = visualWorld.random.state;
+    placeWorldCell(visualWorld, 1, 1, MaterialId.Flower, { shade: -40 });
+    expect(visualWorld.random.state).toBe(beforeVisualState);
+
+    const waterSeed = findWaterSeed();
+    const waterWorld = createDefaultWorldState("water_shade_test");
+    waterWorld.grid = new Grid(3, 3);
+    waterWorld.random = createGameplayRandomState(waterSeed);
+    waterWorld.grid.set(1, 1, MaterialId.Faucet);
+    waterWorld.grid.setFaucetFlow(1, 1, 2);
+
+    step(waterWorld);
+
+    expect(waterWorld.grid.get(1, 2)).toBe(MaterialId.Water);
+    expect(waterWorld.grid.shade[waterWorld.grid.index(1, 2)]).not.toBe(0);
+
+    const grassSeed = findGrassSeed();
+    const grassWorld = createDefaultWorldState("grass_shade_test");
+    grassWorld.grid = new Grid(3, 3);
+    grassWorld.random = createGameplayRandomState(grassSeed);
+    grassWorld.grid.set(1, 1, MaterialId.Dirt);
+    grassWorld.grid.setDirtMoisture(1, 1, 4);
+
+    step(grassWorld);
+
+    expect(grassWorld.grid.get(1, 1)).toBe(MaterialId.Grass);
+    expect(grassWorld.grid.shade[grassWorld.grid.index(1, 1)]).not.toBe(0);
   });
 });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { FLOWER_PALETTE, Grid, MaterialId, allocateObjectId, allocatePlayerId, createDefaultWorldState, createObjectId, createPlayerId, createStarterWorld, deserializeWorldState, serializeWorldState } from "@particle-sim/shared";
+import { FLOWER_PALETTE, MaterialId, allocateObjectId, allocatePlayerId, createDefaultWorldState, createObjectId, createPlayerId, createStarterWorld, deserializeWorldState, serializeWorldState } from "@particle-sim/shared";
 
 function createValidWorldDto(overrides = {}) {
   return {

@@ -1,10 +1,10 @@
 import "./style.css";
-import { Grid, MATERIALS, MaterialId, findFlowerCluster } from "@particle-sim/shared";
+import { Grid, MATERIALS, MaterialId, allocateObjectId, findFlowerCluster } from "@particle-sim/shared";
 import { Renderer } from "./renderer";
 import { step } from "./simulation";
 import { attachInput } from "./input";
 import { buildUi } from "./ui";
-import { state, getActiveHotbarMaterial } from "./state";
+import { state, getActiveHotbarMaterial, getLocalPlayer } from "./state";
 import { createCharacter, attachCharacterInput, updateCharacter, drawCharacter } from "./character";
 import { updateFallingObjects } from "./falling";
 
@@ -12,7 +12,8 @@ const CELL_SIZE = 5;
 const GRID_WIDTH = 320;
 const GRID_HEIGHT = 200;
 
-const grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
+state.world.grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
+const grid = state.world.grid;
 
 // Seed the world with a starter layout (based on reference design)
 {
@@ -46,24 +47,26 @@ const grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
   // --- Stone boulder on middle platform ---
   // Blob centered around (95, 82), radius ~12
   const boulderCx = 95, boulderCy = 82, boulderR = 12;
+  const boulderObjectId = allocateObjectId(state.world);
   for (let y = boulderCy - boulderR; y <= boulderCy + boulderR; y++) {
     for (let x = boulderCx - boulderR; x <= boulderCx + boulderR; x++) {
       const dx = x - boulderCx, dy = y - boulderCy;
       // Slightly irregular shape
       const r = boulderR + Math.sin(Math.atan2(dy, dx) * 5) * 2;
       if (dx * dx + dy * dy <= r * r && grid.inBounds(x, y)) {
-        grid.set(x, y, MaterialId.Stone);
+        grid.set(x, y, MaterialId.Stone, { objectId: boulderObjectId });
       }
     }
   }
 
   // --- Wood plank on the right ---
   // About x=200-250, y=105, size 48x6
+  const plankObjectId = allocateObjectId(state.world);
   for (let dy = 0; dy < 6; dy++) {
     for (let dx = 0; dx < 48; dx++) {
       const x = 200 + dx, y = 105 + dy;
       if (grid.inBounds(x, y)) {
-        grid.set(x, y, MaterialId.Wood);
+        grid.set(x, y, MaterialId.Wood, { objectId: plankObjectId });
       }
     }
   }
@@ -105,12 +108,13 @@ const grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
   // --- Faucet at top-left ---
   // 10x6 object near top, start in full flow mode (vx=2)
   const faucetX = 18, faucetY = 2;
+  const faucetObjectId = allocateObjectId(state.world);
   for (let dy = 0; dy < 6; dy++) {
     for (let dx = 0; dx < 10; dx++) {
       const x = faucetX + dx, y = faucetY + dy;
       if (grid.inBounds(x, y)) {
-        grid.set(x, y, MaterialId.Faucet);
-        grid.vx[y * GRID_WIDTH + x] = 2;
+        grid.set(x, y, MaterialId.Faucet, { objectId: faucetObjectId });
+        grid.setFaucetFlow(x, y, 2);
       }
     }
   }
@@ -118,11 +122,12 @@ const grid = new Grid(GRID_WIDTH, GRID_HEIGHT);
   // --- Drain on the lower dirt section ---
   // Place on the surface of the bottom terrain so water collects there
   const drainX = 80, drainY = 171;
+  const drainObjectId = allocateObjectId(state.world);
   for (let dy = 0; dy < 6; dy++) {
     for (let dx = 0; dx < 20; dx++) {
       const x = drainX + dx, y = drainY + dy;
       if (grid.inBounds(x, y)) {
-        grid.set(x, y, MaterialId.Drain);
+        grid.set(x, y, MaterialId.Drain, { objectId: drainObjectId });
       }
     }
   }
@@ -142,10 +147,10 @@ buildUi(uiRoot, grid);
 
 const canvas = document.querySelector<HTMLCanvasElement>("#sim-canvas")!;
 const renderer = new Renderer(canvas, grid, CELL_SIZE);
-attachInput(canvas, grid, CELL_SIZE);
+attachInput(canvas, state.world, CELL_SIZE);
 
-const character = createCharacter(grid);
-state.character = character;
+const runtime = createCharacter(grid);
+state.character = runtime;
 attachCharacterInput();
 
 let lastTime = performance.now();
@@ -155,21 +160,22 @@ function loop(): void {
   const dt = (now - lastTime) / 1000; // seconds
   lastTime = now;
 
-  if (!state.paused) {
-    state.dayNightCycle += dt / 300;
+  if (!state.world.paused) {
+    state.world.time.dayNightCycle += dt / 300;
     step(grid);
-    updateCharacter(character, grid, dt);
-    updateFallingObjects(grid, dt);
+    updateCharacter(getLocalPlayer(), runtime, grid, dt);
+    updateFallingObjects(state.world, dt);
   }
   renderer.draw(grid);
-  drawCharacter(renderer.getCtx(), character, CELL_SIZE);
+  drawCharacter(renderer.getCtx(), getLocalPlayer(), runtime, CELL_SIZE);
 
   // Draw placement radius border (place mode, or play mode with material selected)
   const showRadius = state.toolMode === "place" || (state.toolMode === "play" && getActiveHotbarMaterial() != null);
   if (showRadius) {
     const ctx = renderer.getCtx();
-    const charCx = (character.x + character.width / 2) * CELL_SIZE;
-    const charCy = (character.y + character.height / 2) * CELL_SIZE;
+    const player = getLocalPlayer();
+    const charCx = (player.x + player.width / 2) * CELL_SIZE;
+    const charCy = (player.y + player.height / 2) * CELL_SIZE;
     const t = performance.now() / 1000;
     const radius = 30 * CELL_SIZE;
     const alpha = 0.2 + Math.sin(t * 1.5) * 0.1;
@@ -235,8 +241,9 @@ function loop(): void {
   // Draw inventory placement preview in play mode
   const hotbarMat = getActiveHotbarMaterial();
   if (state.toolMode === "play" && state.hover && hotbarMat) {
-    const charCx = character.x + character.width / 2;
-    const charCy = character.y + character.height / 2;
+    const player = getLocalPlayer();
+    const charCx = player.x + player.width / 2;
+    const charCy = player.y + player.height / 2;
     renderer.drawInventoryPreview(
       state.hover.x, state.hover.y,
       hotbarMat.materialId,

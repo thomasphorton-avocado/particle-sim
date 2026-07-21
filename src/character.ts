@@ -1,53 +1,38 @@
-import { Grid, MATERIALS, MaterialId, MaterialPhase } from "@particle-sim/shared";
-import { state, addToHotbar, hasPickaxeEquipped } from "./state";
+import { Grid, MATERIALS, MaterialId, MaterialPhase, type PlayerId, type PlayerState } from "@particle-sim/shared";
+import { state, addToHotbar, getLocalPlayer, hasPickaxeEquipped } from "./state";
 
 // Pickaxe swing animation + mining arc (shared by update/mining and draw)
 const SWING_DURATION = 250; // ms
 const SWING_START_ANGLE = -Math.PI * 0.6; // raised, up-and-back
-const SWING_END_ANGLE = Math.PI * 0.2;    // forward-and-down
+const SWING_END_ANGLE = Math.PI * 0.2; // forward-and-down
 function swingAngle(progress: number): number {
   return SWING_START_ANGLE + (SWING_END_ANGLE - SWING_START_ANGLE) * progress;
 }
 
-export interface Character {
-  x: number; // grid position (float for smooth movement)
-  y: number;
-  vx: number;
-  vy: number;
-  width: number;  // hitbox in grid cells
-  height: number;
-  grounded: boolean;
-  facing: -1 | 1;
+export interface CharacterRuntime {
+  playerId: PlayerId;
   /** Pickaxe swing animation start time, null if not swinging. */
   swingStart: number | null;
   /** Swing progress (0..1) already processed for mining, to sweep the arc across frames. */
   swingMinedProgress: number;
   /** Whether the mine button is held, to auto-repeat swings. */
   swingHeld: boolean;
-  /** Seconds since last grounded (for coyote time). */
-  airTime: number;
-  /** Whether the character is crouching. */
-  crouching: boolean;
-  /** Whether the character is looking up. */
-  lookingUp: boolean;
-  /** Whether the character is currently swimming (submerged in water). */
-  swimming: boolean;
 }
 
 // Physics constants (tuned at 60 fps baseline).
 // dt is normalized to frame-units so these stay as originally tuned.
 const BASE_FPS = 60;
-const GRAVITY = 0.4;       // cells/frame²
-const MOVE_SPEED = 1.2;    // cells/frame
+const GRAVITY = 0.4; // cells/frame²
+const MOVE_SPEED = 1.2; // cells/frame
 const JUMP_VELOCITY = -3.5; // cells/frame (impulse)
-const MAX_FALL = 5;         // cells/frame (terminal velocity)
+const MAX_FALL = 5; // cells/frame (terminal velocity)
 const COYOTE_TIME_S = 5 / BASE_FPS; // ~83ms coyote window
 
 // Swimming constants
-const SWIM_GRAVITY = 0.05;       // reduced gravity underwater
-const SWIM_MAX_FALL = 0.75;      // slower sinking
-const SWIM_MOVE_SPEED = 0.7;    // slower horizontal movement
-const SWIM_UP_VELOCITY = -1.0;  // swim upward impulse (repeatable)
+const SWIM_GRAVITY = 0.05; // reduced gravity underwater
+const SWIM_MAX_FALL = 0.75; // slower sinking
+const SWIM_MOVE_SPEED = 0.7; // slower horizontal movement
+const SWIM_UP_VELOCITY = -1.0; // swim upward impulse (repeatable)
 
 /** Returns true if the given grid cell is solid ground the character can stand on. */
 function isSolid(grid: Grid, gx: number, gy: number): boolean {
@@ -74,24 +59,25 @@ function collidesAt(grid: Grid, x: number, y: number, w: number, h: number): boo
   return false;
 }
 
-export function createCharacter(grid: Grid): Character {
-  // Spawn at top-center, will fall to ground
+export function createCharacter(grid: Grid): CharacterRuntime {
+  const player = getLocalPlayer();
+  player.x = Math.floor(grid.width / 2) - 1;
+  player.y = 10;
+  player.vx = 0;
+  player.vy = 0;
+  player.width = 3;
+  player.height = 5;
+  player.grounded = false;
+  player.facing = 1;
+  player.airTime = 0;
+  player.crouching = false;
+  player.lookingUp = false;
+  player.swimming = false;
   return {
-    x: Math.floor(grid.width / 2) - 1,
-    y: 10,
-    vx: 0,
-    vy: 0,
-    width: 3,
-    height: 5,
-    grounded: false,
-    facing: 1,
+    playerId: player.id,
     swingStart: null,
     swingMinedProgress: 0,
     swingHeld: false,
-    airTime: 0,
-    crouching: false,
-    lookingUp: false,
-    swimming: false,
   };
 }
 
@@ -166,16 +152,16 @@ export function attachCharacterInput(): void {
 let lastFaucetBumpTime = 0;
 
 /** When the character bumps its head, check for faucet cells above and cycle their state. */
-function checkFaucetBump(grid: Grid, char: Character): void {
+function checkFaucetBump(grid: Grid, player: PlayerState): void {
   // Debounce: only trigger once per 300ms
   const now = performance.now();
   if (now - lastFaucetBumpTime < 300) return;
 
-  const headY = Math.floor(char.y) - 1; // row just above head
+  const headY = Math.floor(player.y) - 1; // row just above head
   if (headY < 0) return;
-  const x0 = Math.floor(char.x);
-  const x1 = Math.floor(char.x + char.width - 0.01);
-  const checkedRows = [...new Set([headY, Math.floor(char.y)])];
+  const x0 = Math.floor(player.x);
+  const x1 = Math.floor(player.x + player.width - 0.01);
+  const checkedRows = [...new Set([headY, Math.floor(player.y)])];
   const seedCells: [number, number][] = [];
   // Check the row above and the row at the very top of hitbox
   for (const checkY of checkedRows) {
@@ -188,36 +174,39 @@ function checkFaucetBump(grid: Grid, char: Character): void {
   if (seedCells.length === 0) return;
   // Cycle all connected faucet cells: 0→1→2→0
   const visited = new Set<number>();
+  const visitedCells: [number, number][] = [];
   const queue = [...seedCells];
   while (queue.length > 0) {
     const [fx, fy] = queue.pop()!;
     const idx = fy * grid.width + fx;
     if (visited.has(idx)) continue;
     visited.add(idx);
+    visitedCells.push([fx, fy]);
     // Check neighbors
-    for (const [nx, ny] of [[fx-1,fy],[fx+1,fy],[fx,fy-1],[fx,fy+1]]) {
+    for (const [nx, ny] of [[fx - 1, fy], [fx + 1, fy], [fx, fy - 1], [fx, fy + 1]]) {
       if (grid.inBounds(nx, ny) && grid.get(nx, ny) === MaterialId.Faucet && !visited.has(ny * grid.width + nx)) {
         queue.push([nx, ny]);
       }
     }
   }
   // Get current state from any cell and cycle
-  const firstIdx = visited.values().next().value!;
-  const currentState = grid.vx[firstIdx];
+  const firstCell = seedCells[0]!;
+  const [firstX, firstY] = firstCell;
+  const currentState = grid.getFaucetFlow(firstX, firstY);
   const newState = (currentState + 1) % 3;
-  for (const idx of visited) {
-    grid.vx[idx] = newState;
+  for (const [fx, fy] of visitedCells) {
+    grid.setFaucetFlow(fx, fy, newState);
   }
   lastFaucetBumpTime = now;
 }
 
 /** Check how many cells in the character's hitbox are water. */
-function waterCellCount(grid: Grid, char: Character): number {
+function waterCellCount(grid: Grid, player: PlayerState): number {
   let count = 0;
-  const x0 = Math.floor(char.x);
-  const x1 = Math.floor(char.x + char.width - 0.01);
-  const y0 = Math.floor(char.y);
-  const y1 = Math.floor(char.y + char.height - 0.01);
+  const x0 = Math.floor(player.x);
+  const x1 = Math.floor(player.x + player.width - 0.01);
+  const y0 = Math.floor(player.y);
+  const y1 = Math.floor(player.y + player.height - 0.01);
   for (let gy = y0; gy <= y1; gy++) {
     for (let gx = x0; gx <= x1; gx++) {
       if (grid.inBounds(gx, gy) && grid.get(gx, gy) === MaterialId.Water) {
@@ -228,36 +217,36 @@ function waterCellCount(grid: Grid, char: Character): number {
   return count;
 }
 
-export function updateCharacter(char: Character, grid: Grid, dt: number): void {
+export function updateCharacter(player: PlayerState, runtime: CharacterRuntime, grid: Grid, dt: number): void {
   // Normalize dt to frame-units (1.0 = one 60fps frame) and clamp for tab-switch
   const dtFrames = Math.min(dt * BASE_FPS, 3);
 
   // Detect swimming: submerged if 3+ cells are water (~20% of the 3×5 hitbox; feet/lower body in water)
-  const waterCells = waterCellCount(grid, char);
-  char.swimming = waterCells >= 3;
+  const waterCells = waterCellCount(grid, player);
+  player.swimming = waterCells >= 3;
 
   // Crouch / look up state
-  char.crouching = inputState("crouch");
-  char.lookingUp = inputState("lookUp");
+  player.crouching = inputState("crouch");
+  player.lookingUp = inputState("lookUp");
 
   // Horizontal movement (slower in water)
-  const speed = char.swimming ? SWIM_MOVE_SPEED : MOVE_SPEED;
+  const speed = player.swimming ? SWIM_MOVE_SPEED : MOVE_SPEED;
   let moveX = 0;
-  if (inputState("left")) { moveX -= speed * dtFrames; char.facing = -1; }
-  if (inputState("right")) { moveX += speed * dtFrames; char.facing = 1; }
+  if (inputState("left")) { moveX -= speed * dtFrames; player.facing = -1; }
+  if (inputState("right")) { moveX += speed * dtFrames; player.facing = 1; }
 
   // Apply gravity (reduced in water)
-  const gravity = char.swimming ? SWIM_GRAVITY : GRAVITY;
-  const maxFall = char.swimming ? SWIM_MAX_FALL : MAX_FALL;
-  char.vy += gravity * dtFrames;
-  if (char.vy > maxFall) char.vy = maxFall;
+  const gravity = player.swimming ? SWIM_GRAVITY : GRAVITY;
+  const maxFall = player.swimming ? SWIM_MAX_FALL : MAX_FALL;
+  player.vy += gravity * dtFrames;
+  if (player.vy > maxFall) player.vy = maxFall;
 
   // Swimming: space to swim upward (repeatable, no jumpHeld gate)
-  if (char.swimming && inputState("jump")) {
+  if (player.swimming && inputState("jump")) {
     // Check if near the surface (top 2 rows of character are not fully submerged)
-    const headY = Math.floor(char.y);
-    const x0 = Math.floor(char.x);
-    const x1 = Math.floor(char.x + char.width - 0.01);
+    const headY = Math.floor(player.y);
+    const x0 = Math.floor(player.x);
+    const x1 = Math.floor(player.x + player.width - 0.01);
     let waterInTopRows = 0;
     for (let rowOff = 0; rowOff <= 1; rowOff++) {
       for (let gx = x0; gx <= x1; gx++) {
@@ -270,111 +259,126 @@ export function updateCharacter(char: Character, grid: Grid, dt: number): void {
     const topCellCount = (x1 - x0 + 1) * 2;
     if (waterInTopRows <= topCellCount / 2 && !jumpHeld) {
       // Near surface — do a full jump out of the water
-      char.vy = JUMP_VELOCITY;
+      player.vy = JUMP_VELOCITY;
       jumpHeld = true;
     } else {
-      char.vy = SWIM_UP_VELOCITY;
+      player.vy = SWIM_UP_VELOCITY;
     }
   } else {
     // Track air time for coyote time (in seconds)
-    if (char.grounded) {
-      char.airTime = 0;
+    if (player.grounded) {
+      player.airTime = 0;
     } else {
-      char.airTime += dt;
+      player.airTime += dt;
     }
 
     // Jump (with coyote time) - only when not swimming
-    if (!char.swimming && inputState("jump") && !jumpHeld && (char.grounded || char.airTime <= COYOTE_TIME_S)) {
-      char.vy = JUMP_VELOCITY;
-      char.grounded = false;
-      char.airTime = COYOTE_TIME_S + 1; // prevent double-jump
+    if (!player.swimming && inputState("jump") && !jumpHeld && (player.grounded || player.airTime <= COYOTE_TIME_S)) {
+      player.vy = JUMP_VELOCITY;
+      player.grounded = false;
+      player.airTime = COYOTE_TIME_S + 1; // prevent double-jump
       jumpHeld = true;
     }
   }
 
   // Move horizontally with collision
-  const newX = char.x + moveX;
-  if (!collidesAt(grid, newX, char.y, char.width, char.height)) {
-    char.x = newX;
-  } else if (char.swingStart === null) {
+  const newX = player.x + moveX;
+  if (!collidesAt(grid, newX, player.y, player.width, player.height)) {
+    player.x = newX;
+  } else if (runtime.swingStart === null) {
     // Try to step up 1-2 cells (slope/stair climbing).
     // Disabled while swinging so you mine into ledges instead of climbing them.
     for (let stepUp = 1; stepUp <= 2; stepUp++) {
-      if (!collidesAt(grid, newX, char.y - stepUp, char.width, char.height)) {
-        char.x = newX;
-        char.y -= stepUp;
+      if (!collidesAt(grid, newX, player.y - stepUp, player.width, player.height)) {
+        player.x = newX;
+        player.y -= stepUp;
         break;
       }
     }
   }
 
   // Move vertically with collision
-  const newY = char.y + char.vy * dtFrames;
-  if (!collidesAt(grid, char.x, newY, char.width, char.height)) {
-    char.y = newY;
-    char.grounded = false;
+  const newY = player.y + player.vy * dtFrames;
+  if (!collidesAt(grid, player.x, newY, player.width, player.height)) {
+    player.y = newY;
+    player.grounded = false;
   } else {
     // Resolve: find the nearest non-colliding position
-    if (char.vy > 0) {
+    if (player.vy > 0) {
       // Falling — snap to top of ground
-      char.y = Math.floor(newY + char.height) - char.height;
+      player.y = Math.floor(newY + player.height) - player.height;
       // Fine adjustment: move up until not colliding
-      while (collidesAt(grid, char.x, char.y, char.width, char.height) && char.y > 0) {
-        char.y -= 1;
+      while (collidesAt(grid, player.x, player.y, player.width, player.height) && player.y > 0) {
+        player.y -= 1;
       }
-      char.grounded = true;
+      player.grounded = true;
     } else {
       // Hitting ceiling — snap below the ceiling
-      char.y = Math.ceil(newY);
-      while (collidesAt(grid, char.x, char.y, char.width, char.height) && char.y < grid.height - char.height) {
-        char.y += 1;
+      player.y = Math.ceil(newY);
+      while (collidesAt(grid, player.x, player.y, player.width, player.height) && player.y < grid.height - player.height) {
+        player.y += 1;
       }
       // Check if we hit a faucet after resolving the final head position.
-      checkFaucetBump(grid, char);
+      checkFaucetBump(grid, player);
     }
-    char.vy = 0;
+    player.vy = 0;
   }
 
   // Clamp to grid bounds
-  if (char.x < 0) char.x = 0;
-  if (char.x + char.width > grid.width) char.x = grid.width - char.width;
-  if (char.y < 0) { char.y = 0; char.vy = 0; }
-  if (char.y + char.height > grid.height) {
-    char.y = grid.height - char.height;
-    char.vy = 0;
-    char.grounded = true;
+  if (player.x < 0) player.x = 0;
+  if (player.x + player.width > grid.width) player.x = grid.width - player.width;
+  if (player.y < 0) { player.y = 0; player.vy = 0; }
+  if (player.y + player.height > grid.height) {
+    player.y = grid.height - player.height;
+    player.vy = 0;
+    player.grounded = true;
   }
 
   // Pickaxe arc mining: sweep the head through the animation, following the
   // character's live position so blocks hit while jumping/falling are included.
-  mineSwingArc(char, grid);
+  mineSwingArc(player, runtime, grid);
 
   // Swing lifecycle. While the mine button is held, keep swinging continuously —
   // this is independent of movement, jumping, or head tilt, so those never
   // interrupt a held swing. updateCharacter fully owns swingStart (draw only reads it).
-  const swinging = char.swingStart !== null;
-  const swingDone = swinging && performance.now() - char.swingStart! >= SWING_DURATION;
-  if (char.swingHeld && state.toolMode === "play" && hasPickaxeEquipped()) {
+  const swinging = runtime.swingStart !== null;
+  const swingDone = swinging && performance.now() - runtime.swingStart! >= SWING_DURATION;
+  if (runtime.swingHeld && state.toolMode === "play" && hasPickaxeEquipped()) {
     if (!swinging || swingDone) {
-      char.swingStart = performance.now();
-      char.swingMinedProgress = 0;
+      runtime.swingStart = performance.now();
+      runtime.swingMinedProgress = 0;
     }
   } else if (swingDone) {
-    char.swingStart = null;
+    runtime.swingStart = null;
   }
 }
 
 /** Mine a single grid cell, handling object flood-fill, inventory and hotbar. */
-function mineCellAt(grid: Grid, x: number, y: number, mined: Set<number>): void {
+export function mineCellAt(grid: Grid, x: number, y: number, mined: Set<number>, player: PlayerState): void {
   if (!grid.inBounds(x, y)) return;
   const key = y * grid.width + x;
   if (mined.has(key)) return;
   const id = grid.get(x, y) as MaterialId;
   if (id === MaterialId.Empty || id === MaterialId.Water) return;
   const mat = MATERIALS[id];
+  const objectId = grid.getObjectId(x, y);
 
-  // Object-type materials: flood-fill to remove the whole object as one item
   if (mat.placement.kind === "object") {
+    if (objectId) {
+      for (let i = 0; i < grid.objectIds.length; i++) {
+        if (grid.objectIds[i] === objectId) {
+          const cx = i % grid.width;
+          const cy = Math.floor(i / grid.width);
+          grid.set(cx, cy, MaterialId.Empty);
+          grid.markUpdated(cx, cy);
+        }
+      }
+      addToHotbar(id);
+      const name = mat.name.toLowerCase();
+      player.inventory[name] = (player.inventory[name] || 0) + 1;
+      return;
+    }
+
     const queue: [number, number][] = [[x, y]];
     mined.add(key);
     while (queue.length > 0) {
@@ -385,7 +389,7 @@ function mineCellAt(grid: Grid, x: number, y: number, mined: Set<number>): void 
         if (!grid.inBounds(nx, ny)) continue;
         const k = ny * grid.width + nx;
         if (mined.has(k)) continue;
-        if (grid.get(nx, ny) === id) {
+        if (grid.get(nx, ny) === id && grid.getObjectId(nx, ny) === null) {
           mined.add(k);
           queue.push([nx, ny]);
         }
@@ -393,13 +397,13 @@ function mineCellAt(grid: Grid, x: number, y: number, mined: Set<number>): void 
     }
     addToHotbar(id);
     const name = mat.name.toLowerCase();
-    state.inventory[name] = (state.inventory[name] || 0) + 1;
+    player.inventory[name] = (player.inventory[name] || 0) + 1;
     return;
   }
 
   mined.add(key);
   const name = mat.name.toLowerCase();
-  state.inventory[name] = (state.inventory[name] || 0) + 1;
+  player.inventory[name] = (player.inventory[name] || 0) + 1;
   // Add minable materials to hotbar (skip non-placeable things like stems/flowers/grass)
   if (id !== MaterialId.Stem && id !== MaterialId.Flower && id !== MaterialId.Grass) {
     addToHotbar(id);
@@ -409,26 +413,26 @@ function mineCellAt(grid: Grid, x: number, y: number, mined: Set<number>): void 
 }
 
 /** Grid cells covered by the pickaxe head for a given swing angle. */
-function pickaxeHeadCells(char: Character, angle: number, out: Map<string, [number, number]>): void {
+function pickaxeHeadCells(player: PlayerState, angle: number, out: Map<string, [number, number]>): void {
   // Pivot at the shoulder (matches drawCharacter). Values in grid cells.
   // Shift the arc vertically to follow the head tilt: aim higher when looking
   // up, lower when crouching.
-  const tiltOffset = char.lookingUp ? -4 : char.crouching ? 3 : 0;
-  const sx = char.x + (char.facing === 1 ? char.width : 0);
-  const sy = char.y + 2.5 + tiltOffset;
+  const tiltOffset = player.lookingUp ? -4 : player.crouching ? 3 : 0;
+  const sx = player.x + (player.facing === 1 ? player.width : 0);
+  const sy = player.y + 2.5 + tiltOffset;
   const cos = Math.cos(angle);
   const sin = Math.sin(angle);
-  // For the normal (untilted) swing, don't mine below the character's feet so
+  // For the normal (untilted) swing, don't mine below the player's feet so
   // you can mine straight left/right without digging out the floor you stand on.
-  const floorLimit = (!char.lookingUp && !char.crouching)
-    ? Math.floor(char.y + char.height)
+  const floorLimit = (!player.lookingUp && !player.crouching)
+    ? Math.floor(player.y + player.height)
     : Infinity;
   // Sample along the handle/head length and across the head's height (spikes).
   // Start near the shoulder (lx ~0.5) so the cells right in front of the player
   // are cleared too — otherwise you can't advance into what you're mining.
   for (let lx = 0.5; lx <= 4.5; lx += 0.5) {
     for (let ly = -0.8; ly <= 0.8; ly += 0.8) {
-      const wx = Math.floor(sx + char.facing * (lx * cos - ly * sin));
+      const wx = Math.floor(sx + player.facing * (lx * cos - ly * sin));
       const wy = Math.floor(sy + (lx * sin + ly * cos));
       if (wy >= floorLimit) continue;
       out.set(`${wx},${wy}`, [wx, wy]);
@@ -437,35 +441,36 @@ function pickaxeHeadCells(char: Character, angle: number, out: Map<string, [numb
 }
 
 /** Mine all cells the pickaxe head sweeps through since the last processed frame. */
-function mineSwingArc(char: Character, grid: Grid): void {
-  if (char.swingStart === null) return;
-  const elapsed = performance.now() - char.swingStart;
+function mineSwingArc(player: PlayerState, runtime: CharacterRuntime, grid: Grid): void {
+  if (runtime.swingStart === null) return;
+  const elapsed = performance.now() - runtime.swingStart;
   const progress = Math.min(elapsed / SWING_DURATION, 1);
 
   // Collect the swept cells between the last processed progress and now, sampling
   // finely so no cell is skipped even at low frame rates.
   const swept = new Map<string, [number, number]>();
-  const from = char.swingMinedProgress;
+  const from = runtime.swingMinedProgress;
   const STEP = 0.04;
   for (let p = from; p <= progress + 1e-6; p += STEP) {
-    pickaxeHeadCells(char, swingAngle(Math.min(p, 1)), swept);
+    pickaxeHeadCells(player, swingAngle(Math.min(p, 1)), swept);
   }
-  char.swingMinedProgress = progress;
+  runtime.swingMinedProgress = progress;
 
   const mined = new Set<number>();
   for (const [gx, gy] of swept.values()) {
-    mineCellAt(grid, gx, gy, mined);
+    mineCellAt(grid, gx, gy, mined, player);
   }
 }
 
 /** Draw a simple pixel-art character sprite. */
 export function drawCharacter(
   ctx: CanvasRenderingContext2D,
-  char: Character,
+  player: PlayerState,
+  runtime: CharacterRuntime,
   cellSize: number,
 ): void {
-  const px = Math.round(char.x * cellSize);
-  const py = Math.round(char.y * cellSize);
+  const px = Math.round(player.x * cellSize);
+  const py = Math.round(player.y * cellSize);
   const cs = cellSize;
 
   // Simple character: 3 wide x 5 tall
@@ -478,14 +483,14 @@ export function drawCharacter(
   const pants = "#3a5a3a";
   const hair = "#5a3322";
 
-  if (char.lookingUp || char.crouching) {
+  if (player.lookingUp || player.crouching) {
     // Rotate the head (top 2 rows): backward for look-up, forward for crouch
-    const tiltDir = char.lookingUp ? -1 : 1;
+    const tiltDir = player.lookingUp ? -1 : 1;
     ctx.save();
     const headCx = px + cs * 1.5;
     const headCy = py + cs * 2; // pivot at neck
     ctx.translate(headCx, headCy);
-    ctx.rotate(0.4 * tiltDir * char.facing);
+    ctx.rotate(0.4 * tiltDir * player.facing);
     ctx.translate(-headCx, -headCy);
     ctx.fillStyle = hair;
     ctx.fillRect(px, py, cs * 3, cs);
@@ -493,7 +498,7 @@ export function drawCharacter(
     ctx.fillRect(px, py + cs, cs * 3, cs);
     // Dark spot on back of head
     ctx.fillStyle = "#222";
-    if (char.facing === 1) {
+    if (player.facing === 1) {
       ctx.fillRect(px, py + cs, cs, cs);
     } else {
       ctx.fillRect(px + cs * 2, py + cs, cs, cs);
@@ -510,7 +515,7 @@ export function drawCharacter(
 
     // Eyes — on the side we're facing
     ctx.fillStyle = "#222";
-    if (char.facing === 1) {
+    if (player.facing === 1) {
       ctx.fillRect(px, py + cs, cs, cs);
     } else {
       ctx.fillRect(px + cs * 2, py + cs, cs, cs);
@@ -527,18 +532,18 @@ export function drawCharacter(
   ctx.fillRect(px + cs * 2, py + cs * 4, cs, cs);
 
   // Pickaxe swing animation (read-only; updateCharacter owns the swing lifecycle)
-  if (char.swingStart !== null) {
-    const elapsed = performance.now() - char.swingStart;
+  if (runtime.swingStart !== null) {
+    const elapsed = performance.now() - runtime.swingStart;
     const progress = Math.min(elapsed / SWING_DURATION, 1);
     // Swing arc: starts raised, swings down
     const angle = swingAngle(progress);
 
     ctx.save();
     // Pivot at shoulder
-    const shoulderX = px + (char.facing === 1 ? cs * 3 : 0);
+    const shoulderX = px + (player.facing === 1 ? cs * 3 : 0);
     const shoulderY = py + cs * 2.5;
     ctx.translate(shoulderX, shoulderY);
-    ctx.scale(char.facing, 1);
+    ctx.scale(player.facing, 1);
     ctx.rotate(angle);
 
     // Handle
@@ -548,21 +553,21 @@ export function drawCharacter(
     // Pickaxe head
     ctx.fillStyle = "#666";
     ctx.fillRect(cs * 3.2, -cs * 1.2, cs * 1.2, cs * 0.8); // top spike
-    ctx.fillRect(cs * 3.2, cs * 0.4, cs * 1.2, cs * 0.8);  // bottom spike
+    ctx.fillRect(cs * 3.2, cs * 0.4, cs * 1.2, cs * 0.8); // bottom spike
     ctx.fillStyle = "#888";
-    ctx.fillRect(cs * 3, -cs * 0.6, cs * 0.8, cs * 1.2);   // head center
+    ctx.fillRect(cs * 3, -cs * 0.6, cs * 0.8, cs * 1.2); // head center
 
     ctx.restore();
   }
 }
 
 /** Trigger a pickaxe swing animation. */
-export function startSwing(char: Character): void {
-  char.swingStart = performance.now();
-  char.swingMinedProgress = 0;
+export function startSwing(runtime: CharacterRuntime): void {
+  runtime.swingStart = performance.now();
+  runtime.swingMinedProgress = 0;
 }
 
 /** Set whether the mine button is held (enables auto-repeat swings). */
-export function setSwingHeld(char: Character, held: boolean): void {
-  char.swingHeld = held;
+export function setSwingHeld(runtime: CharacterRuntime, held: boolean): void {
+  runtime.swingHeld = held;
 }

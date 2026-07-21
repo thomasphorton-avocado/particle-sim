@@ -1,5 +1,5 @@
-import { Grid, MATERIALS, MaterialId, harvestFlowerCluster } from "@particle-sim/shared";
-import { state, hasPickaxeEquipped, addToHotbar, getActiveHotbarMaterial, removeFromActiveSlot } from "./state";
+import { Grid, MATERIALS, MaterialId, allocateObjectId, createDefaultFallingObjectState, harvestFlowerCluster, type WorldState } from "@particle-sim/shared";
+import { state, hasPickaxeEquipped, addToHotbar, getActiveHotbarMaterial, removeFromActiveSlot, getLocalPlayer } from "./state";
 import { startSwing, setSwingHeld } from "./character";
 
 /** Maximum placement distance from character center (in grid cells). */
@@ -8,17 +8,134 @@ const PLACEMENT_RADIUS = 30;
 /** Returns true if the grid position is within placement range of the character. */
 function withinPlacementRange(gx: number, gy: number): boolean {
   if (state.toolMode === "editor") return true; // editor ignores radius
-  const char = state.character;
-  if (!char) return true;
-  const cx = char.x + char.width / 2;
-  const cy = char.y + char.height / 2;
+  const player = getLocalPlayer();
+  const cx = player.x + player.width / 2;
+  const cy = player.y + player.height / 2;
   const dx = gx - cx;
   const dy = gy - cy;
   return dx * dx + dy * dy <= PLACEMENT_RADIUS * PLACEMENT_RADIUS;
 }
 
+function canPlaceOver(grid: Grid, x: number, y: number, matId: MaterialId): boolean {
+  const existing = grid.get(x, y);
+  if (existing === MaterialId.Empty) return true;
+  if (matId === MaterialId.Empty) return true;
+  // Impermeable materials displace water
+  if (existing === MaterialId.Water && !MATERIALS[matId].permeable) return true;
+  return false;
+}
+
+function getObjectOffsets(materialId: MaterialId): [number, number][] {
+  const matDef = MATERIALS[materialId];
+  if (matDef.placement.kind !== "object") return [];
+  const { shape, width, height } = matDef.placement;
+  const halfW = width / 2;
+  const halfH = height / 2;
+  const offsets: [number, number][] = [];
+  for (let dy = -Math.floor(halfH); dy < height - Math.floor(halfH); dy++) {
+    for (let dx = -Math.floor(halfW); dx < width - Math.floor(halfW); dx++) {
+      if (shape === "circle" && (dx / halfW) ** 2 + (dy / halfH) ** 2 > 1) continue;
+      offsets.push([dx, dy]);
+    }
+  }
+  return offsets;
+}
+
+function canPlaceObjectFootprint(world: WorldState, materialId: MaterialId, anchorX: number, anchorY: number, offsets: [number, number][]): boolean {
+  if (offsets.length === 0) return false;
+  const grid = world.grid;
+  for (const [dx, dy] of offsets) {
+    const x = anchorX + dx;
+    const y = anchorY + dy;
+    if (!grid.inBounds(x, y)) return false;
+    if (!withinPlacementRange(x, y)) return false;
+    if (!canPlaceOver(grid, x, y, materialId)) return false;
+  }
+  return true;
+}
+
+function canDescendObjectFootprint(world: WorldState, anchorX: number, anchorY: number, offsets: [number, number][]): boolean {
+  if (offsets.length === 0) return false;
+  const grid = world.grid;
+  for (const [dx, dy] of offsets) {
+    const x = anchorX + dx;
+    const y = anchorY + dy;
+    if (!grid.inBounds(x, y)) return false;
+    if (grid.get(x, y) !== MaterialId.Empty) return false;
+  }
+  return true;
+}
+
+export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number): boolean {
+  const hotbarMat = getActiveHotbarMaterial();
+  if (!hotbarMat) return false;
+  if (!withinPlacementRange(gx, gy)) return false;
+
+  const materialId = hotbarMat.materialId;
+  const matDef = MATERIALS[materialId];
+  const grid = world.grid;
+
+  if (matDef.placement.kind === "object") {
+    const offsets = getObjectOffsets(materialId);
+    if (offsets.length === 0) return false;
+
+    if (!canPlaceObjectFootprint(world, materialId, gx, gy, offsets)) {
+      return false;
+    }
+
+    let restY = gy;
+    const fallsWhenAirborne = materialId === MaterialId.Torch || materialId === MaterialId.Stone;
+    if (fallsWhenAirborne) {
+      while (canDescendObjectFootprint(world, gx, restY + 1, offsets)) {
+        restY += 1;
+      }
+    }
+
+    if (!removeFromActiveSlot()) return false;
+    const objectId = allocateObjectId(world);
+
+    // Some objects (torches, stones) placed in the air fall to the ground
+    // with an animation instead of snapping into place.
+    if (fallsWhenAirborne) {
+      const fallingRestY = restY;
+      if (fallingRestY > gy) {
+        world.fallingObjects[objectId] = createDefaultFallingObjectState(objectId, materialId, gx, gy, fallingRestY, 0, offsets);
+        return true;
+      }
+    }
+
+    for (const [dx, dy] of offsets) {
+      const x = gx + dx;
+      const y = gy + dy;
+      if (!grid.inBounds(x, y)) continue;
+      grid.set(x, y, materialId, { objectId });
+      if (materialId === MaterialId.Faucet) grid.setFaucetFlow(x, y, 1);
+    }
+    return true;
+  }
+
+  // Brush-paint
+  const r = state.brushSize;
+  let placed = false;
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      if (dx * dx + dy * dy > r * r) continue;
+      const x = gx + dx;
+      const y = gy + dy;
+      if (!grid.inBounds(x, y)) continue;
+      if (!withinPlacementRange(x, y)) continue;
+      if (!canPlaceOver(grid, x, y, materialId)) continue;
+      if (!removeFromActiveSlot()) return placed;
+      grid.set(x, y, materialId);
+      placed = true;
+    }
+  }
+  return placed;
+}
+
 /** Wires pointer events on `canvas` to paint or stamp the selected material into `grid`. */
-export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: number): void {
+export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSize: number): void {
+  const grid = world.grid;
   let painting = false;
   let lastGridPos: { x: number; y: number } | null = null;
 
@@ -78,23 +195,19 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
   // placed as discrete objects (e.g. a wood plank or a stone boulder) rather than painted.
   const stampObjectAt = (gx: number, gy: number) => {
     if (!withinPlacementRange(gx, gy)) return;
-    const material = MATERIALS[state.selectedMaterial];
+    const materialId = state.selectedMaterial;
+    const material = MATERIALS[materialId];
     if (material.placement.kind !== "object") return;
-    const { shape, width, height } = material.placement;
-    const halfW = width / 2;
-    const halfH = height / 2;
-    for (let dy = -Math.floor(halfH); dy < height - Math.floor(halfH); dy++) {
-      for (let dx = -Math.floor(halfW); dx < width - Math.floor(halfW); dx++) {
-        if (shape === "circle" && (dx / halfW) ** 2 + (dy / halfH) ** 2 > 1) continue;
-        const x = gx + dx;
-        const y = gy + dy;
-        if (!grid.inBounds(x, y)) continue;
-        if (!withinPlacementRange(x, y)) continue;
-        grid.set(x, y, state.selectedMaterial);
-        // Faucets start on low flow
-        if (state.selectedMaterial === MaterialId.Faucet) {
-          grid.setVx(x, y, 1);
-        }
+    const offsets = getObjectOffsets(materialId);
+    if (!canPlaceObjectFootprint(world, materialId, gx, gy, offsets)) return;
+    const objectId = allocateObjectId(world);
+    for (const [dx, dy] of offsets) {
+      const x = gx + dx;
+      const y = gy + dy;
+      grid.set(x, y, materialId, { objectId });
+      // Faucets start on low flow
+      if (materialId === MaterialId.Faucet) {
+        grid.setFaucetFlow(x, y, 1);
       }
     }
   };
@@ -122,93 +235,12 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
         }
       }
     }
-    const current = grid.getVx(gx, gy);
+    const current = grid.getFaucetFlow(gx, gy);
     const next = (current + 1) % 3;
     for (const [x, y] of cells) {
-      grid.setVx(x, y, next);
+      grid.setFaucetFlow(x, y, next);
     }
     return true;
-  };
-
-  /** Place a single cell from the active hotbar material slot. */
-  const placeFromHotbar = (gx: number, gy: number) => {
-    const hotbarMat = getActiveHotbarMaterial();
-    if (!hotbarMat) return;
-    if (!withinPlacementRange(gx, gy)) return;
-
-    const materialId = hotbarMat.materialId;
-    const matDef = MATERIALS[materialId];
-
-    if (matDef.placement.kind === "object") {
-      const { shape, width, height } = matDef.placement;
-      const halfW = width / 2;
-      const halfH = height / 2;
-      // Check all cells are in range first
-      for (let dy = -Math.floor(halfH); dy < height - Math.floor(halfH); dy++) {
-        for (let dx = -Math.floor(halfW); dx < width - Math.floor(halfW); dx++) {
-          if (shape === "circle" && (dx / halfW) ** 2 + (dy / halfH) ** 2 > 1) continue;
-          const x = gx + dx;
-          const y = gy + dy;
-          if (!grid.inBounds(x, y) || !withinPlacementRange(x, y)) return;
-        }
-      }
-      // Consume one item for the whole object
-      if (!removeFromActiveSlot()) return;
-
-      // Some objects (torches, stones) placed in the air fall to the ground
-      // with an animation instead of snapping into place.
-      const fallsWhenAirborne =
-        materialId === MaterialId.Torch || materialId === MaterialId.Stone;
-      if (fallsWhenAirborne) {
-        const offsets: [number, number][] = [];
-        for (let dy = -Math.floor(halfH); dy < height - Math.floor(halfH); dy++) {
-          for (let dx = -Math.floor(halfW); dx < width - Math.floor(halfW); dx++) {
-            if (shape === "circle" && (dx / halfW) ** 2 + (dy / halfH) ** 2 > 1) continue;
-            offsets.push([dx, dy]);
-          }
-        }
-        const footFits = (cy: number) =>
-          offsets.every(([dx, dy]) => {
-            const x = gx + dx;
-            const y = cy + dy;
-            return grid.inBounds(x, y) && grid.get(x, y) === MaterialId.Empty;
-          });
-        let restY = gy;
-        while (footFits(restY + 1)) restY++;
-        if (restY > gy) {
-          // Animate the fall; the object is stamped into the grid on landing.
-          state.fallingObjects.push({ materialId, x: gx, y: gy, restY, vy: 0, offsets });
-          return;
-        }
-      }
-
-      for (let dy = -Math.floor(halfH); dy < height - Math.floor(halfH); dy++) {
-        for (let dx = -Math.floor(halfW); dx < width - Math.floor(halfW); dx++) {
-          if (shape === "circle" && (dx / halfW) ** 2 + (dy / halfH) ** 2 > 1) continue;
-          const x = gx + dx;
-          const y = gy + dy;
-          if (!grid.inBounds(x, y)) continue;
-          if (!canPlaceOver(x, y, materialId)) continue;
-          grid.set(x, y, materialId);
-          if (materialId === MaterialId.Faucet) grid.setVx(x, y, 1);
-        }
-      }
-    } else {
-      // Brush-paint
-      const r = state.brushSize;
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          if (dx * dx + dy * dy > r * r) continue;
-          const x = gx + dx;
-          const y = gy + dy;
-          if (!grid.inBounds(x, y)) continue;
-          if (!withinPlacementRange(x, y)) continue;
-          if (!canPlaceOver(x, y, materialId)) continue;
-          if (!removeFromActiveSlot()) return; // ran out
-          grid.set(x, y, materialId);
-        }
-      }
-    }
   };
 
   const start = (clientX: number, clientY: number) => {
@@ -218,7 +250,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     // Clicking a bloomed flower harvests it instead of painting
     const harvested = harvestFlowerCluster(grid, pos.x, pos.y);
     if (harvested > 0) {
-      state.inventory.flowers += harvested;
+      getLocalPlayer().inventory.flowers += harvested;
       // Add seeds to hotbar (1 per bloom + 10% chance of bonus seed)
       for (let i = 0; i < harvested; i++) {
         addToHotbar(MaterialId.Seed);
@@ -242,7 +274,7 @@ export function attachInput(canvas: HTMLCanvasElement, grid: Grid, cellSize: num
     }
     // Place from hotbar material slot (works in play mode)
     if (state.toolMode === "play" && getActiveHotbarMaterial()) {
-      placeFromHotbar(pos.x, pos.y);
+      placeHotbarMaterialAt(world, pos.x, pos.y);
       painting = false;
       lastGridPos = null;
       return;

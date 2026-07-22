@@ -81,24 +81,42 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   sourceLabel.textContent = `${versionDetails.sourceLabel} `;
   versionBadge.appendChild(sourceLabel);
 
-  const commitLink = document.createElement("a");
-  commitLink.href = versionDetails.commitHref ?? "#";
-  commitLink.target = "_blank";
-  commitLink.rel = "noopener noreferrer";
-  commitLink.textContent = versionDetails.commitLabel;
-  versionBadge.appendChild(commitLink);
+  const commitNode = versionDetails.commitHref
+    ? (() => {
+      const link = document.createElement("a");
+      link.href = versionDetails.commitHref;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = versionDetails.commitLabel;
+      return link;
+    })()
+    : (() => {
+      const text = document.createElement("span");
+      text.textContent = versionDetails.commitLabel;
+      return text;
+    })();
+  versionBadge.appendChild(commitNode);
 
   if (versionDetails.runLabel) {
     const runPrefix = document.createElement("span");
     runPrefix.textContent = " • ";
     versionBadge.appendChild(runPrefix);
 
-    const runLink = document.createElement("a");
-    runLink.href = versionDetails.runHref ?? "#";
-    runLink.target = "_blank";
-    runLink.rel = "noopener noreferrer";
-    runLink.textContent = versionDetails.runLabel;
-    versionBadge.appendChild(runLink);
+    const runNode = versionDetails.runHref
+      ? (() => {
+        const link = document.createElement("a");
+        link.href = versionDetails.runHref;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = versionDetails.runLabel;
+        return link;
+      })()
+      : (() => {
+        const text = document.createElement("span");
+        text.textContent = versionDetails.runLabel;
+        return text;
+      })();
+    versionBadge.appendChild(runNode);
   }
 
   const timestamp = document.createElement("span");

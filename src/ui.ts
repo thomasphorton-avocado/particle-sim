@@ -1,7 +1,7 @@
 import { Grid, MATERIALS, MaterialId, createCommandEnvelope, enqueueCommand, getNextActorSequence, type HotbarItem } from "@particle-sim/shared";
 import { getLocalPlayer, setDayNightPreset, state } from "./state";
 import { setTouchControl } from "./character";
-import { buildMetadata, getVersionLabel } from "./version";
+import { buildMetadata, getVersionBadgeDetails } from "./version";
 
 const PALETTE: MaterialId[] = [
   MaterialId.Sand,
@@ -69,13 +69,41 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   const actionGroup = document.createElement("div");
   actionGroup.className = "action-group";
 
-  const versionBadge = document.createElement("p");
+  const versionDetails = getVersionBadgeDetails(buildMetadata);
+  const versionBadge = document.createElement("div");
   versionBadge.className = "app-version";
   versionBadge.setAttribute("role", "status");
   versionBadge.setAttribute("aria-live", "polite");
   versionBadge.setAttribute("aria-label", `Build version ${buildMetadata.loadedCodeId}`);
-  versionBadge.textContent = getVersionLabel(buildMetadata);
   versionBadge.title = `Loaded code: ${buildMetadata.loadedCodeId}`;
+
+  const sourceLabel = document.createElement("span");
+  sourceLabel.textContent = `${versionDetails.sourceLabel} `;
+  versionBadge.appendChild(sourceLabel);
+
+  const commitLink = document.createElement("a");
+  commitLink.href = versionDetails.commitHref ?? "#";
+  commitLink.target = "_blank";
+  commitLink.rel = "noopener noreferrer";
+  commitLink.textContent = versionDetails.commitLabel;
+  versionBadge.appendChild(commitLink);
+
+  if (versionDetails.runLabel) {
+    const runPrefix = document.createElement("span");
+    runPrefix.textContent = " • ";
+    versionBadge.appendChild(runPrefix);
+
+    const runLink = document.createElement("a");
+    runLink.href = versionDetails.runHref ?? "#";
+    runLink.target = "_blank";
+    runLink.rel = "noopener noreferrer";
+    runLink.textContent = versionDetails.runLabel;
+    versionBadge.appendChild(runLink);
+  }
+
+  const timestamp = document.createElement("span");
+  timestamp.textContent = ` • ${versionDetails.timestamp}`;
+  versionBadge.appendChild(timestamp);
 
   const pauseBtn = document.createElement("button");
   pauseBtn.textContent = "Pause";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBuildMetadata, createVersionJson, getVersionLabel } from "./version";
+import { createBuildMetadata, createVersionJson, formatBuildTimestamp, getVersionBadgeDetails, parseBuildMetadata } from "./version";
 
 describe("build metadata", () => {
   it("prefers GitHub Actions metadata when available", () => {
@@ -31,6 +31,27 @@ describe("build metadata", () => {
     expect(metadata.commitSha).toBe("");
   });
 
+  it("preserves CI metadata during runtime round trips", () => {
+    const raw = JSON.stringify({
+      loadedCodeId: "0123456789abcdef0123456789abcdef01234567",
+      shortCommitSha: "0123456",
+      displayVersion: "build-0123456",
+      source: "github-actions",
+      commitSha: "0123456789abcdef0123456789abcdef01234567",
+      githubRepository: "octo/particle-sim",
+      githubRunId: "12345",
+      githubRunNumber: "7",
+      githubWorkflow: "deploy",
+      buildTimestamp: "2024-01-02T03:04:05.000Z",
+    });
+
+    const metadata = parseBuildMetadata(raw);
+
+    expect(metadata.source).toBe("github-actions");
+    expect(metadata.githubRepository).toBe("octo/particle-sim");
+    expect(metadata.githubRunNumber).toBe("7");
+  });
+
   it("formats a machine-readable version payload", () => {
     const metadata = createBuildMetadata({}, { buildTimestamp: "2024-01-02T03:04:05.000Z" });
 
@@ -38,9 +59,25 @@ describe("build metadata", () => {
     expect(createVersionJson(metadata)).toContain('"buildTimestamp": "2024-01-02T03:04:05.000Z"');
   });
 
-  it("uses the metadata for a compact UI label", () => {
-    const metadata = createBuildMetadata({ GITHUB_ACTIONS: "true", GITHUB_SHA: "abcdef1234567890" });
+  it("renders compact UI details with commit and run links", () => {
+    const metadata = createBuildMetadata(
+      {
+        GITHUB_ACTIONS: "true",
+        GITHUB_SHA: "abcdef1234567890",
+        GITHUB_REPOSITORY: "octo/particle-sim",
+        GITHUB_RUN_ID: "4242",
+        GITHUB_RUN_NUMBER: "13",
+      },
+      { buildTimestamp: "2024-01-02T03:04:05.000Z" },
+    );
 
-    expect(getVersionLabel(metadata)).toBe("Build abcdef1");
+    const details = getVersionBadgeDetails(metadata);
+
+    expect(details.sourceLabel).toBe("Build");
+    expect(details.commitLabel).toBe("abcdef1");
+    expect(details.commitHref).toBe("https://github.com/octo/particle-sim/commit/abcdef1234567890");
+    expect(details.runLabel).toBe("run #13");
+    expect(details.runHref).toBe("https://github.com/octo/particle-sim/actions/runs/4242");
+    expect(formatBuildTimestamp(metadata.buildTimestamp)).toBe("2024-01-02 03:04Z");
   });
 });

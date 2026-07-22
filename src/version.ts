@@ -18,6 +18,16 @@ export interface BuildMetadataOptions {
   buildTimestamp?: string;
   commitSha?: string;
   shortCommitSha?: string;
+  source?: VersionSource;
+}
+
+export interface VersionBadgeDetails {
+  sourceLabel: string;
+  commitLabel: string;
+  commitHref?: string;
+  runLabel?: string;
+  runHref?: string;
+  timestamp: string;
 }
 
 declare const __APP_BUILD_METADATA__: string | undefined;
@@ -27,7 +37,7 @@ export function createBuildMetadata(
   options: BuildMetadataOptions = {},
 ): BuildMetadata {
   const commitSha = (options.commitSha ?? env["GITHUB_SHA"] ?? env["VITE_GITHUB_SHA"] ?? "").trim();
-  const source = env["GITHUB_ACTIONS"] === "true" ? "github-actions" : "local";
+  const source = options.source ?? (env["GITHUB_ACTIONS"] === "true" ? "github-actions" : "local");
   const shortCommitSha = (options.shortCommitSha ?? (commitSha ? commitSha.slice(0, 7) : "local")).trim();
   const loadedCodeId = commitSha || "local";
   const buildTimestamp = options.buildTimestamp ?? new Date().toISOString();
@@ -54,22 +64,22 @@ export function parseBuildMetadata(rawMetadata: string | undefined): BuildMetada
 
   try {
     const parsed = JSON.parse(rawMetadata) as Partial<BuildMetadata>;
-    const metadata = createBuildMetadata(
-      {},
-      {
-        buildTimestamp: parsed.buildTimestamp ?? new Date().toISOString(),
-        commitSha: parsed.commitSha ?? parsed.loadedCodeId,
-        shortCommitSha: parsed.shortCommitSha,
-      },
-    );
+    const commitSha = (parsed.commitSha ?? parsed.loadedCodeId ?? "").trim();
+    const shortCommitSha = (parsed.shortCommitSha ?? (commitSha ? commitSha.slice(0, 7) : "local")).trim();
+    const source = parsed.source === "github-actions" ? "github-actions" : "local";
 
     return {
-      ...metadata,
-      githubRepository: parsed.githubRepository ?? metadata.githubRepository,
-      githubRef: parsed.githubRef ?? metadata.githubRef,
-      githubRunId: parsed.githubRunId ?? metadata.githubRunId,
-      githubRunNumber: parsed.githubRunNumber ?? metadata.githubRunNumber,
-      githubWorkflow: parsed.githubWorkflow ?? metadata.githubWorkflow,
+      loadedCodeId: commitSha || "local",
+      shortCommitSha,
+      displayVersion: commitSha ? `build-${shortCommitSha}` : "local",
+      source,
+      commitSha,
+      githubRepository: parsed.githubRepository,
+      githubRef: parsed.githubRef,
+      githubRunId: parsed.githubRunId,
+      githubRunNumber: parsed.githubRunNumber,
+      githubWorkflow: parsed.githubWorkflow,
+      buildTimestamp: parsed.buildTimestamp ?? new Date().toISOString(),
     };
   } catch {
     return createBuildMetadata();
@@ -80,11 +90,35 @@ export function createVersionJson(metadata: BuildMetadata): string {
   return `${JSON.stringify(metadata, null, 2)}\n`;
 }
 
-export function getVersionLabel(metadata: BuildMetadata): string {
-  if (metadata.source === "github-actions") {
-    return `Build ${metadata.shortCommitSha}`;
+export function formatBuildTimestamp(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "unknown";
   }
-  return metadata.commitSha ? `Local ${metadata.shortCommitSha}` : "Local build";
+
+  return `${date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 16)}Z`;
+}
+
+export function getVersionBadgeDetails(metadata: BuildMetadata): VersionBadgeDetails {
+  const shortCommitSha = metadata.shortCommitSha || metadata.loadedCodeId;
+  const sourceLabel = metadata.source === "github-actions" ? "Build" : "Local";
+  const commitLabel = shortCommitSha || metadata.loadedCodeId;
+  const commitHref = metadata.githubRepository && metadata.commitSha
+    ? `https://github.com/${metadata.githubRepository}/commit/${metadata.commitSha}`
+    : undefined;
+  const runLabel = metadata.githubRunNumber ? `run #${metadata.githubRunNumber}` : undefined;
+  const runHref = metadata.githubRunId && metadata.githubRepository
+    ? `https://github.com/${metadata.githubRepository}/actions/runs/${metadata.githubRunId}`
+    : undefined;
+
+  return {
+    sourceLabel,
+    commitLabel,
+    commitHref,
+    runLabel,
+    runHref,
+    timestamp: formatBuildTimestamp(metadata.buildTimestamp),
+  };
 }
 
 export const buildMetadata = parseBuildMetadata(

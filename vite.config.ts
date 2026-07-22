@@ -1,6 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import { createBuildMetadata, createVersionJson } from "./src/version";
@@ -22,7 +20,7 @@ const buildMetadata = createBuildMetadata(process.env, {
 export default defineConfig({
   base: "/particle-sim/",
   define: {
-    __APP_BUILD_METADATA__: JSON.stringify(buildMetadata),
+    __APP_BUILD_METADATA__: JSON.stringify(JSON.stringify(buildMetadata)),
   },
   resolve: {
     alias: {
@@ -32,8 +30,12 @@ export default defineConfig({
   plugins: [
     {
       name: "emit-version-json",
-      writeBundle() {
-        writeFileSync(resolve(rootDir, "dist", "version.json"), createVersionJson(buildMetadata));
+      generateBundle() {
+        this.emitFile({
+          type: "asset",
+          fileName: "version.json",
+          source: createVersionJson(buildMetadata),
+        });
       },
     },
   ],

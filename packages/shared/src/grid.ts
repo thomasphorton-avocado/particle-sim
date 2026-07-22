@@ -220,6 +220,16 @@ export class Grid {
     }
   }
 
+  getObjectCellIndices(objectId: ObjectId): number[] {
+    const cells = this.objectCellIndex.get(objectId);
+    if (!cells || cells.size === 0) return [];
+    return Array.from(cells);
+  }
+
+  getObjectCells(objectId: ObjectId): Array<[number, number]> {
+    return this.getObjectCellIndices(objectId).map((index) => [index % this.width, Math.floor(index / this.width)] as [number, number]);
+  }
+
   getCellForObjectId(objectId: ObjectId): [number, number] | null {
     const cells = this.objectCellIndex.get(objectId);
     if (!cells || cells.size === 0) return null;

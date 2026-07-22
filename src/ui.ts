@@ -1,6 +1,7 @@
 import { Grid, MATERIALS, MaterialId, createCommandEnvelope, enqueueCommand, getNextActorSequence, type HotbarItem } from "@particle-sim/shared";
 import { getLocalPlayer, setDayNightPreset, state } from "./state";
 import { setTouchControl } from "./character";
+import { buildMetadata, getVersionLabel } from "./version";
 
 const PALETTE: MaterialId[] = [
   MaterialId.Sand,
@@ -67,6 +68,14 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
 
   const actionGroup = document.createElement("div");
   actionGroup.className = "action-group";
+
+  const versionBadge = document.createElement("p");
+  versionBadge.className = "app-version";
+  versionBadge.setAttribute("role", "status");
+  versionBadge.setAttribute("aria-live", "polite");
+  versionBadge.setAttribute("aria-label", `Build version ${buildMetadata.loadedCodeId}`);
+  versionBadge.textContent = getVersionLabel(buildMetadata);
+  versionBadge.title = `Loaded code: ${buildMetadata.loadedCodeId}`;
 
   const pauseBtn = document.createElement("button");
   pauseBtn.textContent = "Pause";
@@ -163,7 +172,7 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   };
   requestAnimationFrame(updateFlowerCounter);
 
-  toolbar.append(toolGroup, actionGroup, flowerCounter);
+  toolbar.append(toolGroup, actionGroup, versionBadge, flowerCounter);
   root.append(toolbar, editPanel);
 
   const touchHost = root.parentElement ?? root;

@@ -18,3 +18,7 @@ A canvas-based particle simulation gardening game built with TypeScript and Vite
 npm install
 npm run dev
 ```
+
+## Build version metadata
+
+The production build now emits a `dist/version.json` file and shows a subtle version badge in the game UI. The badge uses the GitHub Actions commit SHA when available, with local fallbacks such as `local` when the build is run outside CI.

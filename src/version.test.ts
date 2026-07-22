@@ -81,11 +81,28 @@ describe("build metadata", () => {
     expect(formatBuildTimestamp(metadata.buildTimestamp)).toBe("2024-01-02 03:04Z");
   });
 
-  it("returns no links for local and partial metadata", () => {
+  it("returns no links for local metadata", () => {
     const details = getVersionBadgeDetails(createBuildMetadata({}, { buildTimestamp: "2024-01-02T03:04:05.000Z" }));
 
     expect(details.commitHref).toBeUndefined();
     expect(details.runHref).toBeUndefined();
     expect(details.runLabel).toBeUndefined();
+  });
+
+  it("does not create a run link when a run number exists without repository or run id", () => {
+    const metadata = createBuildMetadata(
+      {
+        GITHUB_ACTIONS: "true",
+        GITHUB_SHA: "abcdef1234567890",
+        GITHUB_RUN_NUMBER: "13",
+      },
+      { buildTimestamp: "2024-01-02T03:04:05.000Z" },
+    );
+
+    const details = getVersionBadgeDetails(metadata);
+
+    expect(details.commitHref).toBeUndefined();
+    expect(details.runHref).toBeUndefined();
+    expect(details.runLabel).toBe("run #13");
   });
 });

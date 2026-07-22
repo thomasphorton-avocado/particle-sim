@@ -80,7 +80,7 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
     versionDetails.timestamp,
   ].filter(Boolean).join(" • ");
   versionBadge.setAttribute("aria-label", `Build version ${badgeLabel}`);
-  versionBadge.title = `Build version ${badgeLabel}`;
+  versionBadge.title = `Build version ${badgeLabel} • ${buildMetadata.loadedCodeId}`;
 
   const sourceLabel = document.createElement("span");
   sourceLabel.textContent = `${versionDetails.sourceLabel} `;

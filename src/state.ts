@@ -1,8 +1,8 @@
 import {
   MaterialId,
+  LocalTransport,
+  createLocalTransportSession,
   addToHotbar as addToHotbarHelper,
-  cloneHotbar,
-  cloneInventory,
   createDefaultHotbar,
   createDefaultInventory,
   createDefaultPlayerState,
@@ -26,6 +26,7 @@ export interface SnipAnimation {
 
 export interface SimState {
   world: WorldState;
+  transport: LocalTransport;
   localPlayerId: PlayerId;
   selectedMaterial: MaterialId;
   brushSize: number;
@@ -42,24 +43,46 @@ export interface SimState {
 }
 
 function getLocalPlayerState(): PlayerState {
-  let player = state.world.players[state.localPlayerId];
+  let player = currentWorld.players[state.localPlayerId];
   if (!player) {
    player = createDefaultPlayerState(state.localPlayerId);
-   state.world.players[state.localPlayerId] = player;
+   currentWorld.players[state.localPlayerId] = player;
   }
   return player;
 }
 
-function syncWorldDefaults(): void {
-  const player = getLocalPlayerState();
-  const defaults = createDefaultInventory();
-  player.inventory = { ...defaults, ...cloneInventory(player.inventory) };
-  player.hotbar = player.hotbar.length === 10 ? cloneHotbar(player.hotbar) : createDefaultHotbar();
+function createInitialWorld(): WorldState {
+  const localPlayerId = createPlayerId("player_1");
+  const world = createDefaultWorldState("room_default");
+  const player = createDefaultPlayerState(localPlayerId);
+  player.inventory = createDefaultInventory();
+  player.hotbar = createDefaultHotbar();
+  world.players[localPlayerId] = player;
+  return world;
 }
 
-export const state: SimState = {
-  world: createDefaultWorldState("room_default"),
-  localPlayerId: createPlayerId("player_1"),
+const initialLocalPlayerId = createPlayerId("player_1");
+const initialWorld = createInitialWorld();
+const initialSession = createLocalTransportSession(initialWorld, initialLocalPlayerId);
+let transport = initialSession.transport;
+let currentWorld: WorldState = transport.getClientWorld();
+let unsubscribeTransport: (() => void) | null = null;
+
+function installTransport(nextTransport: LocalTransport): void {
+  if (unsubscribeTransport) {
+   unsubscribeTransport();
+  }
+  transport = nextTransport;
+  currentWorld = nextTransport.getClientWorld();
+  unsubscribeTransport = nextTransport.subscribe((view) => {
+   currentWorld = view.clientWorld;
+  });
+}
+
+const stateBase: SimState = {
+  world: currentWorld,
+  transport,
+  localPlayerId: initialLocalPlayerId,
   selectedMaterial: MaterialId.Sand,
   brushSize: 4,
   hover: null,
@@ -69,21 +92,39 @@ export const state: SimState = {
   toolMode: "play",
 };
 
-syncWorldDefaults();
+Object.defineProperty(stateBase, "world", {
+  get() {
+   return currentWorld;
+  },
+  enumerable: true,
+  configurable: true,
+});
+
+Object.defineProperty(stateBase, "transport", {
+  get() {
+   return transport;
+  },
+  set(nextTransport: LocalTransport) {
+   installTransport(nextTransport);
+  },
+  enumerable: true,
+  configurable: true,
+});
+
+export const state = stateBase;
+
+installTransport(transport);
 
 export function getLocalPlayer(): PlayerState {
   return getLocalPlayerState();
 }
 
 export function setDayNightPreset(preset: DayNightPreset): void {
-  const presets: Record<DayNightPreset, number> = {
-   morning: 0.0,
-   day: 0.25,
-   dusk: 0.5,
-   night: 0.75,
-  };
-  state.world.time.dayNightCycle = presets[preset];
-  state.world.time.dayNightTick = Math.round(presets[preset] * 18_000) % 18_000;
+  state.transport.enqueueCommand({
+   type: "set_time_preset",
+   preset,
+   expectedWorldRevision: state.world.worldRevision,
+  });
 }
 
 /** Returns true if the currently selected hotbar item is a pickaxe. */

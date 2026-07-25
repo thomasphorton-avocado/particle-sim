@@ -1,14 +1,22 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { Grid, advanceWorldTick, createDefaultFallingObjectState, createDefaultWorldState, createGameplayRandomState, createObjectId, createStarterWorld, deserializeWorldState, harvestFlowerCluster, MaterialId, placeWorldCell, serializeWorldState } from "@particle-sim/shared";
+import { Grid, advanceWorldTick, createDefaultFallingObjectState, createDefaultPlayerState, createDefaultWorldState, createGameplayRandomState, createLocalTransportSession, createObjectId, createStarterWorld, deserializeWorldState, harvestFlowerCluster, MaterialId, placeWorldCell, serializeWorldState, type LocalTransportEditorCapability, type WorldState } from "@particle-sim/shared";
 import { handleHarvestInputAt, placeHotbarMaterialAt } from "./input";
 import { getLocalPlayer, state } from "./state";
 import { processProductionTick } from "./production-tick";
 
 describe("game logic", () => {
+  let world: WorldState;
+  let editor: LocalTransportEditorCapability;
+
+  const getAuthoritativeWorld = () => world;
+
   beforeEach(() => {
-    state.world = createDefaultWorldState("room_test");
-    state.world.grid = new Grid(80, 80);
-    const player = getLocalPlayer();
+    world = createDefaultWorldState("room_test");
+    const session = createLocalTransportSession(world, state.localPlayerId);
+    state.transport = session.transport;
+    editor = session.editor;
+    world.grid = new Grid(80, 80);
+    const player = world.players[state.localPlayerId] ?? createDefaultPlayerState(state.localPlayerId);
     player.inventory = { flowers: 0 };
     player.hotbar = [
       { kind: "pickaxe" },
@@ -23,6 +31,8 @@ describe("game logic", () => {
       { kind: "empty" },
     ];
     player.activeHotbarSlot = 0;
+    world.players[state.localPlayerId] = player;
+    editor.replaceWorld(world);
   });
 
   it("keeps same-seed steps deterministic across serialization", () => {
@@ -79,11 +89,15 @@ describe("game logic", () => {
       world.grid.set(2, 3, MaterialId.Stem);
       world.grid.set(3, 2, MaterialId.Flower);
 
-      state.world = world;
-      const player = getLocalPlayer();
+      let player = world.players[state.localPlayerId];
+      if (!player) {
+        player = createDefaultPlayerState(state.localPlayerId);
+        world.players[state.localPlayerId] = player;
+      }
       player.inventory = { flowers: 0 };
       player.hotbar = [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })];
       player.activeHotbarSlot = 0;
+      editor.replaceWorld(world);
     };
 
     setupWorld(worldA);
@@ -91,13 +105,13 @@ describe("game logic", () => {
 
     const restoredWorldA = deserializeWorldState(serializeWorldState(worldA));
 
-    state.world = restoredWorldA;
+    editor.replaceWorld(restoredWorldA);
     handleHarvestInputAt(restoredWorldA, 2, 2);
     processProductionTick(restoredWorldA, {
       [state.localPlayerId]: restoredWorldA.players[state.localPlayerId].input,
     });
 
-    state.world = worldB;
+    editor.replaceWorld(worldB);
     handleHarvestInputAt(worldB, 2, 2);
     processProductionTick(worldB, {
       [state.localPlayerId]: worldB.players[state.localPlayerId].input,
@@ -116,7 +130,8 @@ describe("game logic", () => {
   });
 
   it("harvests a connected flower cluster and clears the cells", () => {
-    const grid = state.world.grid;
+    const world = getAuthoritativeWorld();
+    const grid = world.grid;
     grid.set(2, 2, MaterialId.Flower);
     grid.set(2, 3, MaterialId.Stem);
     grid.set(3, 2, MaterialId.Flower);
@@ -131,7 +146,7 @@ describe("game logic", () => {
   });
 
   it("lands falling objects by stamping their footprint into the grid", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
     const id = createObjectId("object_test_1");
     world.fallingObjects[id] = createDefaultFallingObjectState(id, MaterialId.Stone, 3, 1, 4, 0, [
@@ -151,7 +166,7 @@ describe("game logic", () => {
   });
 
   it("keeps falling objects in the state until they land", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
     const id = createObjectId("object_test_2");
     world.fallingObjects[id] = createDefaultFallingObjectState(id, MaterialId.Torch, 5, 1, 8, 0, [[0, 0]]);
@@ -164,9 +179,9 @@ describe("game logic", () => {
   });
 
   it("stamps a stable object identity when placing a hotbar object immediately", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
-    const player = getLocalPlayer();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Wood, count: 1 },
@@ -191,8 +206,8 @@ describe("game logic", () => {
   });
 
   it("preserves identity through airborne placement, fractional mid-fall serialization, and landing", () => {
-    const world = state.world;
-    const player = getLocalPlayer();
+    const world = getAuthoritativeWorld();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Torch, count: 1 },
@@ -217,7 +232,7 @@ describe("game logic", () => {
     const restoredFalling = restored.fallingObjects[objectId];
     expect(restoredFalling.y).toBe(1.75);
 
-    state.world = restored;
+    editor.replaceWorld(restored);
     restoredFalling.y = restoredFalling.restY - 0.2;
     advanceWorldTick(restored, {});
     advanceWorldTick(restored, {});
@@ -227,8 +242,8 @@ describe("game logic", () => {
   });
 
   it("lets falling objects rest on the actual support even beyond placement range", () => {
-    const world = state.world;
-    const player = getLocalPlayer();
+    const world = getAuthoritativeWorld();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Torch, count: 1 },
@@ -253,8 +268,8 @@ describe("game logic", () => {
   });
 
   it("stops falling on water instead of traversing through it", () => {
-    const world = state.world;
-    const player = getLocalPlayer();
+    const world = getAuthoritativeWorld();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Torch, count: 1 },
@@ -279,9 +294,9 @@ describe("game logic", () => {
   });
 
   it("rejects a blocked initial footprint without mutating state", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
-    const player = getLocalPlayer();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Wood, count: 1 },
@@ -309,9 +324,9 @@ describe("game logic", () => {
   });
 
   it("clears only the tracked adjacent object when mining", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
-    const player = getLocalPlayer();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     const leftId = createObjectId("object_test_left");
     const rightId = createObjectId("object_test_right");
     player.hotbar = [{ kind: "pickaxe" }, ...Array(9).fill({ kind: "empty" })];

@@ -1,10 +1,13 @@
 import { createCommandId, createPlayerId, parseCommandId, parseObjectId, parsePlayerId, type CommandId, type ObjectId, type PlayerId } from "./ids.js";
-import { cloneHotbar, type HotbarItem, type InventoryCounts } from "./inventory.js";
-import { Grid } from "./grid.js";
+import { cloneHotbar, consumeHotbarMaterial, type HotbarItem, type InventoryCounts } from "./inventory.js";
+import { assertAuxiliaryValueForMaterial, Grid } from "./grid.js";
 import { MATERIALS, MaterialId } from "./materials.js";
+import { DAY_NIGHT_CYCLE_TICKS } from "./gameplay.js";
 import { findFlowerCluster } from "./harvest.js";
 import { hashVisualShade } from "./random.js";
 import { allocateObjectId, type PersistedPlayerInputState, type PlayerState, type WorldState } from "./world-state.js";
+
+export type TimePresetName = "morning" | "day" | "dusk" | "night";
 
 export type GameplayCommandType =
   | "set_input_state"
@@ -15,7 +18,8 @@ export type GameplayCommandType =
   | "harvest"
   | "cycle_faucet"
   | "pause_world"
-  | "resume_world";
+  | "resume_world"
+  | "set_time_preset";
 
 export interface SetInputStateCommand {
   type: "set_input_state";
@@ -70,6 +74,12 @@ export interface ResumeWorldCommand {
   expectedWorldRevision: number;
 }
 
+export interface SetTimePresetCommand {
+  type: "set_time_preset";
+  preset: TimePresetName;
+  expectedWorldRevision: number;
+}
+
 export type GameplayCommand =
   | SetInputStateCommand
   | MineCommand
@@ -78,7 +88,8 @@ export type GameplayCommand =
   | HarvestCommand
   | CycleFaucetCommand
   | PauseWorldCommand
-  | ResumeWorldCommand;
+  | ResumeWorldCommand
+  | SetTimePresetCommand;
 
 export interface CommandEnvelope {
   commandId: CommandId;
@@ -202,6 +213,7 @@ export interface ValidatedCommandPlan {
   gridWrites: CommandGridWrite[];
   fallingObjects: CommandFallingObjectCreate[];
   paused?: boolean;
+  timeTick?: number;
   worldRevisionDelta: number;
   inventoryRevisionDelta: number;
   targetRevisionDelta: number;
@@ -468,6 +480,18 @@ function parseGameplayCommand(value: unknown): GameplayCommand | null {
           expectedWorldRevision: assertSafeInteger(value["expectedWorldRevision"], "expectedWorldRevision"),
         };
       }
+      case "set_time_preset": {
+        assertAllowedFields(value, new Set(["type", "preset", "expectedWorldRevision"]), type);
+        const preset = value["preset"];
+        if (preset !== "morning" && preset !== "day" && preset !== "dusk" && preset !== "night") {
+          return null;
+        }
+        return {
+          type,
+          preset,
+          expectedWorldRevision: assertSafeInteger(value["expectedWorldRevision"], "expectedWorldRevision"),
+        };
+      }
       default:
         return null;
     }
@@ -497,6 +521,21 @@ function getTargetRevision(grid: Grid, x: number, y: number): number | null {
   if (!grid.inBounds(x, y)) return null;
   const index = grid.index(x, y);
   return grid.cellRevisions[index] ?? 0;
+}
+
+function resolveTimePresetTick(preset: TimePresetName): number {
+  switch (preset) {
+    case "morning":
+      return Math.floor(DAY_NIGHT_CYCLE_TICKS * 0.25);
+    case "day":
+      return Math.floor(DAY_NIGHT_CYCLE_TICKS * 0.5);
+    case "dusk":
+      return Math.floor(DAY_NIGHT_CYCLE_TICKS * 0.75);
+    case "night":
+      return DAY_NIGHT_CYCLE_TICKS - 1;
+    default:
+      return Math.floor(DAY_NIGHT_CYCLE_TICKS * 0.5);
+  }
 }
 
 function collectHarvestPlan(grid: Grid, startX: number, startY: number): { cells: Array<[number, number]>; bloomCount: number } | null {
@@ -646,12 +685,15 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
       }
     }
     const gridWrites: CommandGridWrite[] = [];
+    const initialAuxiliary = materialId === MaterialId.Faucet
+      ? assertAuxiliaryValueForMaterial(MaterialId.Faucet, 1)
+      : 0;
     if (!fallsWhenAirborne || restY <= command.y) {
       for (const [dx, dy] of offsets) {
         const x = command.x + dx;
         const y = command.y + dy;
         if (!world.grid.inBounds(x, y)) continue;
-        gridWrites.push({ x, y, id: materialId, shade: hashVisualShade(world.random.seed, x, y, materialId), auxiliary: 0, objectId });
+        gridWrites.push({ x, y, id: materialId, shade: hashVisualShade(world.random.seed, x, y, materialId), auxiliary: initialAuxiliary, objectId });
       }
     }
     const fallingObjects: CommandFallingObjectCreate[] = [];
@@ -668,7 +710,7 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
       });
     }
     const nextHotbar = cloneHotbar(actor.hotbar);
-    nextHotbar[slot] = { kind: "material", materialId: hotbarEntry.materialId, count: hotbarEntry.count - 1 };
+    consumeHotbarMaterial(nextHotbar, slot, 1);
     const playerPatch: CommandPlayerPatch = {
       id: actor.id,
       hotbar: nextHotbar,
@@ -697,7 +739,7 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
     return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "inventory" };
   }
   const nextHotbar = cloneHotbar(actor.hotbar);
-  nextHotbar[slot] = { kind: "material", materialId: hotbarEntry.materialId, count: hotbarEntry.count - gridWrites.length };
+  consumeHotbarMaterial(nextHotbar, slot, gridWrites.length);
   const playerPatch: CommandPlayerPatch = {
     id: actor.id,
     hotbar: nextHotbar,
@@ -706,7 +748,7 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
   return { gridWrites, fallingObjects: [], playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 1, acceptedEffect: "inventory", resultCode: "accepted" };
 }
 
-function createPlan(envelope: CommandEnvelope, resultCode: CommandResultCode, accepted: boolean, beforeWorldRevision: number, afterWorldRevision: number, beforeInventoryRevision: number, afterInventoryRevision: number, beforeTargetRevision: number, afterTargetRevision: number, acceptedEffect: string | null, playerPatch?: CommandPlayerPatch, gridWrites: CommandGridWrite[] = [], fallingObjects: CommandFallingObjectCreate[] = [], paused?: boolean, worldRevisionDelta = 0, inventoryRevisionDelta = 0, targetRevisionDelta = 0): ValidatedCommandPlan {
+function createPlan(envelope: CommandEnvelope, resultCode: CommandResultCode, accepted: boolean, beforeWorldRevision: number, afterWorldRevision: number, beforeInventoryRevision: number, afterInventoryRevision: number, beforeTargetRevision: number, afterTargetRevision: number, acceptedEffect: string | null, playerPatch?: CommandPlayerPatch, gridWrites: CommandGridWrite[] = [], fallingObjects: CommandFallingObjectCreate[] = [], paused?: boolean, timeTick?: number, worldRevisionDelta = 0, inventoryRevisionDelta = 0, targetRevisionDelta = 0): ValidatedCommandPlan {
   return {
     kind: "plan",
     envelope,
@@ -724,6 +766,7 @@ function createPlan(envelope: CommandEnvelope, resultCode: CommandResultCode, ac
     gridWrites,
     fallingObjects,
     paused,
+    timeTick,
     worldRevisionDelta,
     inventoryRevisionDelta,
     targetRevisionDelta,
@@ -785,6 +828,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
   let gridWrites: CommandGridWrite[] = [];
   let fallingObjects: CommandFallingObjectCreate[] = [];
   let paused: boolean | undefined;
+  let timeTick: number | undefined;
   let worldRevisionDelta = 0;
   let inventoryRevisionDelta = 0;
   let targetRevisionDelta = 0;
@@ -960,6 +1004,20 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
       worldRevisionDelta = 1;
       break;
     }
+    case "set_time_preset": {
+      if (world.ownerPlayerId !== null && world.ownerPlayerId !== envelope.actorId) {
+        resultCode = "not_owner";
+        break;
+      }
+      if (envelope.command.expectedWorldRevision !== world.worldRevision) {
+        resultCode = "revision";
+        break;
+      }
+      timeTick = resolveTimePresetTick(envelope.command.preset);
+      acceptedEffect = "time";
+      worldRevisionDelta = 1;
+      break;
+    }
     default:
       resultCode = "invalid_command";
       break;
@@ -984,6 +1042,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
     gridWrites,
     fallingObjects,
     paused,
+    timeTick,
     worldRevisionDelta,
     inventoryRevisionDelta,
     targetRevisionDelta,
@@ -1022,6 +1081,10 @@ export function commitValidatedPlan(world: WorldState, plan: ValidatedCommandPla
   }
   if (plan.paused !== undefined) {
     world.paused = plan.paused;
+  }
+  if (plan.timeTick !== undefined) {
+    world.time.dayNightTick = plan.timeTick;
+    world.time.dayNightCycle = world.time.dayNightTick / DAY_NIGHT_CYCLE_TICKS;
   }
   world.worldRevision += plan.worldRevisionDelta;
 }

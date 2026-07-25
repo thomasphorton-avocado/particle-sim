@@ -1,4 +1,4 @@
-import { Grid, MATERIALS, MaterialId, createCommandEnvelope, enqueueCommand, getNextActorSequence, type HotbarItem } from "@particle-sim/shared";
+import { MATERIALS, MaterialId, type HotbarItem, type LocalTransportEditorCapability } from "@particle-sim/shared";
 import { getLocalPlayer, setDayNightPreset, state } from "./state";
 import { setTouchControl } from "./character";
 import { buildMetadata, getVersionBadgeDetails } from "./version";
@@ -19,7 +19,7 @@ const PALETTE: MaterialId[] = [
   MaterialId.Empty,
 ];
 
-export function buildUi(root: HTMLElement, grid: Grid): void {
+export function buildUi(root: HTMLElement, editor: LocalTransportEditorCapability): void {
   const toolbar = document.createElement("div");
   toolbar.className = "toolbar";
 
@@ -131,20 +131,22 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   const pauseBtn = document.createElement("button");
   pauseBtn.textContent = "Pause";
   pauseBtn.addEventListener("click", () => {
-    const actorId = state.localPlayerId;
     const command = state.world.paused
       ? { type: "resume_world" as const, expectedWorldRevision: state.world.worldRevision }
       : { type: "pause_world" as const, expectedWorldRevision: state.world.worldRevision };
-    const envelope = createCommandEnvelope(actorId, getNextActorSequence(state.world, actorId), state.world.tick, command);
-    enqueueCommand(state.world, envelope);
-    pauseBtn.textContent = state.world.paused ? "Resume" : "Pause";
+    state.transport.enqueueCommand(command);
+    requestAnimationFrame(() => {
+      pauseBtn.textContent = state.world.paused ? "Resume" : "Pause";
+    });
   });
 
   const clearBtn = document.createElement("button");
   clearBtn.textContent = "Clear";
   clearBtn.addEventListener("click", () => {
     if (state.toolMode === "play") return;
-    grid.clear();
+    editor.mutateWorld((world) => {
+      world.grid.clear();
+    });
   });
 
   actionGroup.append(pauseBtn, clearBtn);
@@ -345,22 +347,21 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
 
   function selectSlot(index: number): void {
     const player = getLocalPlayer();
-    const actorId = state.localPlayerId;
-    const envelope = createCommandEnvelope(
-      actorId,
-      getNextActorSequence(state.world, actorId),
-      state.world.tick,
-      { type: "select_slot", slot: index, expectedInventoryRevision: player.inventoryRevision },
-    );
-    enqueueCommand(state.world, envelope);
-    for (let j = 0; j < slotElements.length; j++) {
-      slotElements[j].classList.toggle("active", j === index);
-    }
-    // Auto-switch tool mode based on item
-    const item = player.hotbar[index];
-    if (item.kind === "pickaxe" || item.kind === "material") {
-      setToolMode("play", pickaxeBtn);
-    }
+    state.transport.enqueueCommand({
+      type: "select_slot",
+      slot: index,
+      expectedInventoryRevision: player.inventoryRevision,
+    });
+    requestAnimationFrame(() => {
+      const updatedPlayer = getLocalPlayer();
+      for (let j = 0; j < slotElements.length; j++) {
+        slotElements[j].classList.toggle("active", j === updatedPlayer.activeHotbarSlot);
+      }
+      const item = updatedPlayer.hotbar[index];
+      if (item.kind === "pickaxe" || item.kind === "material") {
+        setToolMode("play", pickaxeBtn);
+      }
+    });
   }
 
   // Refresh hotbar display each frame

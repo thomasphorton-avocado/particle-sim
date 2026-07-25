@@ -1,5 +1,5 @@
 import "./style.css";
-import { MATERIALS, MaterialId, createStarterWorld, findFlowerCluster, normalizePlayerInput, type PlayerInputState } from "@particle-sim/shared";
+import { MATERIALS, MaterialId, createLocalTransportSession, createPlayerId, createStarterWorld, findFlowerCluster, normalizePlayerInput, type PlayerInputState } from "@particle-sim/shared";
 import { Renderer } from "./renderer";
 import { attachInput } from "./input";
 import { buildUi } from "./ui";
@@ -13,17 +13,18 @@ const CELL_SIZE = 5;
 const TICK_MS = 1000 / 60;
 const MAX_TICKS_PER_FRAME = 8;
 
-state.world = createStarterWorld({ roomId: "room_default" });
-const grid = state.world.grid;
+const session = createLocalTransportSession(createStarterWorld({ roomId: "room_default" }), createPlayerId("player_1"));
+state.transport = session.transport;
+const initialGrid = state.world.grid;
 
 const uiRoot = document.querySelector<HTMLDivElement>("#ui-root")!;
-buildUi(uiRoot, grid);
+buildUi(uiRoot, session.editor);
 
 const canvas = document.querySelector<HTMLCanvasElement>("#sim-canvas")!;
-const renderer = new Renderer(canvas, grid, CELL_SIZE);
-attachInput(canvas, state.world, CELL_SIZE);
+const renderer = new Renderer(canvas, initialGrid, CELL_SIZE);
+attachInput(canvas, state.world, CELL_SIZE, session.editor);
 
-const runtime = createCharacter(grid);
+const runtime = createCharacter(initialGrid);
 state.character = runtime;
 let lastTime = performance.now();
 let accumulatorMs = 0;
@@ -32,8 +33,8 @@ let wasHidden = document.hidden;
 let hidden = document.hidden;
 const inputBuffer = createInputEdgeBuffer();
 attachCharacterInput(inputBuffer);
-let previousPresentationSnapshot = createPresentationSnapshot(state.world);
-let currentPresentationSnapshot = createPresentationSnapshot(state.world);
+let previousPresentationSnapshot = createPresentationSnapshot(state.transport.getClientWorld());
+let currentPresentationSnapshot = createPresentationSnapshot(state.transport.getClientWorld());
 let previousMineHeld = false;
 
 function getBufferedInputs(): { movement: PlayerInputState; mineHeld: boolean } {
@@ -84,7 +85,8 @@ function loop(): void {
       previousMineHeld = bufferedInputs.mineHeld;
     }
     processProductionTick(state.world);
-    currentPresentationSnapshot = createPresentationSnapshot(state.world);
+    const clientWorld = state.transport.getClientWorld();
+    currentPresentationSnapshot = createPresentationSnapshot(clientWorld);
     accumulatorMs -= TICK_MS;
     ticksThisFrame += 1;
   }
@@ -94,10 +96,11 @@ function loop(): void {
     : accumulatorMs >= TICK_MS
       ? 1
       : Math.min(Math.max(accumulatorMs / TICK_MS, 0), 1);
+  const clientGrid = state.transport.getClientWorld().grid;
   const interpolatedPresentationSnapshot = shouldRenderCurrentSnapshot
     ? currentPresentationSnapshot
     : interpolatePresentationSnapshot(previousPresentationSnapshot, currentPresentationSnapshot, displayAlpha);
-  renderer.draw(grid, interpolatedPresentationSnapshot);
+  renderer.draw(clientGrid, interpolatedPresentationSnapshot);
   const interpolatedPlayer = getInterpolatedPlayerSnapshot(
     previousPresentationSnapshot,
     currentPresentationSnapshot,
@@ -144,12 +147,12 @@ function loop(): void {
   // Highlight hovered flower/stem cluster
   let hoveredCluster: Set<number> | null = null;
   if (state.hover) {
-    hoveredCluster = findFlowerCluster(grid, state.hover.x, state.hover.y);
+    hoveredCluster = findFlowerCluster(clientGrid, state.hover.x, state.hover.y);
     // Only highlight clusters that contain at least one bloomed flower
     if (hoveredCluster) {
       let hasFlower = false;
       for (const idx of hoveredCluster) {
-        if ((grid.ids[idx] as MaterialId) === MaterialId.Flower) {
+        if ((clientGrid.ids[idx] as MaterialId) === MaterialId.Flower) {
           hasFlower = true;
           break;
         }
@@ -158,10 +161,10 @@ function loop(): void {
     }
   }
   // Determine if hovering a faucet
-  const hoveringFaucet = state.hover && grid.get(state.hover.x, state.hover.y) === MaterialId.Faucet;
+  const hoveringFaucet = state.hover && clientGrid.get(state.hover.x, state.hover.y) === MaterialId.Faucet;
 
   if (hoveredCluster) {
-    renderer.drawClusterOutline(grid, hoveredCluster);
+    renderer.drawClusterOutline(clientGrid, hoveredCluster);
     canvas.style.cursor = "none";
     if (state.hoverPixel) {
       renderer.drawShears(state.hoverPixel.x, state.hoverPixel.y);

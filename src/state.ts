@@ -1,6 +1,7 @@
 import {
   MaterialId,
   LocalTransport,
+  createLocalTransportSession,
   addToHotbar as addToHotbarHelper,
   cloneHotbar,
   cloneInventory,
@@ -10,6 +11,7 @@ import {
   createDefaultWorldState,
   createPlayerId,
   removeFromHotbarSlot as removeFromHotbarSlotHelper,
+  type LocalTransportEditorCapability,
   type PlayerId,
   type PlayerState,
   type WorldState,
@@ -44,10 +46,11 @@ export interface SimState {
 }
 
 function getLocalPlayerState(): PlayerState {
-  let player = currentWorld.players[state.localPlayerId];
+  const targetWorld = editorWorldOverride ?? currentWorld;
+  let player = targetWorld.players[state.localPlayerId];
   if (!player) {
     player = createDefaultPlayerState(state.localPlayerId);
-    currentWorld.players[state.localPlayerId] = player;
+    targetWorld.players[state.localPlayerId] = player;
   }
   return player;
 }
@@ -59,27 +62,34 @@ function syncWorldDefaults(): void {
   const nextHotbar = player.hotbar.length === 10 ? cloneHotbar(player.hotbar) : createDefaultHotbar();
   player.inventory = nextInventory;
   player.hotbar = nextHotbar;
-  transport.createEditorAccess().mutateWorld((world) => {
-    const worldPlayer = world.players[state.localPlayerId];
-    if (!worldPlayer) return;
-    worldPlayer.inventory = { ...defaults, ...cloneInventory(worldPlayer.inventory) };
-    worldPlayer.hotbar = worldPlayer.hotbar.length === 10 ? cloneHotbar(worldPlayer.hotbar) : createDefaultHotbar();
-  });
+  if (editorCapability) {
+   editorCapability.mutateWorld((world) => {
+     const worldPlayer = world.players[state.localPlayerId];
+     if (!worldPlayer) return;
+     worldPlayer.inventory = { ...defaults, ...cloneInventory(worldPlayer.inventory) };
+     worldPlayer.hotbar = worldPlayer.hotbar.length === 10 ? cloneHotbar(worldPlayer.hotbar) : createDefaultHotbar();
+   });
+  }
 }
 
 const defaultWorld = createDefaultWorldState("room_default");
-let transport = new LocalTransport(defaultWorld);
+const initialSession = createLocalTransportSession(defaultWorld);
+let transport = initialSession.transport;
 let currentWorld: WorldState = transport.getClientWorld();
 let unsubscribeTransport: (() => void) | null = null;
+let editorCapability: LocalTransportEditorCapability | null = initialSession.editor;
+let editorWorldOverride: WorldState | null = null;
 
-function installTransport(nextTransport: LocalTransport): void {
+function installTransport(nextTransport: LocalTransport, nextEditor?: LocalTransportEditorCapability): void {
   if (unsubscribeTransport) {
-    unsubscribeTransport();
+   unsubscribeTransport();
   }
   transport = nextTransport;
+  editorCapability = nextEditor ?? null;
+  editorWorldOverride = null;
   currentWorld = nextTransport.getClientWorld();
   unsubscribeTransport = nextTransport.subscribe((view) => {
-    currentWorld = view.clientWorld;
+   currentWorld = view.clientWorld;
   });
 }
 
@@ -98,11 +108,7 @@ const stateBase: SimState = {
 
 Object.defineProperty(stateBase, "world", {
   get() {
-    return currentWorld;
-  },
-  set(nextWorld: WorldState) {
-    currentWorld = nextWorld;
-    transport.createEditorAccess().replaceWorld(nextWorld);
+   return currentWorld;
   },
   enumerable: true,
   configurable: true,
@@ -110,10 +116,10 @@ Object.defineProperty(stateBase, "world", {
 
 Object.defineProperty(stateBase, "transport", {
   get() {
-    return transport;
+   return transport;
   },
   set(nextTransport: LocalTransport) {
-    installTransport(nextTransport);
+   installTransport(nextTransport);
   },
   enumerable: true,
   configurable: true,
@@ -121,18 +127,34 @@ Object.defineProperty(stateBase, "transport", {
 
 export const state = stateBase;
 
-installTransport(transport);
+installTransport(transport, editorCapability);
 syncWorldDefaults();
 
 export function getLocalPlayer(): PlayerState {
   return getLocalPlayerState();
 }
 
+export function replaceWorldForEditor(nextWorld: WorldState): void {
+  if (!editorCapability) {
+   throw new Error("Local editor capability is not available");
+  }
+  editorWorldOverride = nextWorld;
+  editorCapability.replaceWorld(nextWorld);
+  currentWorld = transport.getClientWorld();
+}
+
+export function getAuthoritativeWorldForEditor(): WorldState {
+  if (!editorCapability) {
+   throw new Error("Local editor capability is not available");
+  }
+  return editorCapability.getAuthoritativeWorld();
+}
+
 export function setDayNightPreset(preset: DayNightPreset): void {
   state.transport.enqueueCommand({
-    type: "set_time_preset",
-    preset,
-    expectedWorldRevision: state.world.worldRevision,
+   type: "set_time_preset",
+   preset,
+   expectedWorldRevision: state.world.worldRevision,
   });
 }
 

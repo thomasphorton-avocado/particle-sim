@@ -19,6 +19,17 @@ export interface TransportClientState {
 
 export type TransportListener = (state: TransportClientState) => void;
 
+export interface LocalTransportEditorCapability {
+  getAuthoritativeWorld(): WorldState;
+  replaceWorld(world: WorldState): void;
+  mutateWorld(mutator: (world: WorldState) => void): void;
+}
+
+export interface LocalTransportSession {
+  transport: LocalTransport;
+  editor: LocalTransportEditorCapability;
+}
+
 export class LocalTransport {
   #world: WorldState;
   #ownerPlayerId: PlayerId;
@@ -27,10 +38,10 @@ export class LocalTransport {
   #revision: number;
   #lastCommandResults: CommandResult[];
   #listeners: TransportListener[];
-  #editorAccess: LocalTransportEditorAccess;
+  #editorCapability: LocalTransportEditorCapability;
 
   constructor(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1")) {
-    this.#world = world;
+    this.#world = cloneWorldState(world);
     this.#ownerPlayerId = ownerPlayerId;
     this.#prepareWorld();
     this.#snapshot = createWorldSnapshot(this.#world);
@@ -38,7 +49,7 @@ export class LocalTransport {
     this.#revision = this.#snapshot.worldRevision;
     this.#lastCommandResults = [];
     this.#listeners = [];
-    this.#editorAccess = new LocalTransportEditorAccess(this);
+    this.#editorCapability = this.#createEditorCapability();
   }
 
   subscribe(listener: TransportListener): () => void {
@@ -93,19 +104,17 @@ export class LocalTransport {
     this.#publish();
   }
 
-  createEditorAccess(): LocalTransportEditorAccess {
-    return this.#editorAccess;
-  }
-
   #prepareWorld(): void {
-    this.#world.ownerPlayerId = this.#ownerPlayerId;
+    if (this.#world.ownerPlayerId === null) {
+      this.#world.ownerPlayerId = this.#ownerPlayerId;
+    }
     if (!this.#world.players[this.#ownerPlayerId]) {
       this.#world.players[this.#ownerPlayerId] = createDefaultPlayerState(this.#ownerPlayerId);
     }
   }
 
-  __replaceWorldForEditor(world: WorldState): void {
-    this.#world = world;
+  #replaceWorldForEditor(world: WorldState): void {
+    this.#world = cloneWorldState(world);
     this.#prepareWorld();
     this.#snapshot = createWorldSnapshot(this.#world);
     this.#delta = null;
@@ -114,8 +123,20 @@ export class LocalTransport {
     this.#publish();
   }
 
-  __getAuthoritativeWorldForEditor(): WorldState {
+  #getAuthoritativeWorldForEditor(): WorldState {
     return this.#world;
+  }
+
+  #createEditorCapability(): LocalTransportEditorCapability {
+    return {
+      getAuthoritativeWorld: () => this.#getAuthoritativeWorldForEditor(),
+      replaceWorld: (world: WorldState) => this.#replaceWorldForEditor(world),
+      mutateWorld: (mutator: (world: WorldState) => void) => {
+        const world = this.#getAuthoritativeWorldForEditor();
+        mutator(world);
+        this.#replaceWorldForEditor(world);
+      },
+    };
   }
 
   #publish(): void {
@@ -126,37 +147,22 @@ export class LocalTransport {
     this.#snapshot = nextSnapshot;
     this.#delta = nextDelta;
     this.#revision = this.#snapshot.worldRevision;
-    const view = this.getClientState();
     for (const listener of this.#listeners) {
-      listener(view);
+      listener(this.getClientState());
     }
   }
-}
 
-export class LocalTransportEditorAccess {
-  private readonly transport: LocalTransport;
-
-  constructor(transport: LocalTransport) {
-    this.transport = transport;
-  }
-
-  getAuthoritativeWorld(): WorldState {
-    return (this.transport as unknown as { __getAuthoritativeWorldForEditor: () => WorldState }).__getAuthoritativeWorldForEditor();
-  }
-
-  replaceWorld(world: WorldState): void {
-    (this.transport as unknown as { __replaceWorldForEditor: (world: WorldState) => void }).__replaceWorldForEditor(world);
-  }
-
-  mutateWorld(mutator: (world: WorldState) => void): void {
-    const world = this.getAuthoritativeWorld();
-    mutator(world);
-    this.replaceWorld(world);
+  static createSession(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1")): LocalTransportSession {
+    const transport = new LocalTransport(world, ownerPlayerId);
+    return {
+      transport,
+      editor: transport.#editorCapability,
+    };
   }
 }
 
-export function createLocalTransportEditorAccess(transport: LocalTransport): LocalTransportEditorAccess {
-  return transport.createEditorAccess();
+export function createLocalTransportSession(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1")): LocalTransportSession {
+  return LocalTransport.createSession(world, ownerPlayerId);
 }
 
 function buildResolvedInputs(world: WorldState, ownerPlayerId: PlayerId, input?: PlayerInputState): Record<string, PlayerInputState> {
@@ -185,6 +191,10 @@ function normalizeInputState(input?: PlayerInputState): PlayerInputState {
     lookUpHeld: Boolean(input.lookUpHeld),
     mineHeld: Boolean(input.mineHeld),
   };
+}
+
+function cloneWorldState(world: WorldState): WorldState {
+  return restoreWorldState(createWorldSnapshot(world));
 }
 
 function cloneWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {

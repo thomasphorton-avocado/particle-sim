@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Grid, advanceWorldTick, createDefaultFallingObjectState, createDefaultWorldState, createGameplayRandomState, createObjectId, createStarterWorld, deserializeWorldState, harvestFlowerCluster, MaterialId, placeWorldCell, serializeWorldState } from "@particle-sim/shared";
 import { handleHarvestInputAt, placeHotbarMaterialAt } from "./input";
-import { getLocalPlayer, state } from "./state";
+import { getAuthoritativeWorldForEditor, getLocalPlayer, replaceWorldForEditor, state } from "./state";
 import { processProductionTick } from "./production-tick";
 
 describe("game logic", () => {
-  const getAuthoritativeWorld = () => state.transport.createEditorAccess().getAuthoritativeWorld();
+  const getAuthoritativeWorld = () => getAuthoritativeWorldForEditor();
 
   beforeEach(() => {
-    state.world = createDefaultWorldState("room_test");
+    replaceWorldForEditor(createDefaultWorldState("room_test"));
     const authorityWorld = getAuthoritativeWorld();
     authorityWorld.grid = new Grid(80, 80);
     const player = authorityWorld.players[state.localPlayerId] ?? getLocalPlayer();
@@ -27,7 +27,7 @@ describe("game logic", () => {
     ];
     player.activeHotbarSlot = 0;
     authorityWorld.players[state.localPlayerId] = player;
-    state.transport.createEditorAccess().replaceWorld(authorityWorld);
+    replaceWorldForEditor(authorityWorld);
   });
 
   it("keeps same-seed steps deterministic across serialization", () => {
@@ -84,7 +84,7 @@ describe("game logic", () => {
       world.grid.set(2, 3, MaterialId.Stem);
       world.grid.set(3, 2, MaterialId.Flower);
 
-      state.world = world;
+      replaceWorldForEditor(world);
       const player = getLocalPlayer();
       player.inventory = { flowers: 0 };
       player.hotbar = [{ kind: "empty" }, ...Array(9).fill({ kind: "empty" })];
@@ -96,13 +96,13 @@ describe("game logic", () => {
 
     const restoredWorldA = deserializeWorldState(serializeWorldState(worldA));
 
-    state.world = restoredWorldA;
+    replaceWorldForEditor(restoredWorldA);
     handleHarvestInputAt(restoredWorldA, 2, 2);
     processProductionTick(restoredWorldA, {
       [state.localPlayerId]: restoredWorldA.players[state.localPlayerId].input,
     });
 
-    state.world = worldB;
+    replaceWorldForEditor(worldB);
     handleHarvestInputAt(worldB, 2, 2);
     processProductionTick(worldB, {
       [state.localPlayerId]: worldB.players[state.localPlayerId].input,
@@ -223,7 +223,7 @@ describe("game logic", () => {
     const restoredFalling = restored.fallingObjects[objectId];
     expect(restoredFalling.y).toBe(1.75);
 
-    state.world = restored;
+    replaceWorldForEditor(restored);
     restoredFalling.y = restoredFalling.restY - 0.2;
     advanceWorldTick(restored, {});
     advanceWorldTick(restored, {});

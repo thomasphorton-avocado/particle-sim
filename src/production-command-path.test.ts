@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { MaterialId, createDefaultWorldState, createPlayerId, normalizePlayerInput } from "@particle-sim/shared";
 import { handleHarvestInputAt, placeHotbarMaterialAt } from "./input";
-import { state, getLocalPlayer } from "./state";
+import { state, getLocalPlayer, getAuthoritativeWorldForEditor, replaceWorldForEditor } from "./state";
 import { enqueueInputStateCommand, processProductionTick } from "./production-tick";
 
 describe("production command path", () => {
-  const getAuthoritativeWorld = () => state.transport.createEditorAccess().getAuthoritativeWorld();
+  const getAuthoritativeWorld = () => getAuthoritativeWorldForEditor();
 
   beforeEach(() => {
-    state.world = createDefaultWorldState("test_room");
+    replaceWorldForEditor(createDefaultWorldState("test_room"));
     state.localPlayerId = createPlayerId("player_1");
     state.toolMode = "play";
     const authorityWorld = getAuthoritativeWorld();
@@ -21,7 +21,7 @@ describe("production command path", () => {
     ];
     player.activeHotbarSlot = 0;
     authorityWorld.players[state.localPlayerId] = player;
-    state.transport.createEditorAccess().replaceWorld(authorityWorld);
+    replaceWorldForEditor(authorityWorld);
   });
 
   it("queues play harvest commands without mutating the world", () => {

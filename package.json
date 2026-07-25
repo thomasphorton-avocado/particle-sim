@@ -17,9 +17,10 @@
     "test:shared": "npm --workspace @particle-sim/shared run test:smoke",
     "test:client": "vitest run",
     "test:benchmark": "node --expose-gc --test ./scripts/benchmark-shared.test.mjs",
+    "benchmark:render-read-path": "vitest run src/render-read-path.benchmark.test.ts --reporter=dot",
     "test": "npm run build:shared && npm run test:client && npm run test:shared && npm run test:benchmark",
     "preview": "vite preview",
-    "benchmark": "node --expose-gc ./scripts/benchmark-shared.mjs"
+    "benchmark": "npm run benchmark:render-read-path && node --expose-gc ./scripts/benchmark-shared.mjs"
   },
   "dependencies": {
     "@particle-sim/shared": "0.0.0"

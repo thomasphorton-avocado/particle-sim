@@ -132,3 +132,34 @@ export function getInterpolatedPlayerSnapshot(
   const interpolated = interpolatePlayerSnapshot(previousPlayer, currentPlayer, alpha);
   return interpolated ?? null;
 }
+
+export interface RenderPresentationState {
+  grid: WorldState["grid"];
+  interpolatedPresentationSnapshot: PresentationSnapshot;
+  interpolatedPlayerSnapshot: PlayerPresentationSnapshot | null;
+}
+
+export function resolvePresentationRenderState(
+  world: WorldState,
+  previousPresentationSnapshot: PresentationSnapshot,
+  currentPresentationSnapshot: PresentationSnapshot,
+  playerId: string,
+  alpha: number,
+  shouldRenderCurrentSnapshot: boolean,
+): RenderPresentationState {
+  const interpolatedPresentationSnapshot = shouldRenderCurrentSnapshot
+    ? currentPresentationSnapshot
+    : interpolatePresentationSnapshot(previousPresentationSnapshot, currentPresentationSnapshot, alpha);
+  const interpolatedPlayerSnapshot = getInterpolatedPlayerSnapshot(
+    previousPresentationSnapshot,
+    currentPresentationSnapshot,
+    playerId,
+    shouldRenderCurrentSnapshot ? 1 : alpha,
+  );
+
+  return {
+    grid: world.grid,
+    interpolatedPresentationSnapshot,
+    interpolatedPlayerSnapshot,
+  };
+}

@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  advanceWorldTick,
   allocateObjectId,
+  createCommandEnvelope,
   createDefaultFallingObjectState,
+  createDefaultPlayerState,
   createDefaultWorldState,
   createWorldSnapshot,
   restoreWorldState,
@@ -10,11 +13,14 @@ import {
   applyWorldDeltaToSnapshot,
   applyWorldDeltaStream,
   computeWorldChecksum,
-  MaterialId,
-  createObjectId,
   createPlayerId,
-  serializeWorldState,
   deserializeWorldState,
+  Grid,
+  MaterialId,
+  normalizePlayerInput,
+  processCommand,
+  serializeWorldState,
+  createObjectId,
 } from "@particle-sim/shared";
 
 function createWeatherDeltaState() {
@@ -412,4 +418,152 @@ test("snapshot restores object membership and allocator correctness", () => {
   const rebuilt = restoreWorldState(nextSnapshot);
   assert.equal(rebuilt.grid.getObjectId(1, 2), firstObjectId);
   assert.equal(rebuilt.grid.getObjectId(3, 2), secondObjectId);
+});
+
+function buildReplayFixture() {
+  const world = createDefaultWorldState("room_deterministic_replay", new Grid(48, 24));
+  world.random.seed = 0x5eed_1234;
+  world.random.state = world.random.seed;
+  const actorId = createPlayerId("player_replay_fixture");
+  world.players[actorId] = createDefaultPlayerState(actorId);
+  const player = world.players[actorId];
+  player.x = 8;
+  player.y = 10;
+  player.width = 3;
+  player.height = 5;
+  player.grounded = true;
+  player.facing = 1;
+  player.hotbar = [
+    { kind: "pickaxe" },
+    { kind: "material", materialId: MaterialId.Stone, count: 2 },
+    { kind: "material", materialId: MaterialId.Flower, count: 2 },
+    { kind: "material", materialId: MaterialId.Faucet, count: 1 },
+    { kind: "material", materialId: MaterialId.Water, count: 2 },
+    ...Array(5).fill({ kind: "empty" }),
+  ];
+  player.activeHotbarSlot = 1;
+  for (let x = 0; x < world.grid.width; x += 1) {
+    world.grid.set(x, 16, MaterialId.Dirt);
+  }
+  for (let x = 8; x < 12; x += 1) {
+    world.grid.set(x, 13, MaterialId.Water);
+  }
+  for (let x = 3; x < 6; x += 1) {
+    world.grid.set(x, 13, MaterialId.Stone);
+  }
+  world.weather.kind = "rain";
+  world.weather.episodeDuration = 19;
+  world.weather.wind = 1;
+  world.weather.visualTime = 0.75;
+  world.time.dayNightTick = 3500;
+  return { world, actorId };
+}
+
+function enqueueReplayCommand(world, actorId, command, issuedTick = world.tick) {
+  const actorSequence = (world.commandLedger.actorHighWater[actorId] ?? 0) + 1;
+  const envelope = createCommandEnvelope(actorId, actorSequence, issuedTick, command);
+  return processCommand(world, envelope);
+}
+
+function advanceActorTick(world, actorId, overrides = {}, steps = 1) {
+  const baseInput = normalizePlayerInput(world.players[actorId].input);
+  const mergedInput = { ...baseInput, ...overrides };
+  for (let index = 0; index < steps; index += 1) {
+    advanceWorldTick(world, { [actorId]: mergedInput });
+  }
+}
+
+function runReplayFixture(world, actorId, options = {}) {
+  const stopAfterCheckpoint = options.stopAfterCheckpoint ?? Number.POSITIVE_INFINITY;
+  const startAtCheckpoint = options.startAtCheckpoint ?? 0;
+  const checkpoints = [];
+  const captureCheckpoint = () => {
+    checkpoints.push({ tick: world.tick, checksum: computeWorldChecksum(world) });
+    return checkpoints.length >= stopAfterCheckpoint;
+  };
+
+  const steps = [
+    () => {
+      const moveResult = enqueueReplayCommand(world, actorId, { type: "set_input_state", left: true, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false });
+      assert.equal(moveResult.kind, "accepted");
+      advanceActorTick(world, actorId, { left: true }, 4);
+    },
+    () => {
+      const mineStart = enqueueReplayCommand(world, actorId, { type: "mine_start" });
+      assert.equal(mineStart.kind, "accepted");
+      advanceActorTick(world, actorId, { mineHeld: true, left: true }, 8);
+    },
+    () => {
+      const mineStop = enqueueReplayCommand(world, actorId, { type: "mine_stop" });
+      assert.equal(mineStop.kind, "accepted");
+
+      const selectFlowerSlot = enqueueReplayCommand(world, actorId, { type: "select_slot", slot: 2, expectedInventoryRevision: world.players[actorId].inventoryRevision });
+      assert.equal(selectFlowerSlot.kind, "accepted");
+      const placeFlower = enqueueReplayCommand(world, actorId, { type: "place", x: 20, y: 13, brushRadius: 1, expectedInventoryRevision: world.players[actorId].inventoryRevision, expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(20, 13)] ?? 0 });
+      assert.equal(placeFlower.kind, "accepted");
+      const harvestTargetX = 20;
+      assert.equal(world.grid.get(harvestTargetX, 12), MaterialId.Flower);
+      const harvestTargetY = 12;
+      const harvestFlower = enqueueReplayCommand(world, actorId, { type: "harvest", x: harvestTargetX, y: harvestTargetY, expectedTargetRevision: world.grid.cellRevisions[world.grid.index(harvestTargetX, harvestTargetY)] ?? 0 });
+      assert.equal(harvestFlower.kind, "accepted");
+    },
+    () => {
+      const selectFaucetSlot = enqueueReplayCommand(world, actorId, { type: "select_slot", slot: 3, expectedInventoryRevision: world.players[actorId].inventoryRevision });
+      assert.equal(selectFaucetSlot.kind, "accepted");
+      const placeFaucet = enqueueReplayCommand(world, actorId, { type: "place", x: 24, y: 10, brushRadius: 1, expectedInventoryRevision: world.players[actorId].inventoryRevision, expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(24, 10)] ?? 0 });
+      assert.equal(placeFaucet.kind, "accepted");
+      const faucetObjectId = world.grid.getObjectId(24, 10);
+      assert.ok(faucetObjectId);
+      const cycleFaucet = enqueueReplayCommand(world, actorId, { type: "cycle_faucet", x: 24, y: 10, objectId: faucetObjectId, expectedTargetRevision: world.grid.cellRevisions[world.grid.index(24, 10)] ?? 0 });
+      assert.equal(cycleFaucet.kind, "accepted");
+
+      const selectWaterSlot = enqueueReplayCommand(world, actorId, { type: "select_slot", slot: 4, expectedInventoryRevision: world.players[actorId].inventoryRevision });
+      assert.equal(selectWaterSlot.kind, "accepted");
+      const placeWater = enqueueReplayCommand(world, actorId, { type: "place", x: 18, y: 13, brushRadius: 1, expectedInventoryRevision: world.players[actorId].inventoryRevision, expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(18, 13)] ?? 0 });
+      assert.equal(placeWater.kind, "accepted");
+      advanceActorTick(world, actorId, { left: true, jumpHeld: true }, 5);
+    },
+    () => {
+      const setNight = enqueueReplayCommand(world, actorId, { type: "set_time_preset", preset: "night", expectedWorldRevision: world.worldRevision });
+      assert.equal(setNight.kind, "accepted");
+      advanceActorTick(world, actorId, {}, 6);
+    },
+  ];
+
+  for (let index = startAtCheckpoint; index < steps.length; index += 1) {
+    steps[index]();
+    if (captureCheckpoint()) {
+      return { checkpoints, checksum: computeWorldChecksum(world) };
+    }
+  }
+
+  return { checkpoints, checksum: computeWorldChecksum(world) };
+}
+
+test("deterministic replay fixtures converge across replay and checkpoint restore", () => {
+  const first = buildReplayFixture();
+  const second = buildReplayFixture();
+  const firstRun = runReplayFixture(first.world, first.actorId);
+  const secondRun = runReplayFixture(second.world, second.actorId);
+
+  assert.deepEqual(firstRun.checkpoints, secondRun.checkpoints);
+  assert.equal(firstRun.checksum, secondRun.checksum);
+  assert.equal(typeof firstRun.checkpoints[0].checksum, "string");
+  assert.ok(firstRun.checkpoints[0].checksum.length > 0);
+  assert.equal(firstRun.checkpoints[0].tick, 4);
+  assert.equal(firstRun.checkpoints[1].tick, 12);
+  assert.equal(firstRun.checkpoints[2].tick, 12);
+  assert.equal(firstRun.checkpoints[3].tick, 17);
+  assert.equal(firstRun.checkpoints[4].tick, 23);
+
+  const checkpointWorld = buildReplayFixture();
+  const checkpointRun = runReplayFixture(checkpointWorld.world, checkpointWorld.actorId, { stopAfterCheckpoint: 2 });
+  assert.equal(checkpointRun.checkpoints.length, 2);
+  assert.equal(checkpointRun.checkpoints[1].tick, 12);
+  const snapshot = createWorldSnapshot(checkpointWorld.world);
+  const restored = restoreWorldState(snapshot);
+  const continueFromSnapshot = buildReplayFixture();
+  const restoreOnly = runReplayFixture(restored, checkpointWorld.actorId, { startAtCheckpoint: 2 });
+  const uninterrupted = runReplayFixture(continueFromSnapshot.world, continueFromSnapshot.actorId);
+  assert.equal(restoreOnly.checksum, uninterrupted.checksum);
 });

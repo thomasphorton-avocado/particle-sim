@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { LocalTransport, MaterialId, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createPlayerId } from "@particle-sim/shared";
+import { LocalTransport, MaterialId, createDefaultPlayerState, createDefaultWorldState, createPlayerId } from "@particle-sim/shared";
 
 function createWorldWithPlayer() {
   const world = createDefaultWorldState("room_transport");
@@ -11,14 +11,14 @@ function createWorldWithPlayer() {
 
 test("LocalTransport publishes snapshots and isolated client state after accepted commands", () => {
   const { world, actorId } = createWorldWithPlayer();
-  const transport = new LocalTransport(world);
+  const transport = new LocalTransport(world, actorId);
   const seenRevisions = [];
 
   transport.subscribe((state) => {
     seenRevisions.push(state.revision);
   });
 
-  const envelope = createCommandEnvelope(actorId, 1, 0, {
+  transport.enqueueCommand({
     type: "set_input_state",
     left: true,
     right: false,
@@ -26,8 +26,6 @@ test("LocalTransport publishes snapshots and isolated client state after accepte
     crouchHeld: false,
     lookUpHeld: false,
   });
-
-  transport.enqueueCommand(envelope);
   transport.advanceTick();
 
   const lastResults = transport.getLastCommandResults();
@@ -40,7 +38,8 @@ test("LocalTransport publishes snapshots and isolated client state after accepte
   assert.equal(clientState.revision, world.worldRevision);
   assert.equal(clientState.snapshot.worldRevision, world.worldRevision);
 
-  transport.setPaused(true);
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: world.worldRevision });
+  transport.advanceTick();
   const afterPauseState = transport.getClientState();
   assert.ok(afterPauseState.delta);
   assert.notStrictEqual(clientWorld, world);
@@ -53,16 +52,16 @@ test("LocalTransport publishes snapshots and isolated client state after accepte
 
 test("LocalTransport pauses deterministic ticking and keeps revisions stable until unpaused", () => {
   const { world, actorId } = createWorldWithPlayer();
-  const transport = new LocalTransport(world);
+  const transport = new LocalTransport(world, actorId);
   const beforeTick = world.tick;
 
-  transport.setPaused(true);
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: world.worldRevision });
   transport.advanceTick();
 
   assert.equal(world.tick, beforeTick);
   assert.equal(transport.getClientState().revision, world.worldRevision);
 
-  transport.setPaused(false);
+  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: world.worldRevision });
   transport.advanceTick();
 
   assert.equal(world.tick, beforeTick + 1);
@@ -72,14 +71,14 @@ test("LocalTransport pauses deterministic ticking and keeps revisions stable unt
 
 test("LocalTransport initializes placed faucets at low-flow and cycles them through the replicated client state", () => {
   const { world, actorId } = createWorldWithPlayer();
-  const transport = new LocalTransport(world);
+  const transport = new LocalTransport(world, actorId);
   const player = world.players[actorId];
   player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
     ? { kind: "material", materialId: MaterialId.Faucet, count: 1 }
     : { kind: "empty" });
   player.activeHotbarSlot = 0;
 
-  const placeEnvelope = createCommandEnvelope(actorId, 1, 0, {
+  transport.enqueueCommand({
     type: "place",
     x: 10,
     y: 10,
@@ -87,8 +86,6 @@ test("LocalTransport initializes placed faucets at low-flow and cycles them thro
     expectedInventoryRevision: player.inventoryRevision,
     expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
   });
-
-  transport.enqueueCommand(placeEnvelope);
   transport.advanceTick();
 
   const placeResults = transport.getLastCommandResults();
@@ -118,15 +115,13 @@ test("LocalTransport initializes placed faucets at low-flow and cycles them thro
     assert.equal(clientWorldAfterPlace.grid.getFaucetFlow(x, y), 1);
   }
 
-  const cycleEnvelope = createCommandEnvelope(actorId, 2, 1, {
+  transport.enqueueCommand({
     type: "cycle_faucet",
     x: 10,
     y: 10,
     objectId,
     expectedTargetRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
   });
-
-  transport.enqueueCommand(cycleEnvelope);
   transport.advanceTick();
 
   const cycleResults = transport.getLastCommandResults();
@@ -147,14 +142,14 @@ test("LocalTransport initializes placed faucets at low-flow and cycles them thro
 
 test("LocalTransport clears the hotbar slot after one-unit object placement and rejects the next placement without authority mutation", () => {
   const { world, actorId } = createWorldWithPlayer();
-  const transport = new LocalTransport(world);
+  const transport = new LocalTransport(world, actorId);
   const player = world.players[actorId];
   player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
     ? { kind: "material", materialId: MaterialId.Faucet, count: 1 }
     : { kind: "empty" });
   player.activeHotbarSlot = 0;
 
-  const firstEnvelope = createCommandEnvelope(actorId, 1, 0, {
+  transport.enqueueCommand({
     type: "place",
     x: 10,
     y: 10,
@@ -162,8 +157,6 @@ test("LocalTransport clears the hotbar slot after one-unit object placement and 
     expectedInventoryRevision: player.inventoryRevision,
     expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
   });
-
-  transport.enqueueCommand(firstEnvelope);
   transport.advanceTick();
 
   const firstResult = transport.getLastCommandResults()[0];
@@ -175,7 +168,7 @@ test("LocalTransport clears the hotbar slot after one-unit object placement and 
   const inventoryRevisionAfterFirst = player.inventoryRevision;
   const targetRevisionAfterFirst = world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0;
 
-  const secondEnvelope = createCommandEnvelope(actorId, 2, 1, {
+  transport.enqueueCommand({
     type: "place",
     x: 10,
     y: 10,
@@ -183,8 +176,6 @@ test("LocalTransport clears the hotbar slot after one-unit object placement and 
     expectedInventoryRevision: inventoryRevisionAfterFirst,
     expectedAnchorRevision: targetRevisionAfterFirst,
   });
-
-  transport.enqueueCommand(secondEnvelope);
   transport.advanceTick();
 
   const secondResult = transport.getLastCommandResults()[0];
@@ -199,14 +190,14 @@ test("LocalTransport clears the hotbar slot after one-unit object placement and 
 
 test("LocalTransport clears the brush stack when it is fully consumed and preserves positive counts for partial consumption", () => {
   const { world, actorId } = createWorldWithPlayer();
-  const transport = new LocalTransport(world);
+  const transport = new LocalTransport(world, actorId);
   const player = world.players[actorId];
   player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
     ? { kind: "material", materialId: MaterialId.Sand, count: 2 }
     : { kind: "empty" });
   player.activeHotbarSlot = 0;
 
-  const fullStackEnvelope = createCommandEnvelope(actorId, 1, 0, {
+  transport.enqueueCommand({
     type: "place",
     x: 10,
     y: 10,
@@ -214,8 +205,6 @@ test("LocalTransport clears the brush stack when it is fully consumed and preser
     expectedInventoryRevision: player.inventoryRevision,
     expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
   });
-
-  transport.enqueueCommand(fullStackEnvelope);
   transport.advanceTick();
 
   const fullStackResult = transport.getLastCommandResults()[0];
@@ -225,7 +214,7 @@ test("LocalTransport clears the brush stack when it is fully consumed and preser
   const partialWorld = createDefaultWorldState("room_transport_partial");
   const partialActorId = createPlayerId("player_transport_partial");
   partialWorld.players[partialActorId] = createDefaultPlayerState(partialActorId);
-  const partialTransport = new LocalTransport(partialWorld);
+  const partialTransport = new LocalTransport(partialWorld, partialActorId);
   const partialPlayer = partialWorld.players[partialActorId];
   partialPlayer.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
     ? { kind: "material", materialId: MaterialId.Sand, count: 4 }
@@ -235,7 +224,7 @@ test("LocalTransport clears the brush stack when it is fully consumed and preser
   partialWorld.grid.set(10, 10, MaterialId.Torch);
   partialWorld.grid.set(11, 10, MaterialId.Torch);
 
-  const partialEnvelope = createCommandEnvelope(partialActorId, 1, 0, {
+  partialTransport.enqueueCommand({
     type: "place",
     x: 10,
     y: 10,
@@ -243,8 +232,6 @@ test("LocalTransport clears the brush stack when it is fully consumed and preser
     expectedInventoryRevision: partialPlayer.inventoryRevision,
     expectedAnchorRevision: partialWorld.grid.cellRevisions[partialWorld.grid.index(10, 10)] ?? 0,
   });
-
-  partialTransport.enqueueCommand(partialEnvelope);
   partialTransport.advanceTick();
 
   const partialResult = partialTransport.getLastCommandResults()[0];

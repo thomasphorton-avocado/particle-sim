@@ -1,4 +1,4 @@
-import { Grid, MATERIALS, MaterialId, allocateObjectId, createCommandEnvelope, createDefaultFallingObjectState, findFlowerCluster, getNextActorSequence, harvestFlowerCluster, nextBool, placeWorldCell, type GameplayCommand, type WorldState } from "@particle-sim/shared";
+import { Grid, MATERIALS, MaterialId, allocateObjectId, createDefaultFallingObjectState, findFlowerCluster, harvestFlowerCluster, nextBool, placeWorldCell, type GameplayCommand, type WorldState } from "@particle-sim/shared";
 import { state, hasPickaxeEquipped, addToHotbar, getActiveHotbarMaterial, removeFromActiveSlot, getLocalPlayer } from "./state";
 
 /** Maximum placement distance from character center (in grid cells). */
@@ -24,10 +24,8 @@ function canPlaceOver(grid: Grid, x: number, y: number, matId: MaterialId): bool
   return false;
 }
 
-function enqueuePlayCommand(world: WorldState, command: GameplayCommand): void {
-  const actorId = state.localPlayerId;
-  const envelope = createCommandEnvelope(actorId, getNextActorSequence(world, actorId), world.tick, command);
-  state.transport.enqueueCommand(envelope);
+function enqueuePlayCommand(_world: WorldState, command: GameplayCommand): void {
+  state.transport.enqueueCommand(command);
 }
 
 function getObjectOffsets(materialId: MaterialId): [number, number][] {

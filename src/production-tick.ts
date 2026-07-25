@@ -1,36 +1,36 @@
-import { advanceWorldTick, createCommandEnvelope, enqueueCommand, getNextActorSequence, processPendingCommands, type PlayerId, type PlayerInputState, type WorldState } from "@particle-sim/shared";
+import { advanceWorldTick, createCommandEnvelope, enqueueCommand, getNextActorSequence, processPendingCommands, type GameplayCommand, type PlayerId, type PlayerInputState, type WorldState } from "@particle-sim/shared";
 import { state } from "./state";
 
-function enqueueEnvelope(world: WorldState, envelope: ReturnType<typeof createCommandEnvelope>): void {
+function enqueueEnvelope(world: WorldState, actorId: PlayerId, command: GameplayCommand, issuedTick: number): void {
   if (world === state.world) {
-    state.transport.enqueueCommand(envelope);
+    state.transport.enqueueCommand(command);
     return;
   }
+  const envelope = createCommandEnvelope(actorId, getNextActorSequence(world, actorId), issuedTick, command);
   enqueueCommand(world, envelope);
 }
 
 export function enqueueInputStateCommand(world: WorldState, actorId: PlayerId, input: PlayerInputState, issuedTick: number): void {
-  const envelope = createCommandEnvelope(actorId, getNextActorSequence(world, actorId), issuedTick, {
+  enqueueEnvelope(world, actorId, {
     type: "set_input_state",
     left: input.left,
     right: input.right,
     jumpHeld: input.jumpHeld,
     crouchHeld: input.crouchHeld,
     lookUpHeld: input.lookUpHeld,
-  });
-  enqueueEnvelope(world, envelope);
+  }, issuedTick);
 }
 
 export function enqueueMineTransitionCommand(world: WorldState, actorId: PlayerId, mineHeld: boolean, issuedTick: number): void {
-  const envelope = createCommandEnvelope(actorId, getNextActorSequence(world, actorId), issuedTick, {
+  enqueueEnvelope(world, actorId, {
     type: mineHeld ? "mine_start" : "mine_stop",
-  });
-  enqueueEnvelope(world, envelope);
+  }, issuedTick);
 }
 
 export function processProductionTick(world: WorldState, _transientInputs?: Readonly<Record<string, PlayerInputState>>): void {
   if (world === state.world) {
-    state.transport.advanceTick(_transientInputs);
+    const localInput = _transientInputs?.[state.localPlayerId];
+    state.transport.advanceTick(localInput);
     return;
   }
 

@@ -5,10 +5,13 @@ import { getLocalPlayer, state } from "./state";
 import { processProductionTick } from "./production-tick";
 
 describe("game logic", () => {
+  const getAuthoritativeWorld = () => state.transport.createEditorAccess().getAuthoritativeWorld();
+
   beforeEach(() => {
     state.world = createDefaultWorldState("room_test");
-    state.world.grid = new Grid(80, 80);
-    const player = getLocalPlayer();
+    const authorityWorld = getAuthoritativeWorld();
+    authorityWorld.grid = new Grid(80, 80);
+    const player = authorityWorld.players[state.localPlayerId] ?? getLocalPlayer();
     player.inventory = { flowers: 0 };
     player.hotbar = [
       { kind: "pickaxe" },
@@ -23,6 +26,8 @@ describe("game logic", () => {
       { kind: "empty" },
     ];
     player.activeHotbarSlot = 0;
+    authorityWorld.players[state.localPlayerId] = player;
+    state.transport.createEditorAccess().replaceWorld(authorityWorld);
   });
 
   it("keeps same-seed steps deterministic across serialization", () => {
@@ -116,7 +121,8 @@ describe("game logic", () => {
   });
 
   it("harvests a connected flower cluster and clears the cells", () => {
-    const grid = state.world.grid;
+    const world = getAuthoritativeWorld();
+    const grid = world.grid;
     grid.set(2, 2, MaterialId.Flower);
     grid.set(2, 3, MaterialId.Stem);
     grid.set(3, 2, MaterialId.Flower);
@@ -131,7 +137,7 @@ describe("game logic", () => {
   });
 
   it("lands falling objects by stamping their footprint into the grid", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
     const id = createObjectId("object_test_1");
     world.fallingObjects[id] = createDefaultFallingObjectState(id, MaterialId.Stone, 3, 1, 4, 0, [
@@ -151,7 +157,7 @@ describe("game logic", () => {
   });
 
   it("keeps falling objects in the state until they land", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
     const id = createObjectId("object_test_2");
     world.fallingObjects[id] = createDefaultFallingObjectState(id, MaterialId.Torch, 5, 1, 8, 0, [[0, 0]]);
@@ -164,9 +170,9 @@ describe("game logic", () => {
   });
 
   it("stamps a stable object identity when placing a hotbar object immediately", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
-    const player = getLocalPlayer();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Wood, count: 1 },
@@ -191,8 +197,8 @@ describe("game logic", () => {
   });
 
   it("preserves identity through airborne placement, fractional mid-fall serialization, and landing", () => {
-    const world = state.world;
-    const player = getLocalPlayer();
+    const world = getAuthoritativeWorld();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Torch, count: 1 },
@@ -227,8 +233,8 @@ describe("game logic", () => {
   });
 
   it("lets falling objects rest on the actual support even beyond placement range", () => {
-    const world = state.world;
-    const player = getLocalPlayer();
+    const world = getAuthoritativeWorld();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Torch, count: 1 },
@@ -253,8 +259,8 @@ describe("game logic", () => {
   });
 
   it("stops falling on water instead of traversing through it", () => {
-    const world = state.world;
-    const player = getLocalPlayer();
+    const world = getAuthoritativeWorld();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Torch, count: 1 },
@@ -279,9 +285,9 @@ describe("game logic", () => {
   });
 
   it("rejects a blocked initial footprint without mutating state", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
-    const player = getLocalPlayer();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     player.hotbar = [
       { kind: "pickaxe" },
       { kind: "material", materialId: MaterialId.Wood, count: 1 },
@@ -309,9 +315,9 @@ describe("game logic", () => {
   });
 
   it("clears only the tracked adjacent object when mining", () => {
-    const world = state.world;
+    const world = getAuthoritativeWorld();
     const grid = world.grid;
-    const player = getLocalPlayer();
+    const player = world.players[state.localPlayerId] ?? getLocalPlayer();
     const leftId = createObjectId("object_test_left");
     const rightId = createObjectId("object_test_right");
     player.hotbar = [{ kind: "pickaxe" }, ...Array(9).fill({ kind: "empty" })];

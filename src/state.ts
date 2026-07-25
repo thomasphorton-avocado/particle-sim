@@ -44,26 +44,47 @@ export interface SimState {
 }
 
 function getLocalPlayerState(): PlayerState {
-  let player = state.world.players[state.localPlayerId];
+  let player = currentWorld.players[state.localPlayerId];
   if (!player) {
-   player = createDefaultPlayerState(state.localPlayerId);
-   state.world.players[state.localPlayerId] = player;
+    player = createDefaultPlayerState(state.localPlayerId);
+    currentWorld.players[state.localPlayerId] = player;
   }
   return player;
 }
 
 function syncWorldDefaults(): void {
-  const player = getLocalPlayerState();
   const defaults = createDefaultInventory();
-  player.inventory = { ...defaults, ...cloneInventory(player.inventory) };
-  player.hotbar = player.hotbar.length === 10 ? cloneHotbar(player.hotbar) : createDefaultHotbar();
+  const player = getLocalPlayerState();
+  const nextInventory = { ...defaults, ...cloneInventory(player.inventory) };
+  const nextHotbar = player.hotbar.length === 10 ? cloneHotbar(player.hotbar) : createDefaultHotbar();
+  player.inventory = nextInventory;
+  player.hotbar = nextHotbar;
+  transport.createEditorAccess().mutateWorld((world) => {
+    const worldPlayer = world.players[state.localPlayerId];
+    if (!worldPlayer) return;
+    worldPlayer.inventory = { ...defaults, ...cloneInventory(worldPlayer.inventory) };
+    worldPlayer.hotbar = worldPlayer.hotbar.length === 10 ? cloneHotbar(worldPlayer.hotbar) : createDefaultHotbar();
+  });
 }
 
 const defaultWorld = createDefaultWorldState("room_default");
 let transport = new LocalTransport(defaultWorld);
+let currentWorld: WorldState = transport.getClientWorld();
+let unsubscribeTransport: (() => void) | null = null;
+
+function installTransport(nextTransport: LocalTransport): void {
+  if (unsubscribeTransport) {
+    unsubscribeTransport();
+  }
+  transport = nextTransport;
+  currentWorld = nextTransport.getClientWorld();
+  unsubscribeTransport = nextTransport.subscribe((view) => {
+    currentWorld = view.clientWorld;
+  });
+}
 
 const stateBase: SimState = {
-  world: transport.getAuthoritativeWorld(),
+  world: currentWorld,
   transport,
   localPlayerId: createPlayerId("player_1"),
   selectedMaterial: MaterialId.Sand,
@@ -77,10 +98,11 @@ const stateBase: SimState = {
 
 Object.defineProperty(stateBase, "world", {
   get() {
-    return transport.getAuthoritativeWorld();
+    return currentWorld;
   },
   set(nextWorld: WorldState) {
-    transport.resetWorld(nextWorld);
+    currentWorld = nextWorld;
+    transport.createEditorAccess().replaceWorld(nextWorld);
   },
   enumerable: true,
   configurable: true,
@@ -91,7 +113,7 @@ Object.defineProperty(stateBase, "transport", {
     return transport;
   },
   set(nextTransport: LocalTransport) {
-    transport = nextTransport;
+    installTransport(nextTransport);
   },
   enumerable: true,
   configurable: true,
@@ -99,6 +121,7 @@ Object.defineProperty(stateBase, "transport", {
 
 export const state = stateBase;
 
+installTransport(transport);
 syncWorldDefaults();
 
 export function getLocalPlayer(): PlayerState {
@@ -106,7 +129,11 @@ export function getLocalPlayer(): PlayerState {
 }
 
 export function setDayNightPreset(preset: DayNightPreset): void {
-  state.transport.setTimePreset(preset);
+  state.transport.enqueueCommand({
+    type: "set_time_preset",
+    preset,
+    expectedWorldRevision: state.world.worldRevision,
+  });
 }
 
 /** Returns true if the currently selected hotbar item is a pickaxe. */

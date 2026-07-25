@@ -1,4 +1,4 @@
-import { Grid, MATERIALS, MaterialId, createCommandEnvelope, getNextActorSequence, type HotbarItem } from "@particle-sim/shared";
+import { Grid, MATERIALS, MaterialId, type HotbarItem } from "@particle-sim/shared";
 import { getLocalPlayer, setDayNightPreset, state } from "./state";
 import { setTouchControl } from "./character";
 import { buildMetadata, getVersionBadgeDetails } from "./version";
@@ -131,12 +131,10 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   const pauseBtn = document.createElement("button");
   pauseBtn.textContent = "Pause";
   pauseBtn.addEventListener("click", () => {
-    const actorId = state.localPlayerId;
     const command = state.world.paused
       ? { type: "resume_world" as const, expectedWorldRevision: state.world.worldRevision }
       : { type: "pause_world" as const, expectedWorldRevision: state.world.worldRevision };
-    const envelope = createCommandEnvelope(actorId, getNextActorSequence(state.world, actorId), state.world.tick, command);
-    state.transport.enqueueCommand(envelope);
+    state.transport.enqueueCommand(command);
     requestAnimationFrame(() => {
       pauseBtn.textContent = state.world.paused ? "Resume" : "Pause";
     });
@@ -347,14 +345,11 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
 
   function selectSlot(index: number): void {
     const player = getLocalPlayer();
-    const actorId = state.localPlayerId;
-    const envelope = createCommandEnvelope(
-      actorId,
-      getNextActorSequence(state.world, actorId),
-      state.world.tick,
-      { type: "select_slot", slot: index, expectedInventoryRevision: player.inventoryRevision },
-    );
-    state.transport.enqueueCommand(envelope);
+    state.transport.enqueueCommand({
+      type: "select_slot",
+      slot: index,
+      expectedInventoryRevision: player.inventoryRevision,
+    });
     requestAnimationFrame(() => {
       const updatedPlayer = getLocalPlayer();
       for (let j = 0; j < slotElements.length; j++) {

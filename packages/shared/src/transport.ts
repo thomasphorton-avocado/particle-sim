@@ -1,6 +1,8 @@
 import { advanceWorldTick, type PlayerInputState } from "./gameplay.js";
-import { processPendingCommands, type CommandEnvelope, type CommandResult } from "./commands.js";
-import { type WorldState, createDefaultWorldState } from "./world-state.js";
+import { createCommandEnvelope, getNextActorSequence, processPendingCommands, type CommandResult, type GameplayCommand } from "./commands.js";
+import { type PlayerId } from "./ids.js";
+import { type WorldState, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
+import { createPlayerId } from "./ids.js";
 import { createWorldSnapshot, restoreWorldState, type WorldCellDelta, type WorldDelta, type WorldSnapshot } from "./replication.js";
 import { MaterialId } from "./materials.js";
 import { type FallingObjectStateDto, type PlayerStateDto, type GridDto } from "./serialization.js";
@@ -18,140 +20,150 @@ export interface TransportClientState {
 export type TransportListener = (state: TransportClientState) => void;
 
 export class LocalTransport {
-  public world: WorldState;
+  #world: WorldState;
+  #ownerPlayerId: PlayerId;
+  #snapshot: WorldSnapshot;
+  #delta: WorldDelta | null;
+  #revision: number;
+  #lastCommandResults: CommandResult[];
+  #listeners: TransportListener[];
+  #editorAccess: LocalTransportEditorAccess;
 
-  private snapshot: WorldSnapshot;
-  private delta: WorldDelta | null;
-  private clientWorld: WorldState;
-  private revision: number;
-  private lastCommandResults: CommandResult[];
-  private listeners: TransportListener[];
-
-  constructor(world: WorldState = createDefaultWorldState("room_default")) {
-    this.world = world;
-    this.snapshot = createWorldSnapshot(world);
-    this.clientWorld = restoreWorldState(this.snapshot);
-    this.delta = null;
-    this.revision = this.snapshot.worldRevision;
-    this.lastCommandResults = [];
-    this.listeners = [];
-  }
-
-  resetWorld(world: WorldState): void {
-    this.world = world;
-    this.snapshot = createWorldSnapshot(world);
-    this.clientWorld = restoreWorldState(this.snapshot);
-    this.delta = null;
-    this.revision = this.snapshot.worldRevision;
-    this.lastCommandResults = [];
-    this.publish();
+  constructor(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1")) {
+    this.#world = world;
+    this.#ownerPlayerId = ownerPlayerId;
+    this.#prepareWorld();
+    this.#snapshot = createWorldSnapshot(this.#world);
+    this.#delta = null;
+    this.#revision = this.#snapshot.worldRevision;
+    this.#lastCommandResults = [];
+    this.#listeners = [];
+    this.#editorAccess = new LocalTransportEditorAccess(this);
   }
 
   subscribe(listener: TransportListener): () => void {
-    this.listeners.push(listener);
+    this.#listeners.push(listener);
     return () => {
-      this.listeners = this.listeners.filter((entry) => entry !== listener);
+      this.#listeners = this.#listeners.filter((entry) => entry !== listener);
     };
   }
 
-  getAuthoritativeWorld(): WorldState {
-    return this.world;
-  }
-
   getClientWorld(): WorldState {
-    return this.clientWorld;
+    return restoreWorldState(this.#snapshot);
   }
 
   getClientSnapshot(): WorldSnapshot {
-    return this.snapshot;
+    return cloneWorldSnapshot(this.#snapshot);
   }
 
   getClientDelta(): WorldDelta | null {
-    return this.delta;
+    return this.#delta ? cloneWorldDelta(this.#delta) : null;
   }
 
   getClientState(): TransportClientState {
+    const snapshot = cloneWorldSnapshot(this.#snapshot);
     return {
-      revision: this.revision,
-      snapshot: this.snapshot,
-      delta: this.delta,
-      clientWorld: this.clientWorld,
-      lastCommandResults: [...this.lastCommandResults],
+      revision: this.#revision,
+      snapshot,
+      delta: this.#delta ? cloneWorldDelta(this.#delta) : null,
+      clientWorld: restoreWorldState(snapshot),
+      lastCommandResults: this.#lastCommandResults.map((result) => cloneCommandResult(result)),
     };
   }
 
   getLastCommandResults(): ReadonlyArray<CommandResult> {
-    return [...this.lastCommandResults];
+    return this.#lastCommandResults.map((result) => cloneCommandResult(result));
   }
 
-  enqueueCommand(envelope: CommandEnvelope): void {
-    this.world.commandInbox.push(envelope);
+  enqueueCommand(command: GameplayCommand): void {
+    const actorId = this.#ownerPlayerId;
+    const envelope = createCommandEnvelope(actorId, getNextActorSequence(this.#world, actorId), this.#world.tick, command);
+    this.#world.commandInbox.push(envelope);
   }
 
-  advanceTick(inputs?: Readonly<Record<string, PlayerInputState>>): void {
-    const results = processPendingCommands(this.world);
-    this.lastCommandResults = results;
-    if (this.world.paused) {
-      this.publish();
+  advanceTick(input?: PlayerInputState): void {
+    const results = processPendingCommands(this.#world);
+    this.#lastCommandResults = results;
+    if (this.#world.paused) {
+      this.#publish();
       return;
     }
-    const resolvedInputs = buildResolvedInputs(this.world, inputs);
-    advanceWorldTick(this.world, resolvedInputs);
-    this.publish();
+    const resolvedInputs = buildResolvedInputs(this.#world, this.#ownerPlayerId, input);
+    advanceWorldTick(this.#world, resolvedInputs);
+    this.#publish();
   }
 
-  setTimePreset(preset: DayNightPreset): void {
-    const presets: Record<DayNightPreset, number> = {
-      morning: 0.0,
-      day: 0.25,
-      dusk: 0.5,
-      night: 0.75,
-    };
-    this.world.time.dayNightCycle = presets[preset];
-    this.world.time.dayNightTick = Math.round(presets[preset] * 18_000) % 18_000;
-    this.bumpWorldRevision();
-    this.publish();
+  createEditorAccess(): LocalTransportEditorAccess {
+    return this.#editorAccess;
   }
 
-  setPaused(paused: boolean): void {
-    this.world.paused = paused;
-    this.bumpWorldRevision();
-    this.publish();
+  #prepareWorld(): void {
+    this.#world.ownerPlayerId = this.#ownerPlayerId;
+    if (!this.#world.players[this.#ownerPlayerId]) {
+      this.#world.players[this.#ownerPlayerId] = createDefaultPlayerState(this.#ownerPlayerId);
+    }
   }
 
-  private bumpWorldRevision(): void {
-    this.world.worldRevision += 1;
+  __replaceWorldForEditor(world: WorldState): void {
+    this.#world = world;
+    this.#prepareWorld();
+    this.#snapshot = createWorldSnapshot(this.#world);
+    this.#delta = null;
+    this.#revision = this.#snapshot.worldRevision;
+    this.#lastCommandResults = [];
+    this.#publish();
   }
 
-  private publish(): void {
-    const nextSnapshot = createWorldSnapshot(this.world);
-    const nextDelta = this.snapshot.worldRevision === nextSnapshot.worldRevision
+  __getAuthoritativeWorldForEditor(): WorldState {
+    return this.#world;
+  }
+
+  #publish(): void {
+    const nextSnapshot = createWorldSnapshot(this.#world);
+    const nextDelta = this.#snapshot.worldRevision === nextSnapshot.worldRevision
       ? null
-      : buildWorldDelta(this.snapshot, nextSnapshot);
-    this.snapshot = nextSnapshot;
-    this.delta = nextDelta;
-    this.clientWorld = restoreWorldState(this.snapshot);
-    this.revision = this.snapshot.worldRevision;
+      : buildWorldDelta(this.#snapshot, nextSnapshot);
+    this.#snapshot = nextSnapshot;
+    this.#delta = nextDelta;
+    this.#revision = this.#snapshot.worldRevision;
     const view = this.getClientState();
-    for (const listener of this.listeners) {
+    for (const listener of this.#listeners) {
       listener(view);
     }
   }
 }
 
-function buildResolvedInputs(world: WorldState, inputs?: Readonly<Record<string, PlayerInputState>>): Record<string, PlayerInputState> {
-  if (inputs) {
-    return Object.fromEntries(
-      Object.keys(inputs)
-        .sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
-        .map((playerId) => [playerId, normalizeInputState(inputs[playerId])]),
-    ) as Record<string, PlayerInputState>;
+export class LocalTransportEditorAccess {
+  private readonly transport: LocalTransport;
+
+  constructor(transport: LocalTransport) {
+    this.transport = transport;
   }
-  return Object.fromEntries(
-    Object.keys(world.players)
-      .sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
-      .map((playerId) => [playerId, normalizeInputState(world.players[playerId]?.input)]),
-  ) as Record<string, PlayerInputState>;
+
+  getAuthoritativeWorld(): WorldState {
+    return (this.transport as unknown as { __getAuthoritativeWorldForEditor: () => WorldState }).__getAuthoritativeWorldForEditor();
+  }
+
+  replaceWorld(world: WorldState): void {
+    (this.transport as unknown as { __replaceWorldForEditor: (world: WorldState) => void }).__replaceWorldForEditor(world);
+  }
+
+  mutateWorld(mutator: (world: WorldState) => void): void {
+    const world = this.getAuthoritativeWorld();
+    mutator(world);
+    this.replaceWorld(world);
+  }
+}
+
+export function createLocalTransportEditorAccess(transport: LocalTransport): LocalTransportEditorAccess {
+  return transport.createEditorAccess();
+}
+
+function buildResolvedInputs(world: WorldState, ownerPlayerId: PlayerId, input?: PlayerInputState): Record<string, PlayerInputState> {
+  const initialState = input ?? world.players[ownerPlayerId]?.input;
+  return {
+    [ownerPlayerId]: normalizeInputState(initialState),
+  };
 }
 
 function normalizeInputState(input?: PlayerInputState): PlayerInputState {
@@ -173,6 +185,23 @@ function normalizeInputState(input?: PlayerInputState): PlayerInputState {
     lookUpHeld: Boolean(input.lookUpHeld),
     mineHeld: Boolean(input.mineHeld),
   };
+}
+
+function cloneWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
+  return {
+    version: snapshot.version,
+    worldRevision: snapshot.worldRevision,
+    checksum: snapshot.checksum,
+    worldState: JSON.parse(JSON.stringify(snapshot.worldState)),
+  };
+}
+
+function cloneWorldDelta(delta: WorldDelta): WorldDelta {
+  return JSON.parse(JSON.stringify(delta));
+}
+
+function cloneCommandResult(result: CommandResult): CommandResult {
+  return JSON.parse(JSON.stringify(result));
 }
 
 function buildWorldDelta(previousSnapshot: WorldSnapshot, nextSnapshot: WorldSnapshot): WorldDelta | null {

@@ -42,6 +42,12 @@ interface TransportSubscriber {
   replica: TransportReplica;
 }
 
+function cloneTransportWorld(world: WorldState): WorldState {
+  const cloned = cloneWorldState(world);
+  cloned.commandInbox = [];
+  return cloned;
+}
+
 export class LocalTransport {
   #world: WorldState;
   #ownerPlayerId: PlayerId;
@@ -54,7 +60,7 @@ export class LocalTransport {
   #publishQueued: boolean;
 
   constructor(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1")) {
-    this.#world = cloneWorldState(world);
+    this.#world = cloneTransportWorld(world);
     this.#ownerPlayerId = ownerPlayerId;
     this.#prepareWorld();
     this.#replica = this.#createReplica(createWorldSnapshot(this.#world));
@@ -125,7 +131,7 @@ export class LocalTransport {
   }
 
   #replaceWorldForEditor(world: WorldState): void {
-    this.#world = cloneWorldState(world);
+    this.#world = cloneTransportWorld(world);
     this.#prepareWorld();
     this.#publishedCellRevisions.clear();
     this.#replica = this.#createReplica(createWorldSnapshot(this.#world));
@@ -222,13 +228,22 @@ export class LocalTransport {
     const pendingCellEntries = this.#world.grid.dirtyCells.readPending();
     const nextDelta = this.#buildDelta(this.#replica.snapshot, pendingCellEntries);
     const lastCommandResults = this.#lastCommandResults.map((result) => cloneCommandResult(result));
+    const hasAcceptedResults = lastCommandResults.some((result) => result.kind === "accepted");
+    const hasRejectedResults = lastCommandResults.some((result) => result.kind === "rejected");
+    const shouldPublish = hasAcceptedResults || !hasRejectedResults || nextDelta !== null;
+    if (!shouldPublish) {
+      this.#replica.lastCommandResults = lastCommandResults;
+      this.#world.grid.dirtyCells.flush();
+      return [];
+    }
     const subscribers = this.#subscribers.slice();
-    this.#commitPublication(nextDelta, lastCommandResults, pendingCellEntries);
+    const authorityRevision = this.#world.worldRevision;
+    this.#commitPublication(nextDelta, lastCommandResults, pendingCellEntries, authorityRevision);
 
     const errors: unknown[] = [];
     for (const subscriber of subscribers) {
       try {
-        this.#updateReplica(subscriber.replica, nextDelta);
+        this.#updateReplica(subscriber.replica, nextDelta, authorityRevision);
         subscriber.replica.lastCommandResults = lastCommandResults;
         subscriber.listener(this.#buildClientState(subscriber.replica));
       } catch (error) {
@@ -238,17 +253,14 @@ export class LocalTransport {
     return errors;
   }
 
-  #commitPublication(nextDelta: WorldDelta | null, lastCommandResults: CommandResult[], _pendingCellEntries: DirtyCellEntry[]): void {
-    this.#updateReplica(this.#replica, nextDelta);
+  #commitPublication(nextDelta: WorldDelta | null, lastCommandResults: CommandResult[], _pendingCellEntries: DirtyCellEntry[], authorityRevision: number): void {
+    this.#updateReplica(this.#replica, nextDelta, authorityRevision);
     this.#replica.lastCommandResults = lastCommandResults;
     this.#world.grid.dirtyCells.flush();
     if (nextDelta !== null) {
       for (const cellDelta of nextDelta.cells) {
         this.#publishedCellRevisions.set(cellDelta.index, cellDelta.revision);
       }
-    }
-    if (nextDelta !== null) {
-      this.#world.worldRevision = nextDelta.targetRevision;
     }
   }
 
@@ -259,13 +271,9 @@ export class LocalTransport {
     });
   }
 
-  #updateReplica(replica: TransportReplica, delta: WorldDelta | null): void {
+  #updateReplica(replica: TransportReplica, delta: WorldDelta | null, authorityRevision: number): void {
     replica.delta = delta ? cloneWorldDelta(delta) : null;
-    const authorityRevision = this.#world.worldRevision;
     if (!delta) {
-      replica.revision = authorityRevision;
-      replica.snapshot.worldRevision = authorityRevision;
-      replica.snapshot.worldState.worldRevision = authorityRevision;
       replica.snapshot.checksum = "";
       replica.canonicalSnapshot = null;
       return;
@@ -298,12 +306,12 @@ export class LocalTransport {
       world.fallingObjects[fallingObjectDelta.objectId] = cloneDeltaValue(fallingObjectDelta.state) as typeof world.fallingObjects[string];
     }
     for (const metadataDelta of delta.metadata) {
-      this.#applyMetadataDelta(world, metadataDelta);
+      this.#applyMetadataDelta(world, metadataDelta, authorityRevision);
     }
     world.worldRevision = authorityRevision;
   }
 
-  #applyMetadataDelta(world: WorldState, delta: WorldDelta["metadata"][number]): void {
+  #applyMetadataDelta(world: WorldState, delta: WorldDelta["metadata"][number], authorityRevision: number): void {
     switch (delta.field) {
       case "roomId":
         world.roomId = delta.value as typeof world.roomId;
@@ -327,7 +335,7 @@ export class LocalTransport {
         world.ownerPlayerId = cloneDeltaValue(delta.value) as typeof world.ownerPlayerId;
         return;
       case "worldRevision":
-        world.worldRevision = delta.value as typeof world.worldRevision;
+        world.worldRevision = authorityRevision;
         return;
       case "nextAuthorityOrder":
         world.nextAuthorityOrder = delta.value as typeof world.nextAuthorityOrder;

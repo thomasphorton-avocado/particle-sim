@@ -4,6 +4,7 @@ import {
   advanceWorldTick,
   allocateObjectId,
   createCommandEnvelope,
+  createCommandId,
   createDefaultFallingObjectState,
   createDefaultPlayerState,
   createDefaultWorldState,
@@ -12,6 +13,7 @@ import {
   restoreWorldState,
   decodeWorldDelta,
   applyWorldDeltaToSnapshot,
+  applyWorldDeltaToSnapshotState,
   applyWorldDeltaStream,
   computeWorldChecksum,
   createPlayerId,
@@ -20,6 +22,7 @@ import {
   MaterialId,
   normalizePlayerInput,
   processCommand,
+  processPendingCommands,
   serializeWorldState,
   createObjectId,
 } from "@particle-sim/shared";
@@ -39,6 +42,102 @@ function createWeatherDeltaState() {
     boltSeed: 99,
   };
 }
+
+function createReceiptFixture(actorId, authorityOrder, overrides = {}) {
+  return {
+    commandId: createCommandId("command_receipt_fixture"),
+    actorId,
+    actorSequence: 1,
+    authorityOrder,
+    issuedTick: 1,
+    processedTick: 1,
+    commandType: "set_input_state",
+    code: "accepted",
+    accepted: true,
+    beforeWorldRevision: 0,
+    afterWorldRevision: 1,
+    beforeInventoryRevision: 0,
+    afterInventoryRevision: 1,
+    beforeTargetRevision: 0,
+    afterTargetRevision: 1,
+    acceptedEffect: null,
+    fingerprint: "receipt-fingerprint",
+    ...overrides,
+  };
+}
+
+test("receipt validation rejects missing, unknown, and inconsistent fields", () => {
+  const world = createDefaultWorldState("room_receipts");
+  const actorId = createPlayerId("player_receipts");
+  world.players[actorId] = createDefaultPlayerState(actorId);
+
+  const baseReceipt = createReceiptFixture(actorId, 1);
+
+  const missingFieldReceipt = { ...baseReceipt };
+  delete missingFieldReceipt.commandId;
+  world.commandLedger = { actorHighWater: {}, recent: [missingFieldReceipt] };
+  assert.throws(() => serializeWorldState(world), /commandId/i);
+
+  const unknownFieldReceipt = { ...baseReceipt, unexpected: true };
+  world.commandLedger = { actorHighWater: {}, recent: [unknownFieldReceipt] };
+  assert.throws(() => serializeWorldState(world), /unknown field/i);
+
+  const inconsistentReceipt = { ...baseReceipt, accepted: true, code: "paused" };
+  world.commandLedger = { actorHighWater: {}, recent: [inconsistentReceipt] };
+  assert.throws(() => serializeWorldState(world), /accepted/i);
+
+  const invalidTypeReceipt = { ...baseReceipt, commandType: "bogus" };
+  world.commandLedger = { actorHighWater: {}, recent: [invalidTypeReceipt] };
+  assert.throws(() => serializeWorldState(world), /commandType/i);
+
+  const invalidRevisionReceipt = { ...baseReceipt, beforeWorldRevision: "oops" };
+  world.commandLedger = { actorHighWater: {}, recent: [invalidRevisionReceipt] };
+  assert.throws(() => serializeWorldState(world), /beforeWorldRevision/i);
+});
+
+test("forged receipt fingerprints and sequences are rejected as conflicts", () => {
+  const world = createDefaultWorldState("room_receipt_conflict");
+  const actorId = createPlayerId("player_receipt_conflict");
+  world.players[actorId] = createDefaultPlayerState(actorId);
+  const envelope = createCommandEnvelope(actorId, 1, 0, { type: "set_input_state", left: true, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false });
+  world.commandInbox.push(envelope);
+
+  const conflictingReceipt = createReceiptFixture(actorId, null, {
+    commandId: envelope.commandId,
+    actorSequence: envelope.actorSequence,
+    issuedTick: envelope.issuedTick,
+    processedTick: 0,
+    fingerprint: "forged-fingerprint",
+  });
+  world.commandLedger.recent.push(conflictingReceipt);
+
+  const results = processPendingCommands(world);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].kind, "rejected");
+  assert.equal(results[0].code, "conflict");
+});
+
+test("applyWorldDeltaToSnapshotState rejects malformed deltas without mutating the snapshot", () => {
+  const world = createDefaultWorldState("room_delta_reject");
+  const actorId = createPlayerId("player_delta_reject");
+  world.players[actorId] = createDefaultPlayerState(actorId);
+  const beforeState = serializeWorldState(world);
+  const targetState = JSON.parse(JSON.stringify(beforeState));
+  const invalidDelta = {
+    version: 1,
+    baseRevision: world.worldRevision,
+    targetRevision: world.worldRevision + 1,
+    gridDimensions: { width: world.grid.width, height: world.grid.height },
+    cells: [{ index: 0, materialId: MaterialId.Stone, shade: 0, auxiliary: 0, objectId: null, revision: world.worldRevision + 1 }],
+    players: [],
+    fallingObjects: [],
+    metadata: [{ field: "commandLedger", value: { actorHighWater: {}, recent: [createReceiptFixture(actorId, null, { commandId: createCommandId("command_bad_receipt"), issuedTick: 0, processedTick: 0, fingerprint: "" })] } }],
+  };
+
+  assert.throws(() => applyWorldDeltaToSnapshotState(targetState, invalidDelta), /commandId|commandLedger|fingerprint/i);
+  assert.deepEqual(targetState, beforeState);
+  assert.deepEqual(serializeWorldState(world), beforeState);
+});
 
 test("dirty tracking is independent from simulation updated flags", () => {
   const world = createDefaultWorldState("room_dirty");
@@ -65,7 +164,7 @@ test("world deltas clone nested authority values before and after application", 
   world.time = { dayNightTick: 3 };
   world.weather = createWeatherDeltaState();
   world.random = { algorithm: "mulberry32-v1", seed: 11, state: 13 };
-  world.commandLedger = { actorHighWater: { [playerId]: 4 }, recent: [{ actorId: playerId, order: 4 }] };
+  world.commandLedger = { actorHighWater: { [playerId]: 4 }, recent: [createReceiptFixture(playerId, 4)] };
   const snapshot = createWorldSnapshot(world);
   world.grid.set(0, 0, MaterialId.Water);
   world.players[playerId].hotbar[0] = { kind: "material", materialId: MaterialId.Dirt, count: 8 };
@@ -77,7 +176,7 @@ test("world deltas clone nested authority values before and after application", 
   world.time = { dayNightTick: 4 };
   world.weather = { ...world.weather, episodeElapsed: 77, wind: 2.5 };
   world.random = { algorithm: "mulberry32-v1", seed: 11, state: 19 };
-  world.commandLedger = { actorHighWater: { [playerId]: 9 }, recent: [{ actorId: playerId, order: 9 }] };
+  world.commandLedger = { actorHighWater: { [playerId]: 9 }, recent: [createReceiptFixture(playerId, 9)] };
   const delta = createWorldDelta(snapshot, world);
   assert.ok(delta);
   assert.notStrictEqual(delta.players[0].state, world.players[playerId]);
@@ -104,7 +203,7 @@ test("world deltas clone nested authority values before and after application", 
   weatherDelta.value.wind = -2;
   timeDelta.value.dayNightTick = 123;
   randomDelta.value.state = 321;
-  commandLedgerDelta.value.recent.push({ actorId: "tampered", order: 123 });
+  commandLedgerDelta.value.recent.push(createReceiptFixture("tampered_player", 123, { commandId: createCommandId("command_tampered_receipt") }));
 
   assert.equal(world.players[playerId].hotbar[0].count, 8);
   assert.equal(world.players[playerId].inventory.stone, 12);
@@ -115,7 +214,7 @@ test("world deltas clone nested authority values before and after application", 
   assert.equal(world.weather.episodeElapsed, 77);
   assert.equal(world.time.dayNightTick, 4);
   assert.equal(world.random.state, 19);
-  assert.equal(world.commandLedger.recent[0].order, 9);
+  assert.equal(world.commandLedger.recent[0].authorityOrder, 9);
 
   const appliedSnapshot = applyWorldDeltaToSnapshot(snapshot, delta);
   assert.equal(appliedSnapshot.worldState.players[playerId].hotbar[0].count, 8);
@@ -127,8 +226,8 @@ test("world deltas clone nested authority values before and after application", 
   assert.equal(appliedSnapshot.worldState.weather.episodeElapsed, 77);
   assert.equal(appliedSnapshot.worldState.time.dayNightTick, 4);
   assert.equal(appliedSnapshot.worldState.random.state, 19);
-  assert.equal(appliedSnapshot.worldState.commandLedger.recent[0].order, 9);
-
+  assert.equal(appliedSnapshot.worldState.commandLedger.recent[0].authorityOrder, 9);
+ 
   delta.players[0].state.hotbar[0].count = 1;
   delta.players[0].state.inventory.stone = 2;
   delta.players[0].state.pendingRefunds.refund = 3;
@@ -139,7 +238,7 @@ test("world deltas clone nested authority values before and after application", 
   weatherDelta.value.wind = 7;
   timeDelta.value.dayNightTick = 8;
   randomDelta.value.state = 9;
-  commandLedgerDelta.value.recent.push({ actorId: "after-apply", order: 10 });
+  commandLedgerDelta.value.recent.push(createReceiptFixture("after_apply_player", 10, { commandId: createCommandId("command_after_apply_receipt") }));
 
   assert.equal(appliedSnapshot.worldState.players[playerId].hotbar[0].count, 8);
   assert.equal(appliedSnapshot.worldState.players[playerId].inventory.stone, 12);
@@ -150,7 +249,7 @@ test("world deltas clone nested authority values before and after application", 
   assert.equal(appliedSnapshot.worldState.weather.episodeElapsed, 77);
   assert.equal(appliedSnapshot.worldState.time.dayNightTick, 4);
   assert.equal(appliedSnapshot.worldState.random.state, 19);
-  assert.equal(appliedSnapshot.worldState.commandLedger.recent[0].order, 9);
+  assert.equal(appliedSnapshot.worldState.commandLedger.recent[0].authorityOrder, 9);
   assert.equal(appliedSnapshot.worldState.commandLedger.recent.length, 1);
 });
 

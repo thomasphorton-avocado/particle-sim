@@ -102,6 +102,9 @@ export interface WorldStateDto {
 const MAX_GRID_CELLS = 1_000_000;
 const MAX_SAFE_INTEGER = 0x1_0000_0000 - 1;
 const DEFAULT_RANDOM_SEED = 0;
+const VALID_COMMAND_TYPES = new Set(["set_input_state", "mine_start", "mine_stop", "select_slot", "place", "harvest", "cycle_faucet", "pause_world", "resume_world", "set_time_preset"]);
+const VALID_COMMAND_RESULT_CODES = new Set(["accepted", "unknown_actor", "paused", "not_owner", "already_state", "future_tick", "stale", "conflict", "slot", "tool", "revision", "inventory", "target", "bounds", "range", "collision", "footprint", "work_limit", "invalid_command"]);
+const COMMAND_RECEIPT_FIELDS = ["accepted", "acceptedEffect", "actorId", "actorSequence", "afterInventoryRevision", "afterTargetRevision", "afterWorldRevision", "authorityOrder", "beforeInventoryRevision", "beforeTargetRevision", "beforeWorldRevision", "code", "commandId", "commandType", "fingerprint", "issuedTick", "processedTick"];
 
 function normalizeDayNightTick(dayNightCycle: number): number {
   return ((Math.round(dayNightCycle * DAY_NIGHT_CYCLE_TICKS) % DAY_NIGHT_CYCLE_TICKS) + DAY_NIGHT_CYCLE_TICKS) % DAY_NIGHT_CYCLE_TICKS;
@@ -152,6 +155,21 @@ function assertArray(value: unknown, label: string): unknown[] {
     throw new TypeError(`${label} must be an array`);
   }
   return value;
+}
+
+function assertString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function assertAllowedFields(value: Record<string, unknown>, allowedFields: ReadonlySet<string>, label: string): void {
+  for (const key of Object.keys(value)) {
+    if (!allowedFields.has(key)) {
+      throw new TypeError(`${label} contains unknown field ${key}`);
+    }
+  }
 }
 
 function compareStringCodeUnits(left: string, right: string): number {
@@ -235,6 +253,85 @@ function validatePendingRefunds(value: unknown): Record<string, number> {
     normalized[key] = assertInteger(entry, `pendingRefunds.${key}`, 0, 1000000);
   }
   return normalized;
+}
+
+export function validateCommandReceipt(value: unknown, label = "commandReceipt"): CommandReceipt {
+  const obj = assertObject(value, label);
+  const allowedFields = new Set(COMMAND_RECEIPT_FIELDS);
+  assertAllowedFields(obj, allowedFields, label);
+  const commandId = parseCommandId(requireField(obj, "commandId", `${label}.commandId`));
+  const actorId = parsePlayerId(requireField(obj, "actorId", `${label}.actorId`));
+  const actorSequence = assertInteger(requireField(obj, "actorSequence", `${label}.actorSequence`), `${label}.actorSequence`, 0, MAX_SAFE_INTEGER);
+  const authorityOrder = requireField(obj, "authorityOrder", `${label}.authorityOrder`) === null
+    ? null
+    : assertInteger(requireField(obj, "authorityOrder", `${label}.authorityOrder`), `${label}.authorityOrder`, 1, MAX_SAFE_INTEGER);
+  const issuedTick = assertInteger(requireField(obj, "issuedTick", `${label}.issuedTick`), `${label}.issuedTick`, 0, MAX_SAFE_INTEGER);
+  const processedTick = assertInteger(requireField(obj, "processedTick", `${label}.processedTick`), `${label}.processedTick`, 0, MAX_SAFE_INTEGER);
+  const commandTypeValue = requireField(obj, "commandType", `${label}.commandType`) as CommandReceipt["commandType"];
+  const codeValue = requireField(obj, "code", `${label}.code`) as CommandReceipt["code"];
+  const accepted = assertBoolean(requireField(obj, "accepted", `${label}.accepted`), `${label}.accepted`);
+  const beforeWorldRevision = assertInteger(requireField(obj, "beforeWorldRevision", `${label}.beforeWorldRevision`), `${label}.beforeWorldRevision`, 0, MAX_SAFE_INTEGER);
+  const afterWorldRevision = assertInteger(requireField(obj, "afterWorldRevision", `${label}.afterWorldRevision`), `${label}.afterWorldRevision`, 0, MAX_SAFE_INTEGER);
+  const beforeInventoryRevision = assertInteger(requireField(obj, "beforeInventoryRevision", `${label}.beforeInventoryRevision`), `${label}.beforeInventoryRevision`, 0, MAX_SAFE_INTEGER);
+  const afterInventoryRevision = assertInteger(requireField(obj, "afterInventoryRevision", `${label}.afterInventoryRevision`), `${label}.afterInventoryRevision`, 0, MAX_SAFE_INTEGER);
+  const beforeTargetRevision = assertInteger(requireField(obj, "beforeTargetRevision", `${label}.beforeTargetRevision`), `${label}.beforeTargetRevision`, 0, MAX_SAFE_INTEGER);
+  const afterTargetRevision = assertInteger(requireField(obj, "afterTargetRevision", `${label}.afterTargetRevision`), `${label}.afterTargetRevision`, 0, MAX_SAFE_INTEGER);
+  const acceptedEffectValue = requireField(obj, "acceptedEffect", `${label}.acceptedEffect`);
+  const fingerprintValue = requireField(obj, "fingerprint", `${label}.fingerprint`);
+  if (Object.keys(obj).length !== allowedFields.size) {
+    throw new TypeError(`${label} must include exactly ${allowedFields.size} fields`);
+  }
+  const receipt: CommandReceipt = {
+    commandId,
+    actorId,
+    actorSequence,
+    authorityOrder,
+    issuedTick,
+    processedTick,
+    commandType: commandTypeValue,
+    code: codeValue,
+    accepted,
+    beforeWorldRevision,
+    afterWorldRevision,
+    beforeInventoryRevision,
+    afterInventoryRevision,
+    beforeTargetRevision,
+    afterTargetRevision,
+    acceptedEffect: null,
+    fingerprint: "",
+  };
+  const commandType = assertString(receipt.commandType, `${label}.commandType`);
+  if (!VALID_COMMAND_TYPES.has(commandType)) {
+    throw new TypeError(`${label}.commandType must be a supported gameplay command type`);
+  }
+  const code = assertString(receipt.code, `${label}.code`);
+  if (!VALID_COMMAND_RESULT_CODES.has(code)) {
+    throw new TypeError(`${label}.code must be a supported command result code`);
+  }
+  if (receipt.accepted && code !== "accepted") {
+    throw new TypeError(`${label}.accepted must be false when code is not accepted`);
+  }
+  if (!receipt.accepted && code === "accepted") {
+    throw new TypeError(`${label}.accepted must be true when code is accepted`);
+  }
+  const acceptedEffect = acceptedEffectValue === null ? null : validateAcceptedEffect(acceptedEffectValue, `${label}.acceptedEffect`);
+  const fingerprint = assertString(fingerprintValue, `${label}.fingerprint`);
+  if (fingerprint.length > 1024) {
+    throw new TypeError(`${label}.fingerprint must be at most 1024 characters`);
+  }
+  receipt.commandType = commandType as CommandReceipt["commandType"];
+  receipt.code = code as CommandReceipt["code"];
+  receipt.acceptedEffect = acceptedEffect;
+  receipt.fingerprint = fingerprint;
+  return receipt;
+}
+
+function validateAcceptedEffect(value: unknown, label: string): string | null {
+  const effect = assertString(value, label);
+  if (effect.length > 64) {
+    throw new TypeError(`${label} must be at most 64 characters`);
+  }
+  return effect;
 }
 
 function validatePlayerState(value: unknown, version: number): PlayerState {
@@ -443,8 +540,7 @@ function validateCommandLedger(value: unknown): CommandLedgerState {
     normalized.actorHighWater[key] = assertInteger(entry, `commandLedger.actorHighWater.${key}`, 0, MAX_SAFE_INTEGER);
   }
   for (const entry of recent) {
-    const receipt = assertObject(entry, "commandLedger.recent[]");
-    normalized.recent.push(cloneSerializableValue(receipt) as unknown as CommandReceipt);
+    normalized.recent.push(validateCommandReceipt(entry, "commandLedger.recent[]"));
   }
   return normalized;
 }
@@ -562,7 +658,7 @@ export function serializeWeatherState(weather: WeatherState): WeatherStateDto {
 export function serializeCommandLedger(commandLedger: CommandLedgerState): CommandLedgerDto {
   return {
     actorHighWater: { ...commandLedger.actorHighWater },
-    recent: commandLedger.recent.map((receipt) => ({ ...receipt })),
+    recent: commandLedger.recent.map((receipt, index) => cloneSerializableValue(validateCommandReceipt(receipt, `commandLedger.recent[${index}]`))),
   };
 }
 

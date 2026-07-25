@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MaterialId, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createPlayerId } from "@particle-sim/shared";
+import { MaterialId, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createPlayerId } from "@particle-sim/shared";
 
 function createWorldWithPlayer() {
   const world = createDefaultWorldState("room_transport");
@@ -50,6 +50,26 @@ test("LocalTransport publishes snapshots and isolated client state after accepte
   clientWorld.players[actorId].input.left = false;
   assert.equal(world.players[actorId].input.left, false);
   assert.equal(seenRevisions.at(-1), afterPauseState.revision);
+});
+
+test("LocalTransport drops externally supplied command inboxes for constructor and editor replacement", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const externalEnvelope = createCommandEnvelope(actorId, 1, 0, { type: "set_input_state", left: true, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false });
+  world.commandInbox.push(externalEnvelope);
+
+  const { transport } = createLocalTransportSession(world, actorId);
+  const clientWorldAfterConstruction = transport.getClientWorld();
+  assert.equal(clientWorldAfterConstruction.commandInbox.length, 0);
+
+  const replacementWorld = createDefaultWorldState("room_transport_replacement");
+  const replacementActorId = createPlayerId("player_transport_replacement");
+  replacementWorld.players[replacementActorId] = createDefaultPlayerState(replacementActorId);
+  replacementWorld.commandInbox.push(createCommandEnvelope(replacementActorId, 1, 0, { type: "pause_world" }));
+
+  const { transport: replacementTransport, editor } = createLocalTransportSession(replacementWorld, replacementActorId);
+  editor.replaceWorld(world);
+  const clientWorldAfterReplacement = replacementTransport.getClientWorld();
+  assert.equal(clientWorldAfterReplacement.commandInbox.length, 0);
 });
 
 test("LocalTransport pauses deterministic ticking and keeps revisions stable until unpaused", () => {

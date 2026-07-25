@@ -2,7 +2,7 @@ import { assertAuxiliaryValueForMaterial, Grid } from "./grid.js";
 import { parseObjectId, parsePlayerId, parseRoomId } from "./ids.js";
 import { MaterialId, MATERIALS } from "./materials.js";
 import { DAY_NIGHT_CYCLE_TICKS } from "./gameplay.js";
-import { deserializeWorldState, serializeWorldState, WORLD_STATE_SCHEMA_VERSION, type WorldStateDto, type PlayerStateDto, type FallingObjectStateDto, type WeatherStateDto, type CommandLedgerDto } from "./serialization.js";
+import { deserializeWorldState, serializeWorldState, WORLD_STATE_SCHEMA_VERSION, validateCommandReceipt, type WorldStateDto, type PlayerStateDto, type FallingObjectStateDto, type WeatherStateDto, type CommandLedgerDto } from "./serialization.js";
 import { type WorldState, type WeatherState } from "./world-state.js";
 import { type DirtyCellEntry } from "./dirty-journal.js";
 import { createGameplayRandomState, type GameplayRandomState } from "./random.js";
@@ -511,8 +511,7 @@ function validateCommandLedgerDto(value: unknown): CommandLedgerDto {
     normalized.actorHighWater[key] = assertInteger(entry, `commandLedgerDelta.state.actorHighWater.${key}`, 0, MAX_SAFE_INTEGER);
   }
   for (const item of recent) {
-    const receipt = assertObject(item, "commandLedgerDelta.state.recent[]");
-    normalized.recent.push(cloneDeltaValue(receipt) as unknown as CommandLedgerDto["recent"][number]);
+    normalized.recent.push(validateCommandReceipt(item, "commandLedgerDelta.state.recent[]") as unknown as CommandLedgerDto["recent"][number]);
   }
   return normalized;
 }
@@ -531,7 +530,37 @@ function validateGameplayRandomStateDto(value: unknown): GameplayRandomState {
 }
 
 function validateWorldSnapshotMetadataField(field: string, value: unknown): WorldMetadataDelta {
-  return { field: field as WorldMetadataDelta["field"], value: cloneDeltaValueForPublication(value) };
+  switch (field) {
+    case "roomId":
+      return { field: field as WorldMetadataDelta["field"], value: validateRoomId(value, "worldDelta.metadata[].value") };
+    case "tick":
+      return { field: field as WorldMetadataDelta["field"], value: assertInteger(value, "worldDelta.metadata[].value", 0, MAX_SAFE_INTEGER) };
+    case "paused":
+      return { field: field as WorldMetadataDelta["field"], value: assertBoolean(value, "worldDelta.metadata[].value") };
+    case "time": {
+      const obj = assertObject(value, "worldDelta.metadata[].value");
+      const dayNightTick = assertInteger(requireField(obj, "dayNightTick", "worldDelta.metadata[].value.dayNightTick"), "worldDelta.metadata[].value.dayNightTick", 0, DAY_NIGHT_CYCLE_TICKS - 1);
+      return { field: field as WorldMetadataDelta["field"], value: { dayNightTick } };
+    }
+    case "weather":
+      return { field: field as WorldMetadataDelta["field"], value: validateWeatherStateDto(value) };
+    case "random":
+      return { field: field as WorldMetadataDelta["field"], value: validateGameplayRandomStateDto(value) };
+    case "ownerPlayerId":
+      return { field: field as WorldMetadataDelta["field"], value: value === null ? null : validatePlayerId(value, "worldDelta.metadata[].value") };
+    case "worldRevision":
+      return { field: field as WorldMetadataDelta["field"], value: assertInteger(value, "worldDelta.metadata[].value", 0, MAX_SAFE_INTEGER) };
+    case "nextAuthorityOrder":
+      return { field: field as WorldMetadataDelta["field"], value: assertInteger(value, "worldDelta.metadata[].value", 1, MAX_SAFE_INTEGER) };
+    case "nextPlayerOrdinal":
+      return { field: field as WorldMetadataDelta["field"], value: assertInteger(value, "worldDelta.metadata[].value", 1, MAX_SAFE_INTEGER) };
+    case "nextObjectOrdinal":
+      return { field: field as WorldMetadataDelta["field"], value: assertInteger(value, "worldDelta.metadata[].value", 1, MAX_SAFE_INTEGER) };
+    case "commandLedger":
+      return { field: field as WorldMetadataDelta["field"], value: validateCommandLedgerDto(value) };
+    default:
+      throw new TypeError("worldDelta.metadata[].field has an unsupported value");
+  }
 }
 
 function serializePlayerState(player: WorldState["players"][string]): PlayerStateDto {
@@ -670,6 +699,19 @@ function validateWorldDelta(value: unknown): WorldDelta {
   const gridDimensions = Object.prototype.hasOwnProperty.call(obj, "gridDimensions")
     ? validateGridDimensions(obj["gridDimensions"], "worldDelta.gridDimensions")
     : undefined;
+  const metadata = (requireField(obj, "metadata", "worldDelta.metadata") as unknown[]).map((entry) => {
+    const metadataObj = assertObject(entry, "worldDelta.metadata[]");
+    const field = requireField(metadataObj, "field", "worldDelta.metadata[].field");
+    if (typeof field !== "string") {
+      throw new TypeError("worldDelta.metadata[].field must be a string");
+    }
+    const normalizedField = field as WorldMetadataDelta["field"];
+    if (normalizedField !== "roomId" && normalizedField !== "tick" && normalizedField !== "paused" && normalizedField !== "time" && normalizedField !== "weather" && normalizedField !== "random" && normalizedField !== "ownerPlayerId" && normalizedField !== "worldRevision" && normalizedField !== "nextAuthorityOrder" && normalizedField !== "nextPlayerOrdinal" && normalizedField !== "nextObjectOrdinal" && normalizedField !== "commandLedger") {
+      throw new TypeError("worldDelta.metadata[].field has an unsupported value");
+    }
+    const value = metadataObj["value"];
+    return validateWorldSnapshotMetadataField(normalizedField, value);
+  });
   const cells = (requireField(obj, "cells", "worldDelta.cells") as unknown[]).map((entry) => validateCellDelta(entry));
   const players = (requireField(obj, "players", "worldDelta.players") as unknown[]).map((entry) => {
     const playerObj = assertObject(entry, "worldDelta.players[]");
@@ -690,19 +732,6 @@ function validateWorldDelta(value: unknown): WorldDelta {
       throw new TypeError("worldDelta.fallingObjects[].objectId must match fallingObjectDelta.state.id");
     }
     return { objectId, state };
-  });
-  const metadata = (requireField(obj, "metadata", "worldDelta.metadata") as unknown[]).map((entry) => {
-    const metadataObj = assertObject(entry, "worldDelta.metadata[]");
-    const field = requireField(metadataObj, "field", "worldDelta.metadata[].field");
-    if (typeof field !== "string") {
-      throw new TypeError("worldDelta.metadata[].field must be a string");
-    }
-    const normalizedField = field as WorldMetadataDelta["field"];
-    if (normalizedField !== "roomId" && normalizedField !== "tick" && normalizedField !== "paused" && normalizedField !== "time" && normalizedField !== "weather" && normalizedField !== "random" && normalizedField !== "ownerPlayerId" && normalizedField !== "worldRevision" && normalizedField !== "nextAuthorityOrder" && normalizedField !== "nextPlayerOrdinal" && normalizedField !== "nextObjectOrdinal" && normalizedField !== "commandLedger") {
-      throw new TypeError("worldDelta.metadata[].field has an unsupported value");
-    }
-    const value = metadataObj["value"];
-    return validateWorldSnapshotMetadataField(normalizedField, value);
   });
   if (cells.length > MAX_DELTA_CELLS) {
     throw new TypeError("worldDelta.cells exceeds the maximum allowed size");
@@ -766,7 +795,7 @@ function replaceGridMembership(grid: WorldStateDto["grid"], index: number, objec
   grid.objectMembership = normalized;
 }
 
-export function applyWorldDeltaToSnapshotState(worldState: WorldStateDto, delta: WorldDelta): void {
+function applyWorldDeltaToSnapshotStateInPlace(worldState: WorldStateDto, delta: WorldDelta): void {
   const grid = worldState.grid;
   const totalCells = grid.width * grid.height;
   for (const cellDelta of delta.cells) {
@@ -814,6 +843,22 @@ export function applyWorldDeltaToSnapshotState(worldState: WorldStateDto, delta:
     applyMetadataDelta(worldState, metadataDelta);
   }
   worldState.worldRevision = delta.targetRevision;
+}
+
+export function applyWorldDeltaToSnapshotState(worldState: WorldStateDto, delta: WorldDelta): void {
+  const normalizedDelta = decodeWorldDelta(delta);
+  if (worldState.worldRevision !== normalizedDelta.baseRevision) {
+    throw new TypeError("worldDelta.baseRevision does not match the checkpoint revision");
+  }
+  if (normalizedDelta.gridDimensions !== undefined) {
+    if (worldState.grid.width !== normalizedDelta.gridDimensions.width || worldState.grid.height !== normalizedDelta.gridDimensions.height) {
+      throw new TypeError("worldDelta.gridDimensions does not match the checkpoint dimensions");
+    }
+  }
+  const nextWorldState = cloneDeltaValue(worldState);
+  applyWorldDeltaToSnapshotStateInPlace(nextWorldState, normalizedDelta);
+  const canonicalWorldState = canonicalizeWorldStateDto(nextWorldState);
+  Object.assign(worldState, canonicalWorldState);
 }
 
 function applyMetadataDelta(worldState: WorldStateDto, delta: WorldMetadataDelta): void {
@@ -948,7 +993,7 @@ export function applyWorldDeltaToSnapshot(snapshot: WorldSnapshot, delta: WorldD
     }
   }
   const nextWorldState = clonePlainObject(normalizedSnapshot.worldState);
-  applyWorldDeltaToSnapshotState(nextWorldState, normalizedDelta);
+  applyWorldDeltaToSnapshotStateInPlace(nextWorldState, normalizedDelta);
   const canonicalWorldState = canonicalizeWorldStateDto(nextWorldState);
   const nextWorldStateSnapshot: WorldSnapshot = {
     version: normalizedSnapshot.version,

@@ -10,3 +10,5 @@ export * from "./starter-world.js";
 export * from "./gameplay.js";
 export * from "./weather-step.js";
 export * from "./commands.js";
+export * from "./dirty-journal.js";
+export * from "./replication.js";

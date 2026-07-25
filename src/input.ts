@@ -1,5 +1,5 @@
-import { Grid, MATERIALS, MaterialId, allocateObjectId, createCommandEnvelope, createDefaultFallingObjectState, enqueueCommand, findFlowerCluster, getNextActorSequence, harvestFlowerCluster, nextBool, placeWorldCell, type GameplayCommand, type WorldState } from "@particle-sim/shared";
-import { state, hasPickaxeEquipped, addToHotbar, getActiveHotbarMaterial, removeFromActiveSlot, getLocalPlayer } from "./state";
+import { Grid, MATERIALS, MaterialId, addToHotbar as addToHotbarHelper, allocateObjectId, createCommandEnvelope, createDefaultFallingObjectState, createDefaultPlayerState, enqueueCommand, findFlowerCluster, getNextActorSequence, harvestFlowerCluster, nextBool, placeWorldCell, removeFromHotbarSlot as removeFromHotbarSlotHelper, type GameplayCommand, type LocalTransportEditorCapability, type WorldState } from "@particle-sim/shared";
+import { state, hasPickaxeEquipped, getActiveHotbarMaterial, getLocalPlayer } from "./state";
 
 /** Maximum placement distance from character center (in grid cells). */
 const PLACEMENT_RADIUS = 30;
@@ -22,6 +22,45 @@ function canPlaceOver(grid: Grid, x: number, y: number, matId: MaterialId): bool
   // Impermeable materials displace water
   if (existing === MaterialId.Water && !MATERIALS[matId].permeable) return true;
   return false;
+}
+
+function getOrCreatePlayer(world: WorldState): NonNullable<WorldState["players"][string]> {
+  let player = world.players[state.localPlayerId];
+  if (!player) {
+    player = createDefaultPlayerState(state.localPlayerId);
+    world.players[state.localPlayerId] = player;
+  }
+  return player;
+}
+
+function mutateWorldWithEditor(editor: LocalTransportEditorCapability | undefined, world: WorldState, mutator: (targetWorld: WorldState) => void): void {
+  if (state.toolMode === "editor" && editor) {
+    editor.mutateWorld(mutator);
+    return;
+  }
+  mutator(world);
+}
+
+function addToHotbarForWorld(world: WorldState, materialId: MaterialId, amount: number = 1): boolean {
+  const player = getOrCreatePlayer(world);
+  return addToHotbarHelper(player.hotbar, materialId, amount);
+}
+
+function removeActiveSlotForWorld(world: WorldState): boolean {
+  const player = getOrCreatePlayer(world);
+  const success = removeFromHotbarSlotHelper(player.hotbar, player.activeHotbarSlot);
+  if (!success) return false;
+  if (player.hotbar[player.activeHotbarSlot]?.kind === "empty") {
+    for (let offset = 1; offset < player.hotbar.length; offset++) {
+      const prev = player.activeHotbarSlot - offset;
+      if (prev < 0) break;
+      if (player.hotbar[prev].kind !== "empty") {
+        player.activeHotbarSlot = prev;
+        break;
+      }
+    }
+  }
+  return true;
 }
 
 function enqueuePlayCommand(world: WorldState, command: GameplayCommand): void {
@@ -74,7 +113,7 @@ function canDescendObjectFootprint(world: WorldState, anchorX: number, anchorY: 
   return true;
 }
 
-export function handleHarvestInputAt(world: WorldState, gx: number, gy: number): boolean {
+export function handleHarvestInputAt(world: WorldState, gx: number, gy: number, editor?: LocalTransportEditorCapability): boolean {
   if (state.toolMode === "play") {
     const cluster = findFlowerCluster(world.grid, gx, gy);
     if (!cluster || cluster.size === 0) {
@@ -85,22 +124,25 @@ export function handleHarvestInputAt(world: WorldState, gx: number, gy: number):
     return true;
   }
 
-  const harvested = harvestFlowerCluster(world.grid, gx, gy);
-  if (harvested <= 0) return false;
-
-  const player = getLocalPlayer();
-  player.inventory.flowers += harvested;
-  for (let i = 0; i < harvested; i++) {
-    addToHotbar(MaterialId.Seed);
-    if (nextBool(world.random, 0.1)) addToHotbar(MaterialId.Seed);
-  }
-  if (state.hoverPixel) {
-    state.snip = { px: state.hoverPixel.x, py: state.hoverPixel.y, startTime: performance.now() };
-  }
-  return true;
+  let handled = false;
+  mutateWorldWithEditor(editor, world, (targetWorld) => {
+    const harvested = harvestFlowerCluster(targetWorld.grid, gx, gy);
+    if (harvested <= 0) return;
+    const player = getOrCreatePlayer(targetWorld);
+    player.inventory.flowers += harvested;
+    for (let index = 0; index < harvested; index++) {
+      addToHotbarForWorld(targetWorld, MaterialId.Seed);
+      if (nextBool(targetWorld.random, 0.1)) addToHotbarForWorld(targetWorld, MaterialId.Seed);
+    }
+    if (state.hoverPixel) {
+      state.snip = { px: state.hoverPixel.x, py: state.hoverPixel.y, startTime: performance.now() };
+    }
+    handled = true;
+  });
+  return handled;
 }
 
-export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number): boolean {
+export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number, editor?: LocalTransportEditorCapability): boolean {
   if (state.toolMode === "play") {
     const player = getLocalPlayer();
     enqueuePlayCommand(world, {
@@ -118,71 +160,71 @@ export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number)
   if (!hotbarMat) return false;
   if (!withinPlacementRange(gx, gy)) return false;
 
-  const materialId = hotbarMat.materialId;
-  const matDef = MATERIALS[materialId];
-  const grid = world.grid;
-
-  if (matDef.placement.kind === "object") {
-    const offsets = getObjectOffsets(materialId);
-    if (offsets.length === 0) return false;
-
-    if (!canPlaceObjectFootprint(world, materialId, gx, gy, offsets)) {
-      return false;
-    }
-
-    let restY = gy;
-    const fallsWhenAirborne = materialId === MaterialId.Torch || materialId === MaterialId.Stone;
-    if (fallsWhenAirborne) {
-      while (canDescendObjectFootprint(world, gx, restY + 1, offsets)) {
-        restY += 1;
-      }
-    }
-
-    if (!removeFromActiveSlot()) return false;
-    const objectId = allocateObjectId(world);
-
-    // Some objects (torches, stones) placed in the air fall to the ground
-    // with an animation instead of snapping into place.
-    if (fallsWhenAirborne) {
-      const fallingRestY = restY;
-      if (fallingRestY > gy) {
-        world.fallingObjects[objectId] = createDefaultFallingObjectState(objectId, materialId, gx, gy, fallingRestY, 0, offsets);
-        return true;
-      }
-    }
-
-    for (const [dx, dy] of offsets) {
-      const x = gx + dx;
-      const y = gy + dy;
-      if (!grid.inBounds(x, y)) continue;
-      placeWorldCell(world, x, y, materialId, { objectId });
-      if (materialId === MaterialId.Faucet) grid.setFaucetFlow(x, y, 1);
-    }
-    return true;
-  }
-
-  // Brush-paint
-  const r = state.brushSize;
   let placed = false;
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy > r * r) continue;
-      const x = gx + dx;
-      const y = gy + dy;
-      if (!grid.inBounds(x, y)) continue;
-      if (!withinPlacementRange(x, y)) continue;
-      if (!canPlaceOver(grid, x, y, materialId)) continue;
-      if (!removeFromActiveSlot()) return placed;
-      placeWorldCell(world, x, y, materialId);
+  mutateWorldWithEditor(editor, world, (targetWorld) => {
+    const materialId = hotbarMat.materialId;
+    const matDef = MATERIALS[materialId];
+    const grid = targetWorld.grid;
+
+    if (matDef.placement.kind === "object") {
+      const offsets = getObjectOffsets(materialId);
+      if (offsets.length === 0) return;
+
+      if (!canPlaceObjectFootprint(targetWorld, materialId, gx, gy, offsets)) {
+        return;
+      }
+
+      let restY = gy;
+      const fallsWhenAirborne = materialId === MaterialId.Torch || materialId === MaterialId.Stone;
+      if (fallsWhenAirborne) {
+        while (canDescendObjectFootprint(targetWorld, gx, restY + 1, offsets)) {
+          restY += 1;
+        }
+      }
+
+      if (!removeActiveSlotForWorld(targetWorld)) return;
+      const objectId = allocateObjectId(targetWorld);
+
+      if (fallsWhenAirborne) {
+        const fallingRestY = restY;
+        if (fallingRestY > gy) {
+          targetWorld.fallingObjects[objectId] = createDefaultFallingObjectState(objectId, materialId, gx, gy, fallingRestY, 0, offsets);
+          placed = true;
+          return;
+        }
+      }
+
+      for (const [dx, dy] of offsets) {
+        const x = gx + dx;
+        const y = gy + dy;
+        if (!grid.inBounds(x, y)) continue;
+        placeWorldCell(targetWorld, x, y, materialId, { objectId });
+        if (materialId === MaterialId.Faucet) grid.setFaucetFlow(x, y, 1);
+      }
       placed = true;
+      return;
     }
-  }
+
+    const r = state.brushSize;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r) continue;
+        const x = gx + dx;
+        const y = gy + dy;
+        if (!grid.inBounds(x, y)) continue;
+        if (!withinPlacementRange(x, y)) continue;
+        if (!canPlaceOver(grid, x, y, materialId)) continue;
+        if (!removeActiveSlotForWorld(targetWorld)) return;
+        placeWorldCell(targetWorld, x, y, materialId);
+        placed = true;
+      }
+    }
+  });
   return placed;
 }
 
 /** Wires pointer events on `canvas` to paint or stamp the selected material into `grid`. */
-export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSize: number): void {
-  const grid = world.grid;
+export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSize: number, editor?: LocalTransportEditorCapability): void {
   let painting = false;
   let lastGridPos: { x: number; y: number } | null = null;
 
@@ -197,7 +239,7 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
   };
 
   /** Returns true if placing `matId` can overwrite what's currently at (x, y). */
-  const canPlaceOver = (x: number, y: number, matId: MaterialId): boolean => {
+  const canPlaceOver = (grid: Grid, x: number, y: number, matId: MaterialId): boolean => {
     const existing = grid.get(x, y);
     if (existing === MaterialId.Empty) return true;
     if (matId === MaterialId.Empty) return true;
@@ -210,18 +252,21 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
     if (!withinPlacementRange(gx, gy)) return;
     const r = state.brushSize;
     const material = state.selectedMaterial;
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (dx * dx + dy * dy > r * r) continue;
-        const x = gx + dx;
-        const y = gy + dy;
-        if (!grid.inBounds(x, y)) continue;
-        if (!withinPlacementRange(x, y)) continue;
-        if (canPlaceOver(x, y, material)) {
-          placeWorldCell(world, x, y, material);
+    mutateWorldWithEditor(editor, world, (targetWorld) => {
+      const grid = targetWorld.grid;
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (dx * dx + dy * dy > r * r) continue;
+          const x = gx + dx;
+          const y = gy + dy;
+          if (!grid.inBounds(x, y)) continue;
+          if (!withinPlacementRange(x, y)) continue;
+          if (canPlaceOver(grid, x, y, material)) {
+            placeWorldCell(targetWorld, x, y, material);
+          }
         }
       }
-    }
+    });
   };
 
   // Paint along the segment from the last known position so fast drags leave a solid stroke.
@@ -245,18 +290,20 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
     const materialId = state.selectedMaterial;
     const material = MATERIALS[materialId];
     if (material.placement.kind !== "object") return;
-    const offsets = getObjectOffsets(materialId);
-    if (!canPlaceObjectFootprint(world, materialId, gx, gy, offsets)) return;
-    const objectId = allocateObjectId(world);
-    for (const [dx, dy] of offsets) {
-      const x = gx + dx;
-      const y = gy + dy;
-      placeWorldCell(world, x, y, materialId, { objectId });
-      // Faucets start on low flow
-      if (materialId === MaterialId.Faucet) {
-        grid.setFaucetFlow(x, y, 1);
+    mutateWorldWithEditor(editor, world, (targetWorld) => {
+      const grid = targetWorld.grid;
+      const offsets = getObjectOffsets(materialId);
+      if (!canPlaceObjectFootprint(targetWorld, materialId, gx, gy, offsets)) return;
+      const objectId = allocateObjectId(targetWorld);
+      for (const [dx, dy] of offsets) {
+        const x = gx + dx;
+        const y = gy + dy;
+        placeWorldCell(targetWorld, x, y, materialId, { objectId });
+        if (materialId === MaterialId.Faucet) {
+          grid.setFaucetFlow(x, y, 1);
+        }
       }
-    }
+    });
   };
 
   /** Flood-fill all connected faucet cells and cycle their flow state. */
@@ -273,33 +320,39 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
       });
       return true;
     }
-    if (grid.get(gx, gy) !== MaterialId.Faucet) return false;
-    const visited = new Set<number>();
-    const queue: [number, number][] = [[gx, gy]];
-    const key = (x: number, y: number) => y * grid.width + x;
-    visited.add(key(gx, gy));
-    const cells: [number, number][] = [];
-    while (queue.length > 0) {
-      const [x, y] = queue.shift()!;
-      cells.push([x, y]);
-      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (!grid.inBounds(nx, ny)) continue;
-        const k = key(nx, ny);
-        if (visited.has(k)) continue;
-        if (grid.get(nx, ny) === MaterialId.Faucet) {
-          visited.add(k);
-          queue.push([nx, ny]);
+
+    let handled = false;
+    mutateWorldWithEditor(editor, world, (targetWorld) => {
+      const grid = targetWorld.grid;
+      if (grid.get(gx, gy) !== MaterialId.Faucet) return;
+      const visited = new Set<number>();
+      const queue: [number, number][] = [[gx, gy]];
+      const key = (x: number, y: number) => y * grid.width + x;
+      visited.add(key(gx, gy));
+      const cells: [number, number][] = [];
+      while (queue.length > 0) {
+        const [x, y] = queue.shift()!;
+        cells.push([x, y]);
+        for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (!grid.inBounds(nx, ny)) continue;
+          const k = key(nx, ny);
+          if (visited.has(k)) continue;
+          if (grid.get(nx, ny) === MaterialId.Faucet) {
+            visited.add(k);
+            queue.push([nx, ny]);
+          }
         }
       }
-    }
-    const current = grid.getFaucetFlow(gx, gy);
-    const next = (current + 1) % 3;
-    for (const [x, y] of cells) {
-      grid.setFaucetFlow(x, y, next);
-    }
-    return true;
+      const current = grid.getFaucetFlow(gx, gy);
+      const next = (current + 1) % 3;
+      for (const [x, y] of cells) {
+        grid.setFaucetFlow(x, y, next);
+      }
+      handled = true;
+    });
+    return handled;
   };
 
   const start = (clientX: number, clientY: number) => {
@@ -307,7 +360,7 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
     // Clicking a faucet cycles its flow state
     if (cycleFaucet(pos.x, pos.y)) return;
     // Clicking a bloomed flower harvests it instead of painting
-    if (handleHarvestInputAt(world, pos.x, pos.y)) {
+    if (handleHarvestInputAt(world, pos.x, pos.y, editor)) {
       return;
     }
     if (state.toolMode === "play" && hasPickaxeEquipped()) {
@@ -317,7 +370,7 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
     }
     // Place from hotbar material slot (works in play mode)
     if (state.toolMode === "play" && getActiveHotbarMaterial()) {
-      placeHotbarMaterialAt(world, pos.x, pos.y);
+      placeHotbarMaterialAt(world, pos.x, pos.y, editor);
       painting = false;
       lastGridPos = null;
       return;

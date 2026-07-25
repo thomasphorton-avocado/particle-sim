@@ -185,6 +185,37 @@ test("LocalTransport clears the hotbar slot after one-unit object placement and 
   assert.equal(clientWorldAfterSecond.grid.get(10, 10), MaterialId.Faucet);
 });
 
+test("LocalTransport isolates client state objects and does not expose authority accessors", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId);
+
+  const firstState = transport.getClientState();
+  firstState.clientWorld.players[actorId].input.left = true;
+  const secondState = transport.getClientState();
+
+  assert.equal(secondState.clientWorld.players[actorId].input.left, false);
+  assert.equal(typeof transport.getClientWorld, "function");
+  assert.equal(typeof transport.getClientSnapshot, "function");
+  assert.equal("getAuthoritativeWorld" in transport, false);
+  assert.equal("createEditorAccess" in transport, false);
+});
+
+test("LocalTransport binds owner-only commands to the local actor and rejects stale revisions without mutating authority", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId);
+  const clientWorldBefore = transport.getClientWorld();
+
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: clientWorldBefore.worldRevision + 1 });
+  transport.advanceTick();
+
+  const results = transport.getLastCommandResults();
+  assert.equal(results.length, 1);
+  assert.equal(results[0].kind, "rejected");
+  assert.equal(results[0].code, "revision");
+  assert.equal(transport.getClientWorld().paused, false);
+  assert.equal(transport.getClientWorld().worldRevision, clientWorldBefore.worldRevision);
+});
+
 test("LocalTransport clears the brush stack when it is fully consumed and preserves positive counts for partial consumption", () => {
   const { world, actorId } = createWorldWithPlayer();
   const player = world.players[actorId];

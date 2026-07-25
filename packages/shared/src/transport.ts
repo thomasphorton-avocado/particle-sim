@@ -20,7 +20,6 @@ export interface TransportClientState {
 export type TransportListener = (state: TransportClientState) => void;
 
 export interface LocalTransportEditorCapability {
-  getAuthoritativeWorld(): WorldState;
   replaceWorld(world: WorldState): void;
   mutateWorld(mutator: (world: WorldState) => void): void;
 }
@@ -123,16 +122,11 @@ export class LocalTransport {
     this.#publish();
   }
 
-  #getAuthoritativeWorldForEditor(): WorldState {
-    return this.#world;
-  }
-
   #createEditorCapability(): LocalTransportEditorCapability {
     return {
-      getAuthoritativeWorld: () => this.#getAuthoritativeWorldForEditor(),
       replaceWorld: (world: WorldState) => this.#replaceWorldForEditor(world),
       mutateWorld: (mutator: (world: WorldState) => void) => {
-        const world = this.#getAuthoritativeWorldForEditor();
+        const world = cloneWorldState(this.#world);
         mutator(world);
         this.#replaceWorldForEditor(world);
       },

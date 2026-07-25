@@ -1,9 +1,9 @@
 import "./style.css";
-import { MATERIALS, MaterialId, createStarterWorld, findFlowerCluster, normalizePlayerInput, type PlayerInputState } from "@particle-sim/shared";
+import { MATERIALS, MaterialId, createLocalTransportSession, createPlayerId, createStarterWorld, findFlowerCluster, normalizePlayerInput, type PlayerInputState } from "@particle-sim/shared";
 import { Renderer } from "./renderer";
 import { attachInput } from "./input";
 import { buildUi } from "./ui";
-import { state, getActiveHotbarMaterial, getLocalPlayer, replaceWorldForEditor } from "./state";
+import { state, getActiveHotbarMaterial, getLocalPlayer } from "./state";
 import { createCharacter, attachCharacterInput, getCharacterInputState, drawCharacter } from "./character";
 import { createInputEdgeBuffer, consumeBufferedInputs } from "./input-buffer";
 import { createPresentationSnapshot, getInterpolatedPlayerSnapshot, interpolatePresentationSnapshot } from "./render-snapshots";
@@ -13,7 +13,8 @@ const CELL_SIZE = 5;
 const TICK_MS = 1000 / 60;
 const MAX_TICKS_PER_FRAME = 8;
 
-replaceWorldForEditor(createStarterWorld({ roomId: "room_default" }));
+const session = createLocalTransportSession(createStarterWorld({ roomId: "room_default" }), createPlayerId("player_1"));
+state.transport = session.transport;
 const grid = state.world.grid;
 
 const uiRoot = document.querySelector<HTMLDivElement>("#ui-root")!;
@@ -21,7 +22,7 @@ buildUi(uiRoot, grid);
 
 const canvas = document.querySelector<HTMLCanvasElement>("#sim-canvas")!;
 const renderer = new Renderer(canvas, grid, CELL_SIZE);
-attachInput(canvas, state.world, CELL_SIZE);
+attachInput(canvas, state.world, CELL_SIZE, session.editor);
 
 const runtime = createCharacter(grid);
 state.character = runtime;

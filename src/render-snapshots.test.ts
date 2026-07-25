@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createDefaultWorldState, MaterialId } from "@particle-sim/shared";
-import { createPresentationSnapshot, interpolatePresentationSnapshot } from "./render-snapshots";
+import { createDefaultPlayerState, createDefaultWorldState, createPlayerId, MaterialId } from "@particle-sim/shared";
+import { createPresentationSnapshot, interpolatePresentationSnapshot, resolvePresentationRenderState } from "./render-snapshots";
 
 describe("presentation snapshots", () => {
   it("interpolates midpoint values and keeps snapshots immutable", () => {
@@ -60,5 +60,26 @@ describe("presentation snapshots", () => {
       materialId: MaterialId.Stone,
       offsets: [[0, 0]],
     });
+  });
+
+  it("uses the latest published world for render presentation without re-restoring from transport", () => {
+    const previousWorld = createDefaultWorldState("snapshot_latest_previous");
+    const latestWorld = createDefaultWorldState("snapshot_latest_current");
+    const playerId = createPlayerId("player_1");
+    const localPlayer = createDefaultPlayerState(playerId);
+    localPlayer.x = 9;
+    localPlayer.y = 7;
+    localPlayer.vy = 1.5;
+    latestWorld.players[playerId] = localPlayer;
+    latestWorld.grid.set(3, 4, MaterialId.Sand);
+
+    const previousSnapshot = createPresentationSnapshot(previousWorld);
+    const currentSnapshot = createPresentationSnapshot(latestWorld);
+    const renderState = resolvePresentationRenderState(latestWorld, previousSnapshot, currentSnapshot, playerId, 0.37, false);
+
+    expect(renderState.grid).toBe(latestWorld.grid);
+    expect(renderState.interpolatedPresentationSnapshot).toBeDefined();
+    expect(renderState.interpolatedPlayerSnapshot).toEqual({ x: 9, y: 7, vy: 1.5 });
+    expect(renderState.interpolatedPresentationSnapshot.players.get("player_1")).toEqual({ x: 9, y: 7, vy: 1.5 });
   });
 });

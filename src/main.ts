@@ -6,7 +6,7 @@ import { buildUi } from "./ui";
 import { state, getActiveHotbarMaterial, getLocalPlayer } from "./state";
 import { createCharacter, attachCharacterInput, getCharacterInputState, drawCharacter } from "./character";
 import { createInputEdgeBuffer, consumeBufferedInputs } from "./input-buffer";
-import { createPresentationSnapshot, getInterpolatedPlayerSnapshot, interpolatePresentationSnapshot } from "./render-snapshots";
+import { createPresentationSnapshot, resolvePresentationRenderState } from "./render-snapshots";
 import { enqueueInputStateCommand, enqueueMineTransitionCommand, processProductionTick } from "./production-tick";
 
 const CELL_SIZE = 5;
@@ -33,8 +33,9 @@ let wasHidden = document.hidden;
 let hidden = document.hidden;
 const inputBuffer = createInputEdgeBuffer();
 attachCharacterInput(inputBuffer);
-let previousPresentationSnapshot = createPresentationSnapshot(state.transport.getClientWorld());
-let currentPresentationSnapshot = createPresentationSnapshot(state.transport.getClientWorld());
+let previousPresentationSnapshot = createPresentationSnapshot(state.world);
+let currentPresentationSnapshot = createPresentationSnapshot(state.world);
+let currentPresentationWorldRevision = state.world.worldRevision;
 let previousMineHeld = false;
 
 function getBufferedInputs(): { movement: PlayerInputState; mineHeld: boolean } {
@@ -68,8 +69,9 @@ function loop(): void {
     wasHidden = hidden;
   }
 
-  const shouldRenderCurrentSnapshot = paused || hidden || shouldResetClockAnchor;
-  if (shouldRenderCurrentSnapshot) {
+  const presentationRevisionBeforeTicks = currentPresentationWorldRevision;
+  const clockResetRequiresCurrentSnapshot = paused || hidden || shouldResetClockAnchor;
+  if (clockResetRequiresCurrentSnapshot) {
     accumulatorMs = 0;
   } else {
     accumulatorMs += frameDeltaMs;
@@ -85,28 +87,37 @@ function loop(): void {
       previousMineHeld = bufferedInputs.mineHeld;
     }
     processProductionTick(state.world);
-    const clientWorld = state.transport.getClientWorld();
-    currentPresentationSnapshot = createPresentationSnapshot(clientWorld);
+    currentPresentationSnapshot = createPresentationSnapshot(state.world);
+    currentPresentationWorldRevision = state.world.worldRevision;
     accumulatorMs -= TICK_MS;
     ticksThisFrame += 1;
   }
 
+  const publicationChangedOutsideTicks = ticksThisFrame === 0 && state.world.worldRevision !== presentationRevisionBeforeTicks;
+  if (publicationChangedOutsideTicks) {
+    accumulatorMs = 0;
+    previousPresentationSnapshot = currentPresentationSnapshot;
+    currentPresentationSnapshot = createPresentationSnapshot(state.world);
+    currentPresentationWorldRevision = state.world.worldRevision;
+  }
+
+  const shouldRenderCurrentSnapshot = clockResetRequiresCurrentSnapshot || publicationChangedOutsideTicks;
   const displayAlpha = shouldRenderCurrentSnapshot
     ? 1
     : accumulatorMs >= TICK_MS
       ? 1
       : Math.min(Math.max(accumulatorMs / TICK_MS, 0), 1);
-  const clientGrid = state.transport.getClientWorld().grid;
-  const interpolatedPresentationSnapshot = shouldRenderCurrentSnapshot
-    ? currentPresentationSnapshot
-    : interpolatePresentationSnapshot(previousPresentationSnapshot, currentPresentationSnapshot, displayAlpha);
-  renderer.draw(clientGrid, interpolatedPresentationSnapshot);
-  const interpolatedPlayer = getInterpolatedPlayerSnapshot(
+  const renderState = resolvePresentationRenderState(
+    state.world,
     previousPresentationSnapshot,
     currentPresentationSnapshot,
     state.localPlayerId,
     displayAlpha,
+    shouldRenderCurrentSnapshot,
   );
+  const clientGrid = renderState.grid;
+  renderer.draw(clientGrid, renderState.interpolatedPresentationSnapshot);
+  const interpolatedPlayer = renderState.interpolatedPlayerSnapshot;
   if (interpolatedPlayer) {
     drawCharacter(
       renderer.getCtx(),

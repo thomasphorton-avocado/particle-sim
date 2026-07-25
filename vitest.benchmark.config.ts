@@ -9,7 +9,6 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
-    exclude: ['src/**/*.benchmark.test.ts'],
+    include: ['src/render-read-path.benchmark.test.ts'],
   },
 });

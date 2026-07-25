@@ -15,16 +15,16 @@ const MAX_TICKS_PER_FRAME = 8;
 
 const session = createLocalTransportSession(createStarterWorld({ roomId: "room_default" }), createPlayerId("player_1"));
 state.transport = session.transport;
-const grid = state.world.grid;
+const initialGrid = state.world.grid;
 
 const uiRoot = document.querySelector<HTMLDivElement>("#ui-root")!;
-buildUi(uiRoot, grid);
+buildUi(uiRoot, session.editor);
 
 const canvas = document.querySelector<HTMLCanvasElement>("#sim-canvas")!;
-const renderer = new Renderer(canvas, grid, CELL_SIZE);
+const renderer = new Renderer(canvas, initialGrid, CELL_SIZE);
 attachInput(canvas, state.world, CELL_SIZE, session.editor);
 
-const runtime = createCharacter(grid);
+const runtime = createCharacter(initialGrid);
 state.character = runtime;
 let lastTime = performance.now();
 let accumulatorMs = 0;
@@ -152,7 +152,7 @@ function loop(): void {
     if (hoveredCluster) {
       let hasFlower = false;
       for (const idx of hoveredCluster) {
-        if ((grid.ids[idx] as MaterialId) === MaterialId.Flower) {
+        if ((clientGrid.ids[idx] as MaterialId) === MaterialId.Flower) {
           hasFlower = true;
           break;
         }

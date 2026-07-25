@@ -1,4 +1,4 @@
-import { Grid, MATERIALS, MaterialId, type HotbarItem } from "@particle-sim/shared";
+import { MATERIALS, MaterialId, type HotbarItem, type LocalTransportEditorCapability } from "@particle-sim/shared";
 import { getLocalPlayer, setDayNightPreset, state } from "./state";
 import { setTouchControl } from "./character";
 import { buildMetadata, getVersionBadgeDetails } from "./version";
@@ -19,7 +19,7 @@ const PALETTE: MaterialId[] = [
   MaterialId.Empty,
 ];
 
-export function buildUi(root: HTMLElement, grid: Grid): void {
+export function buildUi(root: HTMLElement, editor: LocalTransportEditorCapability): void {
   const toolbar = document.createElement("div");
   toolbar.className = "toolbar";
 
@@ -144,7 +144,9 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
   clearBtn.textContent = "Clear";
   clearBtn.addEventListener("click", () => {
     if (state.toolMode === "play") return;
-    grid.clear();
+    editor.mutateWorld((world) => {
+      world.grid.clear();
+    });
   });
 
   actionGroup.append(pauseBtn, clearBtn);

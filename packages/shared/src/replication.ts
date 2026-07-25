@@ -352,6 +352,11 @@ function validateWorldSnapshotMetadataField(field: string, value: unknown): Worl
   return { field: field as WorldMetadataDelta["field"], value };
 }
 
+function canonicalizeWorldStateDto(worldState: WorldStateDto): WorldStateDto {
+  const restored = deserializeWorldState(worldState);
+  return serializeWorldState(restored);
+}
+
 function validateWorldDelta(value: unknown): WorldDelta {
   const obj = assertObject(value, "world delta");
   const version = assertInteger(requireField(obj, "version", "worldDelta.version"), "worldDelta.version", 1, 1) as typeof WORLD_SNAPSHOT_SCHEMA_VERSION;
@@ -367,12 +372,20 @@ function validateWorldDelta(value: unknown): WorldDelta {
   const players = (requireField(obj, "players", "worldDelta.players") as unknown[]).map((entry) => {
     const playerObj = assertObject(entry, "worldDelta.players[]");
     const playerId = validatePlayerId(requireField(playerObj, "playerId", "worldDelta.players[].playerId"), "worldDelta.players[].playerId");
-    return { playerId, state: validatePlayerStateDto(requireField(playerObj, "state", "worldDelta.players[].state")) };
+    const state = validatePlayerStateDto(requireField(playerObj, "state", "worldDelta.players[].state"));
+    if (playerId !== state.id) {
+      throw new TypeError("worldDelta.players[].playerId must match playerDelta.state.id");
+    }
+    return { playerId, state };
   });
   const fallingObjects = (requireField(obj, "fallingObjects", "worldDelta.fallingObjects") as unknown[]).map((entry) => {
     const objectObj = assertObject(entry, "worldDelta.fallingObjects[]");
     const objectId = validateObjectId(requireField(objectObj, "objectId", "worldDelta.fallingObjects[].objectId"), "worldDelta.fallingObjects[].objectId");
-    return { objectId, state: validateFallingObjectStateDto(requireField(objectObj, "state", "worldDelta.fallingObjects[].state")) };
+    const state = validateFallingObjectStateDto(requireField(objectObj, "state", "worldDelta.fallingObjects[].state"));
+    if (objectId !== state.id) {
+      throw new TypeError("worldDelta.fallingObjects[].objectId must match fallingObjectDelta.state.id");
+    }
+    return { objectId, state };
   });
   const metadata = (requireField(obj, "metadata", "worldDelta.metadata") as unknown[]).map((entry) => {
     const metadataObj = assertObject(entry, "worldDelta.metadata[]");
@@ -519,8 +532,7 @@ function validateWorldStateSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
   if (snapshot.worldState.schemaVersion !== WORLD_STATE_SCHEMA_VERSION) {
     throw new TypeError("snapshot.worldState.schemaVersion is unsupported");
   }
-  const restored = deserializeWorldState(snapshot.worldState);
-  const normalizedWorldState = serializeWorldState(restored);
+  const normalizedWorldState = canonicalizeWorldStateDto(snapshot.worldState);
   const expectedChecksum = computeWorldChecksum(normalizedWorldState);
   if (snapshot.checksum !== expectedChecksum) {
     throw new TypeError("snapshot.checksum does not match the canonical world state");
@@ -618,11 +630,12 @@ export function applyWorldDeltaToSnapshot(snapshot: WorldSnapshot, delta: WorldD
     applyMetadataDelta(nextWorldState, metadataDelta);
   }
   nextWorldState.worldRevision = normalizedDelta.targetRevision;
+  const canonicalWorldState = canonicalizeWorldStateDto(nextWorldState);
   const nextWorldStateSnapshot: WorldSnapshot = {
     version: normalizedSnapshot.version,
-    worldRevision: normalizedDelta.targetRevision,
-    checksum: computeWorldChecksum(nextWorldState),
-    worldState: nextWorldState,
+    worldRevision: canonicalWorldState.worldRevision,
+    checksum: computeWorldChecksum(canonicalWorldState),
+    worldState: canonicalWorldState,
   };
   return nextWorldStateSnapshot;
 }

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   allocateObjectId,
+  createDefaultFallingObjectState,
   createDefaultWorldState,
   createWorldSnapshot,
   restoreWorldState,
@@ -134,6 +135,87 @@ test("tampered snapshots are rejected without mutating the caller-owned payload"
   const invalidDeltaSnapshotBeforeApply = JSON.parse(JSON.stringify(invalidDeltaSnapshot));
   assert.throws(() => applyWorldDeltaToSnapshot(invalidDeltaSnapshot, invalidDelta), /objectId/i);
   assert.deepEqual(invalidDeltaSnapshot, invalidDeltaSnapshotBeforeApply);
+});
+
+test("applyWorldDeltaToSnapshot rejects placed-vs-falling object ID collisions", () => {
+  const world = createDefaultWorldState("room_object_collision");
+  const fallingObjectId = createObjectId("object_falling");
+  world.fallingObjects[fallingObjectId] = createDefaultFallingObjectState(fallingObjectId, MaterialId.Stone, 0, 0, 0, 0, []);
+  const snapshot = createWorldSnapshot(world);
+  const snapshotBeforeApply = JSON.parse(JSON.stringify(snapshot));
+  const delta = {
+    version: 1,
+    baseRevision: world.worldRevision,
+    targetRevision: world.worldRevision + 1,
+    cells: [{ index: 0, materialId: MaterialId.Stone, shade: 0, auxiliary: 0, objectId: fallingObjectId, revision: 1 }],
+    players: [],
+    fallingObjects: [],
+    metadata: [],
+  };
+  assert.throws(() => applyWorldDeltaToSnapshot(snapshot, delta), /object/i);
+  assert.deepEqual(snapshot, snapshotBeforeApply);
+});
+
+test("delta envelope IDs must match inner state IDs and leave the snapshot unchanged", () => {
+  const world = createDefaultWorldState("room_id_mismatch");
+  const playerId = createPlayerId("player_env");
+  world.players[playerId] = {
+    id: playerId,
+    x: 1,
+    y: 2,
+    vx: 0,
+    vy: 0,
+    width: 3,
+    height: 5,
+    grounded: false,
+    facing: 1,
+    airTime: 0,
+    airTicks: 0,
+    previousJumpHeld: false,
+    swingElapsedTicks: null,
+    faucetCooldownUntilTick: 0,
+    crouching: false,
+    lookingUp: false,
+    swimming: false,
+    input: { left: false, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false, mineHeld: false },
+    inventory: { flowers: 0 },
+    hotbar: Array(10).fill({ kind: "empty" }),
+    activeHotbarSlot: 0,
+    inventoryRevision: 0,
+    pendingRefunds: {},
+  };
+  const fallingObjectId = createObjectId("object_env");
+  world.fallingObjects[fallingObjectId] = createDefaultFallingObjectState(fallingObjectId, MaterialId.Stone, 0, 0, 0, 0, []);
+  const snapshot = createWorldSnapshot(world);
+  const snapshotBeforeApply = JSON.parse(JSON.stringify(snapshot));
+
+  const mismatchedPlayerDelta = {
+    version: 1,
+    baseRevision: world.worldRevision,
+    targetRevision: world.worldRevision + 1,
+    cells: [],
+    players: [{ playerId, state: { ...world.players[playerId], id: createPlayerId("player_state") } }],
+    fallingObjects: [],
+    metadata: [],
+  };
+  assert.throws(() => decodeWorldDelta(mismatchedPlayerDelta), /playerId/i);
+  const playerApplySnapshot = JSON.parse(JSON.stringify(snapshot));
+  assert.throws(() => applyWorldDeltaToSnapshot(playerApplySnapshot, mismatchedPlayerDelta), /playerId/i);
+  assert.deepEqual(playerApplySnapshot, snapshotBeforeApply);
+
+  const mismatchedFallingObjectDelta = {
+    version: 1,
+    baseRevision: world.worldRevision,
+    targetRevision: world.worldRevision + 1,
+    cells: [],
+    players: [],
+    fallingObjects: [{ objectId: fallingObjectId, state: createDefaultFallingObjectState(createObjectId("object_state"), MaterialId.Stone, 0, 0, 0, 0, []) }],
+    metadata: [],
+  };
+  assert.throws(() => decodeWorldDelta(mismatchedFallingObjectDelta), /objectId/i);
+  const fallingObjectApplySnapshot = JSON.parse(JSON.stringify(snapshot));
+  assert.throws(() => applyWorldDeltaToSnapshot(fallingObjectApplySnapshot, mismatchedFallingObjectDelta), /objectId/i);
+  assert.deepEqual(fallingObjectApplySnapshot, snapshotBeforeApply);
 });
 
 test("delta decoding rejects brush cells carrying an object ID", () => {

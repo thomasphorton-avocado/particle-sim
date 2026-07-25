@@ -8,6 +8,10 @@ function dispatchMouseEvent(type: "mousedown" | "mouseup"): void {
   window.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
 }
 
+function dispatchKeyboardEvent(type: "keydown" | "keyup", key: string): void {
+  window.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, key }));
+}
+
 function dispatchPointerEvent(type: "pointerdown" | "pointerup" | "pointercancel" | "lostpointercapture", options: { pointerId?: number; pointerType?: string; button?: number } = {}): void {
   const event = new Event(type, { bubbles: true, cancelable: true }) as Event & { pointerId: number; pointerType: string; button: number };
   Object.defineProperties(event, {
@@ -25,6 +29,20 @@ describe("character mine input aggregation", () => {
     buffer = createInputEdgeBuffer();
     attachCharacterInput(buffer);
     resetCharacterInputState();
+  });
+
+  it("surfaces solo keyboard movement and mine controls through the input state", () => {
+    dispatchKeyboardEvent("keydown", "ArrowLeft");
+    dispatchKeyboardEvent("keydown", " ");
+    dispatchKeyboardEvent("keydown", "f");
+
+    expect(getCharacterInputState()).toMatchObject({ left: true, jump: true, mine: true });
+
+    dispatchKeyboardEvent("keyup", "ArrowLeft");
+    dispatchKeyboardEvent("keyup", " ");
+    dispatchKeyboardEvent("keyup", "f");
+
+    expect(getCharacterInputState()).toMatchObject({ left: false, jump: false, mine: false });
   });
 
   it("keeps mine true after mouse release while touch remains held", () => {

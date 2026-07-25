@@ -1,4 +1,4 @@
-import { Grid, MATERIALS, MaterialId, createCommandEnvelope, enqueueCommand, getNextActorSequence, type HotbarItem } from "@particle-sim/shared";
+import { Grid, MATERIALS, MaterialId, createCommandEnvelope, getNextActorSequence, type HotbarItem } from "@particle-sim/shared";
 import { getLocalPlayer, setDayNightPreset, state } from "./state";
 import { setTouchControl } from "./character";
 import { buildMetadata, getVersionBadgeDetails } from "./version";
@@ -136,8 +136,10 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
       ? { type: "resume_world" as const, expectedWorldRevision: state.world.worldRevision }
       : { type: "pause_world" as const, expectedWorldRevision: state.world.worldRevision };
     const envelope = createCommandEnvelope(actorId, getNextActorSequence(state.world, actorId), state.world.tick, command);
-    enqueueCommand(state.world, envelope);
-    pauseBtn.textContent = state.world.paused ? "Resume" : "Pause";
+    state.transport.enqueueCommand(envelope);
+    requestAnimationFrame(() => {
+      pauseBtn.textContent = state.world.paused ? "Resume" : "Pause";
+    });
   });
 
   const clearBtn = document.createElement("button");
@@ -352,15 +354,17 @@ export function buildUi(root: HTMLElement, grid: Grid): void {
       state.world.tick,
       { type: "select_slot", slot: index, expectedInventoryRevision: player.inventoryRevision },
     );
-    enqueueCommand(state.world, envelope);
-    for (let j = 0; j < slotElements.length; j++) {
-      slotElements[j].classList.toggle("active", j === index);
-    }
-    // Auto-switch tool mode based on item
-    const item = player.hotbar[index];
-    if (item.kind === "pickaxe" || item.kind === "material") {
-      setToolMode("play", pickaxeBtn);
-    }
+    state.transport.enqueueCommand(envelope);
+    requestAnimationFrame(() => {
+      const updatedPlayer = getLocalPlayer();
+      for (let j = 0; j < slotElements.length; j++) {
+        slotElements[j].classList.toggle("active", j === updatedPlayer.activeHotbarSlot);
+      }
+      const item = updatedPlayer.hotbar[index];
+      if (item.kind === "pickaxe" || item.kind === "material") {
+        setToolMode("play", pickaxeBtn);
+      }
+    });
   }
 
   // Refresh hotbar display each frame

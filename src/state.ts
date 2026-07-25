@@ -1,5 +1,6 @@
 import {
   MaterialId,
+  LocalTransport,
   addToHotbar as addToHotbarHelper,
   cloneHotbar,
   cloneInventory,
@@ -26,6 +27,7 @@ export interface SnipAnimation {
 
 export interface SimState {
   world: WorldState;
+  transport: LocalTransport;
   localPlayerId: PlayerId;
   selectedMaterial: MaterialId;
   brushSize: number;
@@ -57,8 +59,12 @@ function syncWorldDefaults(): void {
   player.hotbar = player.hotbar.length === 10 ? cloneHotbar(player.hotbar) : createDefaultHotbar();
 }
 
-export const state: SimState = {
-  world: createDefaultWorldState("room_default"),
+const defaultWorld = createDefaultWorldState("room_default");
+let transport = new LocalTransport(defaultWorld);
+
+const stateBase: SimState = {
+  world: transport.getAuthoritativeWorld(),
+  transport,
   localPlayerId: createPlayerId("player_1"),
   selectedMaterial: MaterialId.Sand,
   brushSize: 4,
@@ -69,6 +75,30 @@ export const state: SimState = {
   toolMode: "play",
 };
 
+Object.defineProperty(stateBase, "world", {
+  get() {
+    return transport.getAuthoritativeWorld();
+  },
+  set(nextWorld: WorldState) {
+    transport.resetWorld(nextWorld);
+  },
+  enumerable: true,
+  configurable: true,
+});
+
+Object.defineProperty(stateBase, "transport", {
+  get() {
+    return transport;
+  },
+  set(nextTransport: LocalTransport) {
+    transport = nextTransport;
+  },
+  enumerable: true,
+  configurable: true,
+});
+
+export const state = stateBase;
+
 syncWorldDefaults();
 
 export function getLocalPlayer(): PlayerState {
@@ -76,14 +106,7 @@ export function getLocalPlayer(): PlayerState {
 }
 
 export function setDayNightPreset(preset: DayNightPreset): void {
-  const presets: Record<DayNightPreset, number> = {
-   morning: 0.0,
-   day: 0.25,
-   dusk: 0.5,
-   night: 0.75,
-  };
-  state.world.time.dayNightCycle = presets[preset];
-  state.world.time.dayNightTick = Math.round(presets[preset] * 18_000) % 18_000;
+  state.transport.setTimePreset(preset);
 }
 
 /** Returns true if the currently selected hotbar item is a pickaxe. */

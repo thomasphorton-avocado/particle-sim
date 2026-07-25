@@ -3,13 +3,14 @@ import { createCommandEnvelope, getNextActorSequence, processPendingCommands, ty
 import { type PlayerId } from "./ids.js";
 import { type WorldState, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
 import { createPlayerId } from "./ids.js";
-import { applyWorldDeltaToSnapshotState, cloneWorldDelta, cloneWorldSnapshot, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
+import { applyWorldDeltaToSnapshotState, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
+import type { DirtyCellEntry } from "./dirty-journal.js";
 
 export type DayNightPreset = "morning" | "day" | "dusk" | "night";
 
 export interface TransportClientState {
   revision: number;
-  snapshot: WorldSnapshot;
+  snapshot: WorldSnapshot | null;
   delta: WorldDelta | null;
   clientWorld: WorldState;
   lastCommandResults: ReadonlyArray<CommandResult>;
@@ -49,6 +50,8 @@ export class LocalTransport {
   #lastCommandResults: CommandResult[];
   #publishedCellRevisions: Map<number, number>;
   #editorCapability: LocalTransportEditorCapability;
+  #publishInProgress: boolean;
+  #publishQueued: boolean;
 
   constructor(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1")) {
     this.#world = cloneWorldState(world);
@@ -59,6 +62,8 @@ export class LocalTransport {
     this.#lastCommandResults = [];
     this.#publishedCellRevisions = new Map<number, number>();
     this.#editorCapability = this.#createEditorCapability();
+    this.#publishInProgress = false;
+    this.#publishQueued = false;
   }
 
   subscribe(listener: TransportListener): () => void {
@@ -101,6 +106,7 @@ export class LocalTransport {
     const results = processPendingCommands(this.#world);
     this.#lastCommandResults = results;
     if (this.#world.paused) {
+      clearPendingInputs(this.#world);
       this.#publish();
       return;
     }
@@ -159,7 +165,7 @@ export class LocalTransport {
       ? this.#materializeSnapshot(replica)
       : (replica.canonicalSnapshot
         ? cloneWorldSnapshot(replica.canonicalSnapshot)
-        : cloneWorldSnapshot(replica.snapshot));
+        : null);
     return {
       revision: replica.revision,
       snapshot,
@@ -184,47 +190,96 @@ export class LocalTransport {
   }
 
   #publish(): void {
-    const nextDelta = this.#buildDelta(this.#replica.snapshot);
-    const lastCommandResults = this.#lastCommandResults.map((result) => cloneCommandResult(result));
-    for (const subscriber of this.#subscribers) {
-      this.#updateReplica(subscriber.replica, nextDelta);
-      subscriber.replica.lastCommandResults = lastCommandResults;
-      subscriber.listener(this.#buildClientState(subscriber.replica));
+    if (this.#publishInProgress) {
+      this.#publishQueued = true;
+      return;
     }
-    this.#updateReplica(this.#replica, nextDelta);
-    this.#replica.lastCommandResults = lastCommandResults;
-    if (nextDelta !== null || this.#world.grid.dirtyCells.size > 0) {
-      this.#world.grid.dirtyCells.flush();
+
+    this.#publishInProgress = true;
+    const errors: unknown[] = [];
+    try {
+      let shouldRun = true;
+      while (shouldRun) {
+        shouldRun = false;
+        const iterationErrors = this.#publishOnce();
+        errors.push(...iterationErrors);
+        if (this.#publishQueued) {
+          this.#publishQueued = false;
+          shouldRun = true;
+        }
+      }
+    } finally {
+      this.#publishInProgress = false;
+    }
+
+    if (errors.length > 0) {
+      const message = errors.map((error) => error instanceof Error ? error.message : String(error)).join("; ");
+      throw new AggregateError(errors, `LocalTransport subscriber publication failed: ${message}`);
     }
   }
 
-  #buildDelta(previousSnapshot: WorldSnapshot): WorldDelta | null {
+  #publishOnce(): unknown[] {
+    const pendingCellEntries = this.#world.grid.dirtyCells.readPending();
+    const nextDelta = this.#buildDelta(this.#replica.snapshot, pendingCellEntries);
+    const lastCommandResults = this.#lastCommandResults.map((result) => cloneCommandResult(result));
+    const subscribers = this.#subscribers.slice();
+    this.#commitPublication(nextDelta, lastCommandResults, pendingCellEntries);
+
+    const errors: unknown[] = [];
+    for (const subscriber of subscribers) {
+      try {
+        this.#updateReplica(subscriber.replica, nextDelta);
+        subscriber.replica.lastCommandResults = lastCommandResults;
+        subscriber.listener(this.#buildClientState(subscriber.replica));
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    return errors;
+  }
+
+  #commitPublication(nextDelta: WorldDelta | null, lastCommandResults: CommandResult[], _pendingCellEntries: DirtyCellEntry[]): void {
+    this.#updateReplica(this.#replica, nextDelta);
+    this.#replica.lastCommandResults = lastCommandResults;
+    this.#world.grid.dirtyCells.flush();
+    if (nextDelta !== null) {
+      for (const cellDelta of nextDelta.cells) {
+        this.#publishedCellRevisions.set(cellDelta.index, cellDelta.revision);
+      }
+    }
+    if (nextDelta !== null) {
+      this.#world.worldRevision = nextDelta.targetRevision;
+    }
+  }
+
+  #buildDelta(previousSnapshot: WorldSnapshot, dirtyCellEntries: DirtyCellEntry[]): WorldDelta | null {
     return createWorldDelta(previousSnapshot, this.#world, {
-      dirtyCellEntries: this.#world.grid.dirtyCells.readPending(),
+      dirtyCellEntries,
       publishedCellRevisions: this.#publishedCellRevisions,
     });
   }
 
   #updateReplica(replica: TransportReplica, delta: WorldDelta | null): void {
     replica.delta = delta ? cloneWorldDelta(delta) : null;
+    const authorityRevision = this.#world.worldRevision;
     if (!delta) {
-      replica.revision = this.#world.worldRevision;
+      replica.revision = authorityRevision;
+      replica.snapshot.worldRevision = authorityRevision;
+      replica.snapshot.worldState.worldRevision = authorityRevision;
+      replica.snapshot.checksum = "";
       replica.canonicalSnapshot = null;
       return;
     }
     applyWorldDeltaToSnapshotState(replica.snapshot.worldState, delta);
-    replica.snapshot.worldRevision = delta.targetRevision;
-    replica.snapshot.worldState.worldRevision = delta.targetRevision;
+    replica.snapshot.worldRevision = authorityRevision;
+    replica.snapshot.worldState.worldRevision = authorityRevision;
     replica.snapshot.checksum = "";
-    replica.revision = delta.targetRevision;
+    replica.revision = authorityRevision;
     replica.canonicalSnapshot = null;
-    this.#applyDeltaToWorld(replica.clientWorld, delta);
-    for (const cellDelta of delta.cells) {
-      this.#publishedCellRevisions.set(cellDelta.index, cellDelta.revision);
-    }
+    this.#applyDeltaToWorld(replica.clientWorld, delta, authorityRevision);
   }
 
-  #applyDeltaToWorld(world: WorldState, delta: WorldDelta): void {
+  #applyDeltaToWorld(world: WorldState, delta: WorldDelta, authorityRevision: number): void {
     for (const cellDelta of delta.cells) {
       world.grid.applyCellState(cellDelta.index, cellDelta.materialId, cellDelta.shade, cellDelta.auxiliary, cellDelta.objectId as Parameters<typeof world.grid.applyCellState>[4], cellDelta.revision);
     }
@@ -233,19 +288,19 @@ export class LocalTransport {
         delete world.players[playerDelta.playerId];
         continue;
       }
-      world.players[playerDelta.playerId] = playerDelta.state as typeof world.players[string];
+      world.players[playerDelta.playerId] = cloneDeltaValue(playerDelta.state) as typeof world.players[string];
     }
     for (const fallingObjectDelta of delta.fallingObjects) {
       if (fallingObjectDelta.state === null) {
         delete world.fallingObjects[fallingObjectDelta.objectId];
         continue;
       }
-      world.fallingObjects[fallingObjectDelta.objectId] = fallingObjectDelta.state as typeof world.fallingObjects[string];
+      world.fallingObjects[fallingObjectDelta.objectId] = cloneDeltaValue(fallingObjectDelta.state) as typeof world.fallingObjects[string];
     }
     for (const metadataDelta of delta.metadata) {
       this.#applyMetadataDelta(world, metadataDelta);
     }
-    world.worldRevision = delta.targetRevision;
+    world.worldRevision = authorityRevision;
   }
 
   #applyMetadataDelta(world: WorldState, delta: WorldDelta["metadata"][number]): void {
@@ -260,16 +315,16 @@ export class LocalTransport {
         world.paused = delta.value as typeof world.paused;
         return;
       case "time":
-        world.time = delta.value as typeof world.time;
+        world.time = cloneDeltaValue(delta.value) as typeof world.time;
         return;
       case "weather":
-        world.weather = delta.value as typeof world.weather;
+        world.weather = cloneDeltaValue(delta.value) as typeof world.weather;
         return;
       case "random":
-        world.random = delta.value as typeof world.random;
+        world.random = cloneDeltaValue(delta.value) as typeof world.random;
         return;
       case "ownerPlayerId":
-        world.ownerPlayerId = delta.value as typeof world.ownerPlayerId;
+        world.ownerPlayerId = cloneDeltaValue(delta.value) as typeof world.ownerPlayerId;
         return;
       case "worldRevision":
         world.worldRevision = delta.value as typeof world.worldRevision;
@@ -284,7 +339,7 @@ export class LocalTransport {
         world.nextObjectOrdinal = delta.value as typeof world.nextObjectOrdinal;
         return;
       case "commandLedger":
-        world.commandLedger = delta.value as typeof world.commandLedger;
+        world.commandLedger = cloneDeltaValue(delta.value) as typeof world.commandLedger;
         return;
     }
   }
@@ -300,6 +355,17 @@ export class LocalTransport {
 
 export function createLocalTransportSession(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1")): LocalTransportSession {
   return LocalTransport.createSession(world, ownerPlayerId);
+}
+
+function clearPendingInputs(world: WorldState): void {
+  for (const player of Object.values(world.players)) {
+    player.input.left = false;
+    player.input.right = false;
+    player.input.jumpHeld = false;
+    player.input.crouchHeld = false;
+    player.input.lookUpHeld = false;
+    player.input.mineHeld = false;
+  }
 }
 
 function buildResolvedInputs(world: WorldState, ownerPlayerId: PlayerId, input?: PlayerInputState): Record<string, PlayerInputState> {

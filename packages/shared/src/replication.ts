@@ -119,7 +119,125 @@ function compareStringCodeUnits(left: string, right: string): number {
 }
 
 function clonePlainObject<T>(value: T): T {
-  return globalThis.structuredClone ? globalThis.structuredClone(value) as T : JSON.parse(JSON.stringify(value)) as T;
+  return cloneObjectTree(value);
+}
+
+function cloneObjectTree<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneObjectTree(entry)) as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const objectValue = value as Record<string, unknown>;
+    const clone = Object.create(Object.getPrototypeOf(objectValue)) as Record<string, unknown>;
+    for (const [key, entry] of Object.entries(objectValue)) {
+      clone[key] = cloneObjectTree(entry);
+    }
+    return clone as unknown as T;
+  }
+  return value;
+}
+
+function createImmutableClone<T>(value: T): T {
+  if (Array.isArray(value)) {
+    const clone = [] as unknown[];
+    const length = value.length;
+    for (let index = 0; index < length; index += 1) {
+      clone[index] = createImmutableClone(value[index]);
+    }
+    for (let index = 0; index < length; index += 1) {
+      const child = clone[index];
+      Object.defineProperty(clone, index, {
+        enumerable: true,
+        configurable: true,
+        get: () => child,
+        set: () => undefined,
+      });
+    }
+    Object.defineProperty(clone, "push", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => length,
+    });
+    Object.defineProperty(clone, "pop", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => undefined,
+    });
+    Object.defineProperty(clone, "shift", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => undefined,
+    });
+    Object.defineProperty(clone, "unshift", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => length,
+    });
+    Object.defineProperty(clone, "splice", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => [],
+    });
+    Object.defineProperty(clone, "sort", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => clone,
+    });
+    Object.defineProperty(clone, "reverse", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => clone,
+    });
+    Object.defineProperty(clone, "fill", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => clone,
+    });
+    Object.defineProperty(clone, "copyWithin", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => clone,
+    });
+    return clone as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const objectValue = value as Record<string, unknown>;
+    const clone = Object.create(Object.getPrototypeOf(objectValue)) as Record<string, unknown>;
+    for (const [key, entry] of Object.entries(objectValue)) {
+      const child = createImmutableClone(entry);
+      Object.defineProperty(clone, key, {
+        enumerable: true,
+        configurable: true,
+        get: () => child,
+        set: () => undefined,
+      });
+    }
+    return clone as unknown as T;
+  }
+  return value;
+}
+
+export function cloneDeltaValue<T>(value: T): T {
+  if (Array.isArray(value) || (value !== null && typeof value === "object")) {
+    return clonePlainObject(value);
+  }
+  return value;
+}
+
+function cloneDeltaValueForPublication<T>(value: T): T {
+  if (Array.isArray(value) || (value !== null && typeof value === "object")) {
+    return createImmutableClone(clonePlainObject(value));
+  }
+  return value;
 }
 
 function cloneGridState(grid: Grid): Grid {
@@ -177,7 +295,7 @@ export function cloneWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
 }
 
 export function cloneWorldDelta(delta: WorldDelta): WorldDelta {
-  return clonePlainObject(delta);
+  return cloneDeltaValue(delta);
 }
 
 function stableStringify(value: unknown): string {
@@ -276,7 +394,7 @@ function validateCellDelta(value: unknown): WorldCellDelta {
 function validatePlayerStateDto(value: unknown): PlayerStateDto {
   const obj = assertObject(value, "player delta state");
   const playerId = validatePlayerId(requireField(obj, "id", "playerDelta.state.id"), "playerDelta.state.id");
-  const inventory = assertObject(requireField(obj, "inventory", "playerDelta.state.inventory"), "playerDelta.state.inventory");
+  const inventory = cloneDeltaValue(assertObject(requireField(obj, "inventory", "playerDelta.state.inventory"), "playerDelta.state.inventory"));
   for (const [key, entry] of Object.entries(inventory)) {
     if (key === "flowers") {
       assertInteger(entry, `playerDelta.state.inventory.${key}`, 0, 1000000);
@@ -290,14 +408,14 @@ function validatePlayerStateDto(value: unknown): PlayerStateDto {
     throw new TypeError("playerDelta.state.hotbar must contain exactly 10 slots");
   }
   const activeHotbarSlot = assertInteger(requireField(obj, "activeHotbarSlot", "playerDelta.state.activeHotbarSlot"), "playerDelta.state.activeHotbarSlot", 0, 9);
-  const input = assertObject(requireField(obj, "input", "playerDelta.state.input"), "playerDelta.state.input");
+  const input = cloneDeltaValue(assertObject(requireField(obj, "input", "playerDelta.state.input"), "playerDelta.state.input"));
   assertBoolean(input["left"], "playerDelta.state.input.left");
   assertBoolean(input["right"], "playerDelta.state.input.right");
   assertBoolean(input["jumpHeld"], "playerDelta.state.input.jumpHeld");
   assertBoolean(input["crouchHeld"], "playerDelta.state.input.crouchHeld");
   assertBoolean(input["lookUpHeld"], "playerDelta.state.input.lookUpHeld");
   assertBoolean(input["mineHeld"], "playerDelta.state.input.mineHeld");
-  const pendingRefunds = assertObject(requireField(obj, "pendingRefunds", "playerDelta.state.pendingRefunds"), "playerDelta.state.pendingRefunds");
+  const pendingRefunds = cloneDeltaValue(assertObject(requireField(obj, "pendingRefunds", "playerDelta.state.pendingRefunds"), "playerDelta.state.pendingRefunds"));
   for (const [, entry] of Object.entries(pendingRefunds)) {
     assertInteger(entry, "playerDelta.state.pendingRefunds.*", 0, 1000000);
   }
@@ -331,7 +449,7 @@ function validatePlayerStateDto(value: unknown): PlayerStateDto {
       mineHeld: Boolean(input["mineHeld"]),
     },
     inventory: inventory as PlayerStateDto["inventory"],
-    hotbar: hotbarValues.map((entry) => entry as PlayerStateDto["hotbar"][number]),
+    hotbar: hotbarValues.map((entry) => cloneDeltaValue(entry) as PlayerStateDto["hotbar"][number]),
     activeHotbarSlot,
     inventoryRevision: assertInteger(requireField(obj, "inventoryRevision", "playerDelta.state.inventoryRevision"), "playerDelta.state.inventoryRevision", 0, MAX_SAFE_INTEGER),
     pendingRefunds: pendingRefunds as Record<string, number>,
@@ -362,8 +480,8 @@ function validateFallingObjectStateDto(value: unknown): FallingObjectStateDto {
     y: assertFiniteNumber(requireField(obj, "y", "fallingObjectDelta.state.y"), "fallingObjectDelta.state.y"),
     restY: assertInteger(requireField(obj, "restY", "fallingObjectDelta.state.restY"), "fallingObjectDelta.state.restY"),
     vy: assertFiniteNumber(requireField(obj, "vy", "fallingObjectDelta.state.vy"), "fallingObjectDelta.state.vy"),
-    offsets: normalizedOffsets,
-    provenance: requireField(obj, "provenance", "fallingObjectDelta.state.provenance") as FallingObjectStateDto["provenance"],
+    offsets: normalizedOffsets.map((entry) => [...entry] as [number, number]),
+    provenance: cloneDeltaValue(requireField(obj, "provenance", "fallingObjectDelta.state.provenance")) as FallingObjectStateDto["provenance"],
   };
 }
 
@@ -386,7 +504,7 @@ function validateWeatherStateDto(value: unknown): WeatherStateDto {
 
 function validateCommandLedgerDto(value: unknown): CommandLedgerDto {
   const obj = assertObject(value, "commandLedger delta state");
-  const actorHighWater = assertObject(requireField(obj, "actorHighWater", "commandLedgerDelta.state.actorHighWater"), "commandLedgerDelta.state.actorHighWater");
+  const actorHighWater = cloneDeltaValue(assertObject(requireField(obj, "actorHighWater", "commandLedgerDelta.state.actorHighWater"), "commandLedgerDelta.state.actorHighWater"));
   const recent = assertArray(requireField(obj, "recent", "commandLedgerDelta.state.recent"), "commandLedgerDelta.state.recent");
   const normalized: CommandLedgerDto = { actorHighWater: {}, recent: [] };
   for (const [key, entry] of Object.entries(actorHighWater)) {
@@ -394,7 +512,7 @@ function validateCommandLedgerDto(value: unknown): CommandLedgerDto {
   }
   for (const item of recent) {
     const receipt = assertObject(item, "commandLedgerDelta.state.recent[]");
-    normalized.recent.push(receipt as unknown as CommandLedgerDto["recent"][number]);
+    normalized.recent.push(cloneDeltaValue(receipt) as unknown as CommandLedgerDto["recent"][number]);
   }
   return normalized;
 }
@@ -413,15 +531,15 @@ function validateGameplayRandomStateDto(value: unknown): GameplayRandomState {
 }
 
 function validateWorldSnapshotMetadataField(field: string, value: unknown): WorldMetadataDelta {
-  return { field: field as WorldMetadataDelta["field"], value };
+  return { field: field as WorldMetadataDelta["field"], value: cloneDeltaValueForPublication(value) };
 }
 
 function serializePlayerState(player: WorldState["players"][string]): PlayerStateDto {
-  return clonePlainObject(player) as PlayerStateDto;
+  return cloneDeltaValueForPublication(player) as PlayerStateDto;
 }
 
 function serializeFallingObjectState(objectState: WorldState["fallingObjects"][string]): FallingObjectStateDto {
-  return clonePlainObject(objectState) as FallingObjectStateDto;
+  return cloneDeltaValueForPublication(objectState) as FallingObjectStateDto;
 }
 
 function buildCellDeltaEntries(world: WorldState, dirtyCellEntries: DirtyCellEntry[]): WorldCellDelta[] {
@@ -514,16 +632,17 @@ export function createWorldDelta(previousSnapshot: WorldSnapshot, world: WorldSt
                           ? world.nextObjectOrdinal
                           : world.commandLedger;
     if (stableStringify(previousValue) !== stableStringify(nextValue)) {
-      metadata.push({ field, value: nextValue });
+      metadata.push({ field, value: cloneDeltaValueForPublication(nextValue) });
     }
   }
   if (filteredCells.length === 0 && players.length === 0 && fallingObjects.length === 0 && metadata.length === 0) {
     return null;
   }
+  const targetRevision = Math.max(previousSnapshot.worldRevision + 1, world.worldRevision);
   return {
     version: WORLD_SNAPSHOT_SCHEMA_VERSION,
     baseRevision: previousSnapshot.worldRevision,
-    targetRevision: world.worldRevision,
+    targetRevision,
     gridDimensions: {
       width: world.grid.width,
       height: world.grid.height,
@@ -658,6 +777,9 @@ export function applyWorldDeltaToSnapshotState(worldState: WorldStateDto, delta:
     if (cellDelta.revision <= currentRevision) {
       throw new TypeError("worldDelta cell revision is stale");
     }
+    if (cellDelta.objectId !== null && Object.prototype.hasOwnProperty.call(worldState.fallingObjects, cellDelta.objectId)) {
+      throw new TypeError("worldDelta cell objectId collides with a falling object identity");
+    }
   }
   for (const cellDelta of delta.cells) {
     if (cellDelta.materialId === MaterialId.Empty && cellDelta.shade === 0 && cellDelta.auxiliary === 0 && cellDelta.objectId === null) {
@@ -679,14 +801,14 @@ export function applyWorldDeltaToSnapshotState(worldState: WorldStateDto, delta:
       delete worldState.players[playerDelta.playerId];
       continue;
     }
-    worldState.players[playerDelta.playerId] = playerDelta.state;
+    worldState.players[playerDelta.playerId] = cloneDeltaValue(playerDelta.state);
   }
   for (const fallingObjectDelta of delta.fallingObjects) {
     if (fallingObjectDelta.state === null) {
       delete worldState.fallingObjects[fallingObjectDelta.objectId];
       continue;
     }
-    worldState.fallingObjects[fallingObjectDelta.objectId] = fallingObjectDelta.state;
+    worldState.fallingObjects[fallingObjectDelta.objectId] = cloneDeltaValue(fallingObjectDelta.state);
   }
   for (const metadataDelta of delta.metadata) {
     applyMetadataDelta(worldState, metadataDelta);

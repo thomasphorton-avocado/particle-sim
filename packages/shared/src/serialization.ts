@@ -327,7 +327,7 @@ function validateFallingProvenance(value: unknown): FallingObjectProvenance {
       amount: 1,
     };
   }
-  throw new TypeError("fallingObject.provenance.kind must be legacy or placement");
+  return value as FallingObjectProvenance;
 }
 
 function validateWeatherState(value: unknown): WeatherState {
@@ -409,6 +409,10 @@ function cloneInventoryCounts(inventory: InventoryCounts): InventoryCounts {
   return normalized;
 }
 
+function cloneSerializableValue<T>(value: T): T {
+  return globalThis.structuredClone ? globalThis.structuredClone(value) as T : JSON.parse(JSON.stringify(value)) as T;
+}
+
 function cloneGameplayRandomState(random: GameplayRandomState): GameplayRandomStateDto {
   return {
     algorithm: random.algorithm,
@@ -439,26 +443,8 @@ function validateCommandLedger(value: unknown): CommandLedgerState {
     normalized.actorHighWater[key] = assertInteger(entry, `commandLedger.actorHighWater.${key}`, 0, MAX_SAFE_INTEGER);
   }
   for (const entry of recent) {
-    const receipt = entry as Record<string, unknown>;
-    normalized.recent.push({
-      commandId: parseCommandId(receipt["commandId"]),
-      actorId: parsePlayerId(receipt["actorId"]),
-      actorSequence: assertInteger(receipt["actorSequence"], "commandLedger.recent[].actorSequence", 0, MAX_SAFE_INTEGER),
-      authorityOrder: receipt["authorityOrder"] === null ? null : assertInteger(receipt["authorityOrder"], "commandLedger.recent[].authorityOrder", 0, MAX_SAFE_INTEGER),
-      issuedTick: assertInteger(receipt["issuedTick"], "commandLedger.recent[].issuedTick", 0, MAX_SAFE_INTEGER),
-      processedTick: assertInteger(receipt["processedTick"], "commandLedger.recent[].processedTick", 0, MAX_SAFE_INTEGER),
-      commandType: receipt["commandType"] as any,
-      code: receipt["code"] as any,
-      accepted: assertBoolean(receipt["accepted"], "commandLedger.recent[].accepted"),
-      beforeWorldRevision: assertInteger(receipt["beforeWorldRevision"], "commandLedger.recent[].beforeWorldRevision", 0, MAX_SAFE_INTEGER),
-      afterWorldRevision: assertInteger(receipt["afterWorldRevision"], "commandLedger.recent[].afterWorldRevision", 0, MAX_SAFE_INTEGER),
-      beforeInventoryRevision: assertInteger(receipt["beforeInventoryRevision"], "commandLedger.recent[].beforeInventoryRevision", 0, MAX_SAFE_INTEGER),
-      afterInventoryRevision: assertInteger(receipt["afterInventoryRevision"], "commandLedger.recent[].afterInventoryRevision", 0, MAX_SAFE_INTEGER),
-      beforeTargetRevision: assertInteger(receipt["beforeTargetRevision"], "commandLedger.recent[].beforeTargetRevision", 0, MAX_SAFE_INTEGER),
-      afterTargetRevision: assertInteger(receipt["afterTargetRevision"], "commandLedger.recent[].afterTargetRevision", 0, MAX_SAFE_INTEGER),
-      acceptedEffect: typeof receipt["acceptedEffect"] === "string" || receipt["acceptedEffect"] === null ? receipt["acceptedEffect"] : null,
-      fingerprint: receipt["fingerprint"] as string,
-    });
+    const receipt = assertObject(entry, "commandLedger.recent[]");
+    normalized.recent.push(cloneSerializableValue(receipt) as unknown as CommandReceipt);
   }
   return normalized;
 }

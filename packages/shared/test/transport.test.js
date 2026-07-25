@@ -35,6 +35,7 @@ test("LocalTransport publishes snapshots and isolated client state after accepte
   assert.equal(lastResults.length, 1);
   assert.equal(lastResults[0].kind, "accepted");
   assert.equal(clientState.revision, transport.getClientWorld().worldRevision);
+  assert.ok(clientState.snapshot);
   assert.equal(clientState.snapshot.worldRevision, transport.getClientWorld().worldRevision);
   assert.equal(clientWorld.players[actorId].input.left, true);
   assert.equal(world.players[actorId].input.left, false);
@@ -316,8 +317,7 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
     state.clientWorld.players[actorId].input.left = false;
     state.clientWorld.players[actorId].activeHotbarSlot = 7;
     state.clientWorld.grid.set(0, 0, MaterialId.Sand);
-    state.snapshot.worldState.paused = false;
-    state.snapshot.worldState.players[actorId].input.left = false;
+    assert.equal(state.snapshot, null);
     state.delta.gridDimensions.width = 999;
     state.lastCommandResults[0].code = "invalid_command";
   });
@@ -332,8 +332,7 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
   assert.equal(firstSubscriberState.clientWorld.players[actorId].input.left, false);
   assert.equal(firstSubscriberState.clientWorld.players[actorId].activeHotbarSlot, 7);
   assert.equal(firstSubscriberState.clientWorld.grid.get(0, 0), MaterialId.Sand);
-  assert.equal(firstSubscriberState.snapshot.worldState.paused, false);
-  assert.equal(firstSubscriberState.snapshot.worldState.players[actorId].input.left, false);
+  assert.equal(firstSubscriberState.snapshot, null);
   assert.equal(firstSubscriberState.delta.gridDimensions.width, 999);
   assert.equal(firstSubscriberState.lastCommandResults[0].code, "invalid_command");
 
@@ -341,8 +340,7 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
   assert.equal(secondSubscriberState.clientWorld.players[actorId].input.left, false);
   assert.equal(secondSubscriberState.clientWorld.players[actorId].activeHotbarSlot, 0);
   assert.equal(secondSubscriberState.clientWorld.grid.get(0, 0), MaterialId.Empty);
-  assert.equal(secondSubscriberState.snapshot.worldState.paused, true);
-  assert.equal(secondSubscriberState.snapshot.worldState.players[actorId].input.left, false);
+  assert.equal(secondSubscriberState.snapshot, null);
   assert.notEqual(secondSubscriberState.delta.gridDimensions.width, 999);
   assert.equal(secondSubscriberState.lastCommandResults[0].code, "accepted");
 
@@ -352,6 +350,75 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
   assert.equal(transport.getClientWorld().grid.get(0, 0), MaterialId.Empty);
   assert.equal(transport.getClientSnapshot().worldState.paused, true);
   assert.equal(transport.getClientState().lastCommandResults[0].code, "accepted");
+});
+
+test("LocalTransport commits canonical state and still notifies later listeners when an earlier subscriber throws", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const player = world.players[actorId];
+  player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
+    ? { kind: "material", materialId: MaterialId.Faucet, count: 1 }
+    : { kind: "empty" });
+  player.activeHotbarSlot = 0;
+
+  const { transport } = createLocalTransportSession(world, actorId);
+  const laterStates = [];
+
+  transport.subscribe(() => {
+    throw new Error("subscriber boom");
+  });
+  transport.subscribe((state) => {
+    laterStates.push(state);
+  });
+
+  transport.enqueueCommand({
+    type: "place",
+    x: 10,
+    y: 10,
+    brushRadius: 1,
+    expectedInventoryRevision: player.inventoryRevision,
+    expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
+  });
+
+  assert.throws(() => transport.advanceTick(), /LocalTransport subscriber publication failed/);
+
+  const clientWorld = transport.getClientWorld();
+  const clientState = transport.getClientState();
+  assert.equal(clientWorld.grid.get(10, 10), MaterialId.Faucet);
+  assert.equal(clientWorld.players[actorId].hotbar[0].kind, "empty");
+  assert.equal(clientState.revision, clientWorld.worldRevision);
+  assert.equal(laterStates.length, 1);
+  assert.equal(laterStates[0].clientWorld.grid.get(10, 10), MaterialId.Faucet);
+  assert.equal(laterStates[0].clientWorld.players[actorId].hotbar[0].kind, "empty");
+  assert.equal(laterStates[0].snapshot, null);
+});
+
+test("LocalTransport queues reentrant publication retries while skipping unsubscribed listeners", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId);
+  let firstListenerCalls = 0;
+  let secondListenerCalls = 0;
+
+  let unsubscribeFirst;
+  unsubscribeFirst = transport.subscribe((state) => {
+    firstListenerCalls += 1;
+    if (firstListenerCalls === 1) {
+      unsubscribeFirst();
+      transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: state.revision });
+      transport.advanceTick();
+    }
+  });
+
+  transport.subscribe(() => {
+    secondListenerCalls += 1;
+  });
+
+  transport.enqueueCommand({ type: "set_input_state", left: true, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false });
+  transport.advanceTick();
+
+  assert.equal(firstListenerCalls, 1);
+  assert.equal(secondListenerCalls, 2);
+  assert.equal(transport.getClientWorld().paused, true);
+  assert.equal(transport.getClientWorld().players[actorId].input.left, false);
 });
 
 test("LocalTransport flushes dirty journal entries after successful publication and avoids reprocessing stale cells", () => {
@@ -455,6 +522,7 @@ test("LocalTransport materializes canonical snapshots after deltas and supports 
 
   const explicitSnapshot = transport.getClientSnapshot();
   const explicitState = transport.getClientState();
+  assert.ok(explicitState.snapshot);
   assert.equal(explicitSnapshot.checksum, explicitState.snapshot.checksum);
   assert.equal(explicitSnapshot.worldRevision, transport.getClientWorld().worldRevision);
   assert.equal(explicitSnapshot.worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Faucet);
@@ -472,6 +540,7 @@ test("LocalTransport materializes canonical snapshots after deltas and supports 
   const unsubscribeAfterReplacement = transport.subscribe(() => {});
   unsubscribeAfterReplacement();
   const stateAfterResubscribe = transport.getClientState();
+  assert.ok(stateAfterResubscribe.snapshot);
   assert.equal(stateAfterResubscribe.snapshot.worldRevision, transport.getClientWorld().worldRevision);
 });
 

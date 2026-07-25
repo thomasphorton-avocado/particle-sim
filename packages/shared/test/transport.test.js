@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { LocalTransport, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createPlayerId } from "@particle-sim/shared";
+import { LocalTransport, MaterialId, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createPlayerId } from "@particle-sim/shared";
 
 function createWorldWithPlayer() {
   const world = createDefaultWorldState("room_transport");
@@ -68,4 +68,79 @@ test("LocalTransport pauses deterministic ticking and keeps revisions stable unt
   assert.equal(world.tick, beforeTick + 1);
   assert.equal(world.players[actorId].input.left, false);
   assert.equal(transport.getClientState().revision, world.worldRevision);
+});
+
+test("LocalTransport initializes placed faucets at low-flow and cycles them through the replicated client state", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const transport = new LocalTransport(world);
+  const player = world.players[actorId];
+  player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
+    ? { kind: "material", materialId: MaterialId.Faucet, count: 1 }
+    : { kind: "empty" });
+  player.activeHotbarSlot = 0;
+
+  const placeEnvelope = createCommandEnvelope(actorId, 1, 0, {
+    type: "place",
+    x: 10,
+    y: 10,
+    brushRadius: 1,
+    expectedInventoryRevision: player.inventoryRevision,
+    expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
+  });
+
+  transport.enqueueCommand(placeEnvelope);
+  transport.advanceTick();
+
+  const placeResults = transport.getLastCommandResults();
+  assert.equal(placeResults.length, 1);
+  assert.equal(placeResults[0].kind, "accepted");
+  assert.equal(player.hotbar[0].count, 0);
+  assert.equal(player.inventoryRevision, 1);
+
+  const objectId = world.grid.getObjectId(10, 10);
+  assert.ok(objectId);
+  const objectCells = world.grid.getObjectCellIndices(objectId);
+  assert.ok(objectCells.length > 0);
+  for (const index of objectCells) {
+    const x = index % world.grid.width;
+    const y = Math.floor(index / world.grid.width);
+    assert.equal(world.grid.get(x, y), MaterialId.Faucet);
+    assert.equal(world.grid.getObjectId(x, y), objectId);
+    assert.equal(world.grid.getFaucetFlow(x, y), 1);
+  }
+
+  const clientWorldAfterPlace = transport.getClientWorld();
+  for (const index of objectCells) {
+    const x = index % clientWorldAfterPlace.grid.width;
+    const y = Math.floor(index / clientWorldAfterPlace.grid.width);
+    assert.equal(clientWorldAfterPlace.grid.get(x, y), MaterialId.Faucet);
+    assert.equal(clientWorldAfterPlace.grid.getObjectId(x, y), objectId);
+    assert.equal(clientWorldAfterPlace.grid.getFaucetFlow(x, y), 1);
+  }
+
+  const cycleEnvelope = createCommandEnvelope(actorId, 2, 1, {
+    type: "cycle_faucet",
+    x: 10,
+    y: 10,
+    objectId,
+    expectedTargetRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
+  });
+
+  transport.enqueueCommand(cycleEnvelope);
+  transport.advanceTick();
+
+  const cycleResults = transport.getLastCommandResults();
+  assert.equal(cycleResults.length, 1);
+  assert.equal(cycleResults[0].kind, "accepted");
+  for (const index of objectCells) {
+    const x = index % world.grid.width;
+    const y = Math.floor(index / world.grid.width);
+    assert.equal(world.grid.getFaucetFlow(x, y), 2);
+  }
+  const clientWorldAfterCycle = transport.getClientWorld();
+  for (const index of objectCells) {
+    const x = index % clientWorldAfterCycle.grid.width;
+    const y = Math.floor(index / clientWorldAfterCycle.grid.width);
+    assert.equal(clientWorldAfterCycle.grid.getFaucetFlow(x, y), 2);
+  }
 });

@@ -1,6 +1,6 @@
 import { createCommandId, createPlayerId, parseCommandId, parseObjectId, parsePlayerId, type CommandId, type ObjectId, type PlayerId } from "./ids.js";
 import { cloneHotbar, type HotbarItem, type InventoryCounts } from "./inventory.js";
-import { Grid } from "./grid.js";
+import { assertAuxiliaryValueForMaterial, Grid } from "./grid.js";
 import { MATERIALS, MaterialId } from "./materials.js";
 import { findFlowerCluster } from "./harvest.js";
 import { hashVisualShade } from "./random.js";
@@ -646,12 +646,15 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
       }
     }
     const gridWrites: CommandGridWrite[] = [];
+    const initialAuxiliary = materialId === MaterialId.Faucet
+      ? assertAuxiliaryValueForMaterial(MaterialId.Faucet, 1)
+      : 0;
     if (!fallsWhenAirborne || restY <= command.y) {
       for (const [dx, dy] of offsets) {
         const x = command.x + dx;
         const y = command.y + dy;
         if (!world.grid.inBounds(x, y)) continue;
-        gridWrites.push({ x, y, id: materialId, shade: hashVisualShade(world.random.seed, x, y, materialId), auxiliary: 0, objectId });
+        gridWrites.push({ x, y, id: materialId, shade: hashVisualShade(world.random.seed, x, y, materialId), auxiliary: initialAuxiliary, objectId });
       }
     }
     const fallingObjects: CommandFallingObjectCreate[] = [];

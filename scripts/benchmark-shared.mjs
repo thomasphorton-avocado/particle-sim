@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   advanceWorldTick,
   createDefaultPlayerState,
   createDefaultWorldState,
+  computeWorldChecksum,
   createStarterWorld,
+  getWorldSnapshotMetrics,
   MaterialId,
   normalizePlayerInput,
   serializeWorldState,
@@ -139,7 +140,7 @@ function ensureMeasuredFallingObject(world, substepIndex) {
 }
 
 function serializeDigest(world) {
-  return createHash("sha256").update(JSON.stringify(serializeWorldState(world))).digest("hex");
+  return computeWorldChecksum(world);
 }
 
 function getGc(options = {}) {
@@ -193,6 +194,7 @@ function runScenario(name, schedule, options = {}) {
   gc();
   const finalMemory = getMemorySnapshot();
   const finalBytes = Buffer.byteLength(JSON.stringify(serializeWorldState(world)));
+  const finalSnapshotMetrics = getWorldSnapshotMetrics(world);
   const finalDigest = serializeDigest(world);
 
   const perTick = summarize(tickSamplesMs);
@@ -219,6 +221,10 @@ function runScenario(name, schedule, options = {}) {
       heapUsedBytes: finalMemory.heapUsedBytes,
       arrayBuffersBytes: finalMemory.arrayBuffersBytes,
       serializedStateBytes: finalBytes,
+    },
+    snapshotMetrics: {
+      byteSize: finalSnapshotMetrics.snapshotByteSize,
+      dirtyCellCount: finalSnapshotMetrics.dirtyCellCount,
     },
     digest: finalDigest,
   };

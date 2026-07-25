@@ -2,6 +2,7 @@ import { FLOWER_PALETTE, MaterialId } from "./materials.js";
 import { hashVisualShade } from "./random.js";
 import type { ObjectId } from "./ids.js";
 import type { WorldState } from "./world-state.js";
+import { DirtyCellJournal } from "./dirty-journal.js";
 
 function assertFiniteNumber(value: number, label: string): number {
   if (!Number.isFinite(value)) {
@@ -69,6 +70,7 @@ export class Grid {
   cellRevisions: Uint32Array;
   private updated: Uint8Array;
   private objectCellIndex: Map<string, Set<number>>;
+  readonly dirtyCells: DirtyCellJournal;
 
   constructor(width: number, height: number) {
     this.width = width;
@@ -80,6 +82,7 @@ export class Grid {
     this.cellRevisions = new Uint32Array(width * height);
     this.updated = new Uint8Array(width * height);
     this.objectCellIndex = new Map();
+    this.dirtyCells = new DirtyCellJournal();
   }
 
   index(x: number, y: number): number {
@@ -131,68 +134,49 @@ export class Grid {
     return this.ids[index] !== id || this.shade[index] !== shade || this.auxiliary[index] !== auxiliary || this.objectIds[index] !== objectId;
   }
 
+  private setCellState(index: number, id: MaterialId, shade: number, auxiliary: number, objectId: ObjectId | null): boolean {
+    const changed = this.tupleChanged(index, id, shade, auxiliary, objectId);
+    if (changed) {
+      this.incrementCellRevision(index);
+      this.dirtyCells.record(index, id, shade, auxiliary, objectId, this.cellRevisions[index]);
+    }
+    this.ids[index] = id;
+    this.shade[index] = shade;
+    this.auxiliary[index] = auxiliary;
+    this.setObjectIndexEntry(index, objectId);
+    this.objectIds[index] = objectId;
+    return changed;
+  }
+
   set(x: number, y: number, id: MaterialId, options?: GridSetOptions): void {
     if (!this.inBounds(x, y)) return;
     const i = this.index(x, y);
     const nextShade = options?.shade ?? 0;
     const nextAuxiliary = 0;
     const nextObjectId = options?.objectId ?? null;
-    if (this.tupleChanged(i, id, nextShade, nextAuxiliary, nextObjectId)) {
-      this.incrementCellRevision(i);
-    }
-    this.ids[i] = id;
-    this.shade[i] = nextShade;
-    this.auxiliary[i] = nextAuxiliary;
-    this.setObjectIndexEntry(i, nextObjectId);
+    this.setCellState(i, id, nextShade, nextAuxiliary, nextObjectId);
   }
 
   clear(): void {
     for (let i = 0; i < this.ids.length; i++) {
       if (this.ids[i] === MaterialId.Empty && this.shade[i] === 0 && this.auxiliary[i] === 0 && this.objectIds[i] === null) continue;
-      this.incrementCellRevision(i);
+      this.setCellState(i, MaterialId.Empty, 0, 0, null);
     }
-    this.ids.fill(MaterialId.Empty);
-    this.shade.fill(0);
-    this.auxiliary.fill(0);
-    this.objectIds.fill(null);
     this.objectCellIndex.clear();
   }
 
   swap(x1: number, y1: number, x2: number, y2: number): void {
     const i1 = this.index(x1, y1);
     const i2 = this.index(x2, y2);
-    const nextTuple1 = { id: this.ids[i2]!, shade: this.shade[i2]!, auxiliary: this.auxiliary[i2]!, objectId: this.objectIds[i2]! };
-    const nextTuple2 = { id: this.ids[i1]!, shade: this.shade[i1]!, auxiliary: this.auxiliary[i1]!, objectId: this.objectIds[i1]! };
-    const currentTuple1 = { id: this.ids[i1]!, shade: this.shade[i1]!, auxiliary: this.auxiliary[i1]!, objectId: this.objectIds[i1]! };
-    const currentTuple2 = { id: this.ids[i2]!, shade: this.shade[i2]!, auxiliary: this.auxiliary[i2]!, objectId: this.objectIds[i2]! };
-    if (currentTuple1.id !== nextTuple1.id || currentTuple1.shade !== nextTuple1.shade || currentTuple1.auxiliary !== nextTuple1.auxiliary || currentTuple1.objectId !== nextTuple1.objectId) {
-      this.incrementCellRevision(i1);
-    }
-    if (currentTuple2.id !== nextTuple2.id || currentTuple2.shade !== nextTuple2.shade || currentTuple2.auxiliary !== nextTuple2.auxiliary || currentTuple2.objectId !== nextTuple2.objectId) {
-      this.incrementCellRevision(i2);
-    }
-    const tmpId = this.ids[i1]!;
-    const tmpShade = this.shade[i1]!;
-    const tmpAuxiliary = this.auxiliary[i1]!;
-    const tmpObjectId = this.objectIds[i1]!;
-    this.ids[i1] = this.ids[i2]!;
-    this.shade[i1] = this.shade[i2]!;
-    this.auxiliary[i1] = this.auxiliary[i2]!;
-    this.objectIds[i1] = this.objectIds[i2]!;
-    this.ids[i2] = tmpId;
-    this.shade[i2] = tmpShade;
-    this.auxiliary[i2] = tmpAuxiliary;
-    this.objectIds[i2] = tmpObjectId;
-    this.setObjectIndexEntry(i1, this.objectIds[i1]);
-    this.setObjectIndexEntry(i2, this.objectIds[i2]);
+    const nextTuple1 = { id: this.ids[i2] as MaterialId, shade: this.shade[i2]!, auxiliary: this.auxiliary[i2]!, objectId: this.objectIds[i2]! };
+    const nextTuple2 = { id: this.ids[i1] as MaterialId, shade: this.shade[i1]!, auxiliary: this.auxiliary[i1]!, objectId: this.objectIds[i1]! };
+    this.setCellState(i1, nextTuple1.id, nextTuple1.shade, nextTuple1.auxiliary, nextTuple1.objectId);
+    this.setCellState(i2, nextTuple2.id, nextTuple2.shade, nextTuple2.auxiliary, nextTuple2.objectId);
   }
 
   setObjectCell(x: number, y: number, objectId: ObjectId): void {
     const i = this.assertInBounds(x, y);
-    const previousObjectId = this.objectIds[i];
-    const nextObjectId = objectId;
-    if (previousObjectId !== nextObjectId) this.incrementCellRevision(i);
-    this.setObjectIndexEntry(i, nextObjectId);
+    this.setCellState(i, this.ids[i] as MaterialId, this.shade[i], this.auxiliary[i], objectId);
   }
 
   getObjectId(x: number, y: number): ObjectId | null {
@@ -202,8 +186,7 @@ export class Grid {
 
   clearObjectCell(x: number, y: number): void {
     const i = this.assertInBounds(x, y);
-    if (this.objectIds[i] !== null) this.incrementCellRevision(i);
-    this.setObjectIndexEntry(i, null);
+    this.setCellState(i, this.ids[i] as MaterialId, this.shade[i], this.auxiliary[i], null);
   }
 
   hasObjectId(objectId: ObjectId): boolean {
@@ -244,8 +227,7 @@ export class Grid {
   setAuxiliaryValue(x: number, y: number, value: number): void {
     const i = this.assertInBounds(x, y);
     const integer = assertAuxiliaryValueForMaterial(this.get(x, y), value);
-    if (this.auxiliary[i] !== integer) this.incrementCellRevision(i);
-    this.auxiliary[i] = integer;
+    this.setCellState(i, this.ids[i] as MaterialId, this.shade[i], integer, this.objectIds[i]);
   }
 
   getVx(x: number, y: number): number {

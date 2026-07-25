@@ -269,3 +269,117 @@ test("LocalTransport clears the brush stack when it is fully consumed and preser
   assert.ok(partialClientPlayer.hotbar[0].count > 0);
   assert.equal(partialWorld.players[partialActorId].hotbar[0].kind, "material");
 });
+
+test("LocalTransport rejects owner-only pause and time commands for a different bound actor without authority mutation", () => {
+  const ownerActorId = createPlayerId("player_transport_owner");
+  const boundActorId = createPlayerId("player_transport_bound");
+  const world = createDefaultWorldState("room_transport_owner_mismatch");
+  world.ownerPlayerId = ownerActorId;
+  world.players[ownerActorId] = createDefaultPlayerState(ownerActorId);
+  world.players[boundActorId] = createDefaultPlayerState(boundActorId);
+  world.time.dayNightTick = 7;
+  world.time.dayNightCycle = 7 / 18000;
+
+  const { transport: pauseTransport } = createLocalTransportSession(world, boundActorId);
+  const initialRevision = pauseTransport.getClientWorld().worldRevision;
+
+  pauseTransport.enqueueCommand({ type: "pause_world", expectedWorldRevision: initialRevision });
+  pauseTransport.advanceTick();
+  const pauseResult = pauseTransport.getLastCommandResults()[0];
+  assert.equal(pauseResult.kind, "rejected");
+  assert.equal(pauseResult.code, "not_owner");
+  assert.equal(pauseTransport.getClientWorld().paused, false);
+  assert.equal(pauseTransport.getClientWorld().worldRevision, initialRevision);
+  assert.equal(pauseTransport.getClientWorld().ownerPlayerId, ownerActorId);
+
+  const { transport: timeTransport } = createLocalTransportSession(world, boundActorId);
+  timeTransport.enqueueCommand({ type: "set_time_preset", preset: "night", expectedWorldRevision: timeTransport.getClientWorld().worldRevision });
+  timeTransport.advanceTick();
+  const timeResult = timeTransport.getLastCommandResults()[0];
+  assert.equal(timeResult.kind, "rejected");
+  assert.equal(timeResult.code, "not_owner");
+  assert.equal(timeTransport.getClientWorld().time.dayNightTick, 8);
+  assert.equal(world.time.dayNightTick, 7);
+  assert.equal(world.ownerPlayerId, ownerActorId);
+});
+
+test("LocalTransport isolates subscriber callback state and preserves authoritative outcomes", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId);
+
+  let firstSubscriberState;
+  let secondSubscriberState;
+
+  transport.subscribe((state) => {
+    firstSubscriberState = state;
+    state.clientWorld.paused = false;
+    state.clientWorld.players[actorId].input.left = false;
+    state.clientWorld.players[actorId].activeHotbarSlot = 7;
+    state.clientWorld.grid.set(0, 0, MaterialId.Sand);
+    state.snapshot.worldState.paused = false;
+    state.snapshot.worldState.players[actorId].input.left = false;
+    state.delta.gridDimensions.width = 999;
+    state.lastCommandResults[0].code = "invalid_command";
+  });
+  transport.subscribe((state) => {
+    secondSubscriberState = state;
+  });
+
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.advanceTick();
+
+  assert.equal(firstSubscriberState.clientWorld.paused, false);
+  assert.equal(firstSubscriberState.clientWorld.players[actorId].input.left, false);
+  assert.equal(firstSubscriberState.clientWorld.players[actorId].activeHotbarSlot, 7);
+  assert.equal(firstSubscriberState.clientWorld.grid.get(0, 0), MaterialId.Sand);
+  assert.equal(firstSubscriberState.snapshot.worldState.paused, false);
+  assert.equal(firstSubscriberState.snapshot.worldState.players[actorId].input.left, false);
+  assert.equal(firstSubscriberState.delta.gridDimensions.width, 999);
+  assert.equal(firstSubscriberState.lastCommandResults[0].code, "invalid_command");
+
+  assert.equal(secondSubscriberState.clientWorld.paused, true);
+  assert.equal(secondSubscriberState.clientWorld.players[actorId].input.left, false);
+  assert.equal(secondSubscriberState.clientWorld.players[actorId].activeHotbarSlot, 0);
+  assert.equal(secondSubscriberState.clientWorld.grid.get(0, 0), MaterialId.Empty);
+  assert.equal(secondSubscriberState.snapshot.worldState.paused, true);
+  assert.equal(secondSubscriberState.snapshot.worldState.players[actorId].input.left, false);
+  assert.notEqual(secondSubscriberState.delta.gridDimensions.width, 999);
+  assert.equal(secondSubscriberState.lastCommandResults[0].code, "accepted");
+
+  assert.equal(transport.getClientWorld().paused, true);
+  assert.equal(transport.getClientWorld().players[actorId].input.left, false);
+  assert.equal(transport.getClientWorld().players[actorId].activeHotbarSlot, 0);
+  assert.equal(transport.getClientWorld().grid.get(0, 0), MaterialId.Empty);
+  assert.equal(transport.getClientSnapshot().worldState.paused, true);
+  assert.equal(transport.getClientState().lastCommandResults[0].code, "accepted");
+});
+
+test("LocalTransport constructor and editor replacement clone their input worlds", () => {
+  const initialWorld = createDefaultWorldState("room_transport_alias_constructor");
+  const actorId = createPlayerId("player_transport_alias_constructor");
+  initialWorld.players[actorId] = createDefaultPlayerState(actorId);
+
+  const { transport, editor } = createLocalTransportSession(initialWorld, actorId);
+  initialWorld.players[actorId].input.left = true;
+  initialWorld.grid.set(0, 0, MaterialId.Sand);
+  initialWorld.time = 99;
+
+  const clientWorld = transport.getClientWorld();
+  assert.equal(clientWorld.players[actorId].input.left, false);
+  assert.equal(clientWorld.grid.get(0, 0), MaterialId.Empty);
+  assert.notEqual(clientWorld.time, 99);
+
+  const replacementWorld = createDefaultWorldState("room_transport_alias_replacement");
+  const replacementActorId = createPlayerId("player_transport_alias_replacement");
+  replacementWorld.players[replacementActorId] = createDefaultPlayerState(replacementActorId);
+
+  editor.replaceWorld(replacementWorld);
+  replacementWorld.players[replacementActorId].input.left = true;
+  replacementWorld.grid.set(1, 1, MaterialId.Sand);
+  replacementWorld.time = 77;
+
+  const replacedWorld = transport.getClientWorld();
+  assert.equal(replacedWorld.players[replacementActorId].input.left, false);
+  assert.equal(replacedWorld.grid.get(1, 1), MaterialId.Empty);
+  assert.notEqual(replacedWorld.time, 77);
+});

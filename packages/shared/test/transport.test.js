@@ -354,6 +354,127 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
   assert.equal(transport.getClientState().lastCommandResults[0].code, "accepted");
 });
 
+test("LocalTransport flushes dirty journal entries after successful publication and avoids reprocessing stale cells", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const player = world.players[actorId];
+  const positions = [{ x: 10, y: 10 }, { x: 20, y: 20 }, { x: 30, y: 30 }, { x: 40, y: 40 }, { x: 50, y: 50 }];
+  player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
+    ? { kind: "material", materialId: MaterialId.Faucet, count: positions.length }
+    : { kind: "empty" });
+  player.activeHotbarSlot = 0;
+
+  const { transport } = createLocalTransportSession(world, actorId);
+
+  for (const position of positions) {
+    const priorState = transport.getClientWorld();
+    transport.enqueueCommand({
+      type: "place",
+      x: position.x,
+      y: position.y,
+      brushRadius: 1,
+      expectedInventoryRevision: priorState.players[actorId].inventoryRevision,
+      expectedAnchorRevision: priorState.grid.cellRevisions[priorState.grid.index(position.x, position.y)] ?? 0,
+    });
+    transport.advanceTick();
+  }
+
+  const firstDelta = transport.getClientDelta();
+  assert.ok(firstDelta);
+  assert.ok(firstDelta.cells.length > 0);
+
+  const initialCellIndex = firstDelta.cells[0].index;
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.advanceTick();
+  const laterDelta = transport.getClientDelta();
+  assert.ok(laterDelta);
+  assert.equal(laterDelta.cells.some((entry) => entry.index === initialCellIndex), false);
+
+  const snapshot = transport.getClientSnapshot();
+  assert.equal(snapshot.worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Faucet);
+
+  const priorState = transport.getClientWorld();
+  transport.enqueueCommand({
+    type: "place",
+    x: 60,
+    y: 60,
+    brushRadius: 1,
+    expectedInventoryRevision: priorState.players[actorId].inventoryRevision,
+    expectedAnchorRevision: priorState.grid.cellRevisions[priorState.grid.index(60, 60)] ?? 0,
+  });
+  transport.advanceTick();
+  const laterPlacementDelta = transport.getClientDelta();
+  assert.ok(laterPlacementDelta);
+  assert.ok(laterPlacementDelta.cells.length > 0);
+});
+
+test("LocalTransport preserves pending dirty state when a subscriber publication fails", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId);
+
+  transport.subscribe(() => {
+    throw new Error("subscriber boom");
+  });
+
+  const index = world.grid.index(0, 0);
+  world.grid.set(0, 0, MaterialId.Sand);
+  assert.equal(world.grid.dirtyCells.size, 1);
+
+  assert.throws(() => transport.advanceTick(), /subscriber boom/);
+  assert.equal(world.grid.dirtyCells.size, 1);
+  assert.equal(transport.getClientWorld().grid.get(0, 0), MaterialId.Empty);
+  assert.equal(transport.getClientSnapshot().worldState.grid.ids[index], MaterialId.Empty);
+});
+
+test("LocalTransport materializes canonical snapshots after deltas and supports repeated subscribe/unsubscribe cycles", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const player = world.players[actorId];
+  player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
+    ? { kind: "material", materialId: MaterialId.Faucet, count: 4 }
+    : { kind: "empty" });
+  player.activeHotbarSlot = 0;
+
+  const { transport, editor } = createLocalTransportSession(world, actorId);
+
+  const unsubscribeFirst = transport.subscribe(() => {});
+  const unsubscribeSecond = transport.subscribe(() => {});
+  unsubscribeFirst();
+  unsubscribeSecond();
+
+  for (let step = 0; step < 4; step += 1) {
+    const priorState = transport.getClientWorld();
+    transport.enqueueCommand({
+      type: "place",
+      x: 10 + step,
+      y: 10 + step,
+      brushRadius: 1,
+      expectedInventoryRevision: priorState.players[actorId].inventoryRevision,
+      expectedAnchorRevision: priorState.grid.cellRevisions[priorState.grid.index(10 + step, 10 + step)] ?? 0,
+    });
+    transport.advanceTick();
+  }
+
+  const explicitSnapshot = transport.getClientSnapshot();
+  const explicitState = transport.getClientState();
+  assert.equal(explicitSnapshot.checksum, explicitState.snapshot.checksum);
+  assert.equal(explicitSnapshot.worldRevision, transport.getClientWorld().worldRevision);
+  assert.equal(explicitSnapshot.worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Faucet);
+
+  const replacementWorld = createDefaultWorldState("room_transport_snapshot_replacement");
+  const replacementActorId = createPlayerId("player_transport_snapshot_replacement");
+  replacementWorld.players[replacementActorId] = createDefaultPlayerState(replacementActorId);
+  editor.replaceWorld(replacementWorld);
+
+  const replacedSnapshot = transport.getClientSnapshot();
+  assert.equal(replacedSnapshot.worldState.players[replacementActorId].id, replacementActorId);
+  assert.equal(transport.getClientWorld().players[replacementActorId].input.left, false);
+  assert.equal(replacedSnapshot.worldRevision, transport.getClientWorld().worldRevision);
+
+  const unsubscribeAfterReplacement = transport.subscribe(() => {});
+  unsubscribeAfterReplacement();
+  const stateAfterResubscribe = transport.getClientState();
+  assert.equal(stateAfterResubscribe.snapshot.worldRevision, transport.getClientWorld().worldRevision);
+});
+
 test("LocalTransport constructor and editor replacement clone their input worlds", () => {
   const initialWorld = createDefaultWorldState("room_transport_alias_constructor");
   const actorId = createPlayerId("player_transport_alias_constructor");

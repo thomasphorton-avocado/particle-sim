@@ -29,6 +29,7 @@ export interface LocalTransportSession {
 
 interface TransportReplica {
   snapshot: WorldSnapshot;
+  canonicalSnapshot: WorldSnapshot | null;
   delta: WorldDelta | null;
   revision: number;
   clientWorld: WorldState;
@@ -63,7 +64,7 @@ export class LocalTransport {
   subscribe(listener: TransportListener): () => void {
     this.#subscribers.push({
       listener,
-      replica: this.#createReplica(this.#replica.snapshot),
+      replica: this.#createReplica(this.#getSubscriptionSnapshot()),
     });
     return () => {
       this.#subscribers = this.#subscribers.filter((entry) => entry.listener !== listener);
@@ -83,7 +84,7 @@ export class LocalTransport {
   }
 
   getClientState(): TransportClientState {
-    return this.#buildClientState(this.#replica);
+    return this.#buildClientState(this.#replica, true);
   }
 
   getLastCommandResults(): ReadonlyArray<CommandResult> {
@@ -142,19 +143,26 @@ export class LocalTransport {
   }
 
   #createReplica(snapshot: WorldSnapshot): TransportReplica {
+    const canonicalSnapshot = cloneWorldSnapshot(snapshot);
     return {
-      snapshot: cloneWorldSnapshot(snapshot),
+      snapshot: cloneWorldSnapshot(canonicalSnapshot),
+      canonicalSnapshot: cloneWorldSnapshot(canonicalSnapshot),
       delta: null,
-      revision: snapshot.worldRevision,
-      clientWorld: restoreWorldState(snapshot),
+      revision: canonicalSnapshot.worldRevision,
+      clientWorld: restoreWorldState(canonicalSnapshot),
       lastCommandResults: [],
     };
   }
 
-  #buildClientState(replica: TransportReplica): TransportClientState {
+  #buildClientState(replica: TransportReplica, materializeSnapshot = false): TransportClientState {
+    const snapshot = materializeSnapshot
+      ? this.#materializeSnapshot(replica)
+      : (replica.canonicalSnapshot
+        ? cloneWorldSnapshot(replica.canonicalSnapshot)
+        : cloneWorldSnapshot(replica.snapshot));
     return {
       revision: replica.revision,
-      snapshot: this.#materializeSnapshot(replica),
+      snapshot,
       delta: replica.delta ? cloneWorldDelta(replica.delta) : null,
       clientWorld: cloneWorldState(replica.clientWorld),
       lastCommandResults: replica.lastCommandResults.map((result) => cloneCommandResult(result)),
@@ -162,17 +170,31 @@ export class LocalTransport {
   }
 
   #materializeSnapshot(replica: TransportReplica): WorldSnapshot {
-    return createWorldSnapshot(replica.clientWorld);
+    const snapshot = createWorldSnapshot(replica.clientWorld);
+    replica.snapshot = cloneWorldSnapshot(snapshot);
+    replica.canonicalSnapshot = cloneWorldSnapshot(snapshot);
+    return cloneWorldSnapshot(snapshot);
+  }
+
+  #getSubscriptionSnapshot(): WorldSnapshot {
+    if (this.#replica.canonicalSnapshot) {
+      return cloneWorldSnapshot(this.#replica.canonicalSnapshot);
+    }
+    return this.#materializeSnapshot(this.#replica);
   }
 
   #publish(): void {
     const nextDelta = this.#buildDelta(this.#replica.snapshot);
-    this.#updateReplica(this.#replica, nextDelta);
-    this.#replica.lastCommandResults = this.#lastCommandResults.map((result) => cloneCommandResult(result));
+    const lastCommandResults = this.#lastCommandResults.map((result) => cloneCommandResult(result));
     for (const subscriber of this.#subscribers) {
       this.#updateReplica(subscriber.replica, nextDelta);
-      subscriber.replica.lastCommandResults = this.#replica.lastCommandResults;
+      subscriber.replica.lastCommandResults = lastCommandResults;
       subscriber.listener(this.#buildClientState(subscriber.replica));
+    }
+    this.#updateReplica(this.#replica, nextDelta);
+    this.#replica.lastCommandResults = lastCommandResults;
+    if (nextDelta !== null || this.#world.grid.dirtyCells.size > 0) {
+      this.#world.grid.dirtyCells.flush();
     }
   }
 
@@ -187,12 +209,15 @@ export class LocalTransport {
     replica.delta = delta ? cloneWorldDelta(delta) : null;
     if (!delta) {
       replica.revision = this.#world.worldRevision;
+      replica.canonicalSnapshot = null;
       return;
     }
     applyWorldDeltaToSnapshotState(replica.snapshot.worldState, delta);
     replica.snapshot.worldRevision = delta.targetRevision;
     replica.snapshot.worldState.worldRevision = delta.targetRevision;
+    replica.snapshot.checksum = "";
     replica.revision = delta.targetRevision;
+    replica.canonicalSnapshot = null;
     this.#applyDeltaToWorld(replica.clientWorld, delta);
     for (const cellDelta of delta.cells) {
       this.#publishedCellRevisions.set(cellDelta.index, cellDelta.revision);

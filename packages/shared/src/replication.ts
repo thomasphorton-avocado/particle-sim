@@ -2,7 +2,7 @@ import { assertAuxiliaryValueForMaterial, Grid } from "./grid.js";
 import { parseObjectId, parsePlayerId, parseRoomId } from "./ids.js";
 import { MaterialId, MATERIALS } from "./materials.js";
 import { DAY_NIGHT_CYCLE_TICKS } from "./gameplay.js";
-import { deserializeWorldState, serializeWorldState, type WorldStateDto, type PlayerStateDto, type FallingObjectStateDto, type WeatherStateDto, type CommandLedgerDto } from "./serialization.js";
+import { deserializeWorldState, serializeWorldState, WORLD_STATE_SCHEMA_VERSION, type WorldStateDto, type PlayerStateDto, type FallingObjectStateDto, type WeatherStateDto, type CommandLedgerDto } from "./serialization.js";
 import { type WorldState, type WeatherState } from "./world-state.js";
 import { createGameplayRandomState, type GameplayRandomState } from "./random.js";
 
@@ -188,6 +188,17 @@ function validateCellDelta(value: unknown): WorldCellDelta {
   const objectIdValue = requireField(obj, "objectId", "cellDelta.objectId");
   const objectId = objectIdValue === null ? null : validateObjectId(objectIdValue, "cellDelta.objectId");
   const revision = assertInteger(requireField(obj, "revision", "cellDelta.revision"), "cellDelta.revision", 0, MAX_SAFE_INTEGER);
+  if (materialId === MaterialId.Empty) {
+    if (shade !== 0 || auxiliary !== 0 || objectId !== null) {
+      throw new TypeError("cellDelta must use canonical empty values for empty material cells");
+    }
+  } else if (MATERIALS[materialId].placement.kind !== "object") {
+    if (objectId !== null) {
+      throw new TypeError("cellDelta.objectId is only valid for object-placement materials");
+    }
+  } else if (objectId === null) {
+    throw new TypeError("cellDelta.objectId is required for object-placement materials");
+  }
   return {
     index,
     materialId,
@@ -502,12 +513,25 @@ function applyMetadataDelta(worldState: WorldStateDto, delta: WorldMetadataDelta
 }
 
 function validateWorldStateSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
+  if (snapshot.version !== WORLD_SNAPSHOT_SCHEMA_VERSION) {
+    throw new TypeError("snapshot.version is unsupported");
+  }
+  if (snapshot.worldState.schemaVersion !== WORLD_STATE_SCHEMA_VERSION) {
+    throw new TypeError("snapshot.worldState.schemaVersion is unsupported");
+  }
   const restored = deserializeWorldState(snapshot.worldState);
   const normalizedWorldState = serializeWorldState(restored);
+  const expectedChecksum = computeWorldChecksum(normalizedWorldState);
+  if (snapshot.checksum !== expectedChecksum) {
+    throw new TypeError("snapshot.checksum does not match the canonical world state");
+  }
+  if (snapshot.worldRevision !== normalizedWorldState.worldRevision) {
+    throw new TypeError("snapshot.worldRevision does not match the canonical world state revision");
+  }
   return {
-    version: snapshot.version,
-    worldRevision: snapshot.worldRevision,
-    checksum: computeWorldChecksum(normalizedWorldState),
+    version: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldRevision: normalizedWorldState.worldRevision,
+    checksum: expectedChecksum,
     worldState: normalizedWorldState,
   };
 }
@@ -568,6 +592,8 @@ export function applyWorldDeltaToSnapshot(snapshot: WorldSnapshot, delta: WorldD
     if (cellDelta.revision <= currentRevision) {
       throw new TypeError("worldDelta cell revision is stale");
     }
+  }
+  for (const cellDelta of normalizedDelta.cells) {
     if (cellDelta.materialId === MaterialId.Empty && cellDelta.shade === 0 && cellDelta.auxiliary === 0 && cellDelta.objectId === null) {
       grid.cellRevisions[cellDelta.index] = cellDelta.revision;
       grid.ids[cellDelta.index] = MaterialId.Empty;

@@ -98,6 +98,57 @@ test("full snapshots round-trip to an identical checksum", () => {
   assert.equal(restored.weather.kind, "storm");
 });
 
+test("tampered snapshots are rejected without mutating the caller-owned payload", () => {
+  const world = createDefaultWorldState("room_tampered_snapshot");
+  const snapshot = createWorldSnapshot(world);
+  const originalSnapshot = JSON.parse(JSON.stringify(snapshot));
+
+  const checksumTampered = JSON.parse(JSON.stringify(snapshot));
+  checksumTampered.checksum = "not-the-real-checksum";
+  const checksumTamperedBeforeRestore = JSON.parse(JSON.stringify(checksumTampered));
+  assert.throws(() => restoreWorldState(checksumTampered), /checksum/i);
+  assert.deepEqual(checksumTampered, checksumTamperedBeforeRestore);
+
+  const revisionTampered = JSON.parse(JSON.stringify(snapshot));
+  revisionTampered.worldRevision += 1;
+  const revisionTamperedBeforeRestore = JSON.parse(JSON.stringify(revisionTampered));
+  assert.throws(() => restoreWorldState(revisionTampered), /worldRevision/i);
+  assert.deepEqual(revisionTampered, revisionTamperedBeforeRestore);
+
+  const schemaTampered = JSON.parse(JSON.stringify(snapshot));
+  schemaTampered.worldState.schemaVersion += 1;
+  const schemaTamperedBeforeRestore = JSON.parse(JSON.stringify(schemaTampered));
+  assert.throws(() => restoreWorldState(schemaTampered), /schemaVersion/i);
+  assert.deepEqual(schemaTampered, schemaTamperedBeforeRestore);
+
+  const invalidDeltaSnapshot = JSON.parse(JSON.stringify(snapshot));
+  const invalidDelta = {
+    version: 1,
+    baseRevision: world.worldRevision,
+    targetRevision: world.worldRevision + 1,
+    cells: [{ index: 0, materialId: MaterialId.Stone, shade: 0, auxiliary: 0, objectId: null, revision: 1 }],
+    players: [],
+    fallingObjects: [],
+    metadata: [],
+  };
+  const invalidDeltaSnapshotBeforeApply = JSON.parse(JSON.stringify(invalidDeltaSnapshot));
+  assert.throws(() => applyWorldDeltaToSnapshot(invalidDeltaSnapshot, invalidDelta), /objectId/i);
+  assert.deepEqual(invalidDeltaSnapshot, invalidDeltaSnapshotBeforeApply);
+});
+
+test("delta decoding rejects brush cells carrying an object ID", () => {
+  const delta = {
+    version: 1,
+    baseRevision: 0,
+    targetRevision: 1,
+    cells: [{ index: 0, materialId: MaterialId.Water, shade: 0, auxiliary: 0, objectId: createObjectId("object_brush_object"), revision: 1 }],
+    players: [],
+    fallingObjects: [],
+    metadata: [],
+  };
+  assert.throws(() => decodeWorldDelta(delta), /objectId/i);
+});
+
 test("ordered deltas converge from a checkpoint to the authoritative checksum", () => {
   const world = createDefaultWorldState("room_delta");
   const playerId = createPlayerId("player_9");
@@ -162,7 +213,7 @@ test("duplicate, out-of-order, and late deltas are rejected", () => {
     baseRevision: world.worldRevision,
     targetRevision: world.worldRevision + 1,
     cells: [
-      { index: 0, materialId: MaterialId.Stone, shade: 0, auxiliary: 0, objectId: null, revision: 1 },
+      { index: 0, materialId: MaterialId.Water, shade: 0, auxiliary: 0, objectId: null, revision: 1 },
       { index: 0, materialId: MaterialId.Water, shade: 0, auxiliary: 0, objectId: null, revision: 1 },
     ],
     players: [],
@@ -200,7 +251,7 @@ test("invalid dimensions, indices, and revisions are rejected atomically", () =>
     baseRevision: world.worldRevision,
     targetRevision: world.worldRevision + 1,
     gridDimensions: { width: 99, height: 99 },
-    cells: [{ index: 999_999, materialId: MaterialId.Stone, shade: 0, auxiliary: 0, objectId: null, revision: 1 }],
+    cells: [{ index: 999_999, materialId: MaterialId.Water, shade: 0, auxiliary: 0, objectId: null, revision: 1 }],
     players: [],
     fallingObjects: [],
     metadata: [],

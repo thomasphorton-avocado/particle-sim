@@ -134,10 +134,14 @@ export class Grid {
     return this.ids[index] !== id || this.shade[index] !== shade || this.auxiliary[index] !== auxiliary || this.objectIds[index] !== objectId;
   }
 
-  private setCellState(index: number, id: MaterialId, shade: number, auxiliary: number, objectId: ObjectId | null): boolean {
+  applyCellState(index: number, id: MaterialId, shade: number, auxiliary: number, objectId: ObjectId | null, revision?: number): boolean {
     const changed = this.tupleChanged(index, id, shade, auxiliary, objectId);
     if (changed) {
-      this.incrementCellRevision(index);
+      if (revision === undefined) {
+        this.incrementCellRevision(index);
+      } else {
+        this.cellRevisions[index] = revision >>> 0;
+      }
       this.dirtyCells.record(index, id, shade, auxiliary, objectId, this.cellRevisions[index]);
     }
     this.ids[index] = id;
@@ -154,13 +158,13 @@ export class Grid {
     const nextShade = options?.shade ?? 0;
     const nextAuxiliary = 0;
     const nextObjectId = options?.objectId ?? null;
-    this.setCellState(i, id, nextShade, nextAuxiliary, nextObjectId);
+    this.applyCellState(i, id, nextShade, nextAuxiliary, nextObjectId);
   }
 
   clear(): void {
     for (let i = 0; i < this.ids.length; i++) {
       if (this.ids[i] === MaterialId.Empty && this.shade[i] === 0 && this.auxiliary[i] === 0 && this.objectIds[i] === null) continue;
-      this.setCellState(i, MaterialId.Empty, 0, 0, null);
+      this.applyCellState(i, MaterialId.Empty, 0, 0, null);
     }
     this.objectCellIndex.clear();
   }
@@ -170,13 +174,13 @@ export class Grid {
     const i2 = this.index(x2, y2);
     const nextTuple1 = { id: this.ids[i2] as MaterialId, shade: this.shade[i2]!, auxiliary: this.auxiliary[i2]!, objectId: this.objectIds[i2]! };
     const nextTuple2 = { id: this.ids[i1] as MaterialId, shade: this.shade[i1]!, auxiliary: this.auxiliary[i1]!, objectId: this.objectIds[i1]! };
-    this.setCellState(i1, nextTuple1.id, nextTuple1.shade, nextTuple1.auxiliary, nextTuple1.objectId);
-    this.setCellState(i2, nextTuple2.id, nextTuple2.shade, nextTuple2.auxiliary, nextTuple2.objectId);
+    this.applyCellState(i1, nextTuple1.id, nextTuple1.shade, nextTuple1.auxiliary, nextTuple1.objectId);
+    this.applyCellState(i2, nextTuple2.id, nextTuple2.shade, nextTuple2.auxiliary, nextTuple2.objectId);
   }
 
   setObjectCell(x: number, y: number, objectId: ObjectId): void {
     const i = this.assertInBounds(x, y);
-    this.setCellState(i, this.ids[i] as MaterialId, this.shade[i], this.auxiliary[i], objectId);
+    this.applyCellState(i, this.ids[i] as MaterialId, this.shade[i], this.auxiliary[i], objectId);
   }
 
   getObjectId(x: number, y: number): ObjectId | null {
@@ -186,7 +190,7 @@ export class Grid {
 
   clearObjectCell(x: number, y: number): void {
     const i = this.assertInBounds(x, y);
-    this.setCellState(i, this.ids[i] as MaterialId, this.shade[i], this.auxiliary[i], null);
+    this.applyCellState(i, this.ids[i] as MaterialId, this.shade[i], this.auxiliary[i], null);
   }
 
   hasObjectId(objectId: ObjectId): boolean {
@@ -227,7 +231,11 @@ export class Grid {
   setAuxiliaryValue(x: number, y: number, value: number): void {
     const i = this.assertInBounds(x, y);
     const integer = assertAuxiliaryValueForMaterial(this.get(x, y), value);
-    this.setCellState(i, this.ids[i] as MaterialId, this.shade[i], integer, this.objectIds[i]);
+    this.applyCellState(i, this.ids[i] as MaterialId, this.shade[i], integer, this.objectIds[i]);
+  }
+
+  setCellState(index: number, id: MaterialId, shade: number, auxiliary: number, objectId: ObjectId | null, revision?: number): boolean {
+    return this.applyCellState(index, id, shade, auxiliary, objectId, revision);
   }
 
   getVx(x: number, y: number): number {

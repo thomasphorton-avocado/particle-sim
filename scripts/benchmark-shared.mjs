@@ -9,6 +9,7 @@ import {
   MaterialId,
   normalizePlayerInput,
   serializeWorldState,
+  createLocalTransportSession,
 } from "../packages/shared/dist/index.js";
 
 // 60 Hz is the single authoritative gameplay rate. 30 Hz is modelled as a
@@ -230,6 +231,67 @@ function runScenario(name, schedule, options = {}) {
   };
 }
 
+function runTransportPublicationBenchmark(options = {}) {
+  const world = createDefaultWorldState("bench_transport");
+  const player = createDefaultPlayerState("player_1");
+  player.x = 20;
+  player.y = 30;
+  world.players.player_1 = player;
+  const session = createLocalTransportSession(world, "player_1");
+  session.transport.subscribe(() => undefined);
+  const warmupTicks = options.warmupTicks ?? WARMUP_TICKS;
+  const totalTicks = options.totalTicks ?? 200;
+  const gc = getGc(options);
+
+  for (let tick = 0; tick < warmupTicks; tick += 1) {
+    session.transport.advanceTick(makeInputsForTick(tick));
+  }
+
+  gc();
+  const baselineMemory = getMemorySnapshot();
+  const tickSamplesMs = [];
+  const snapshotSamplesMs = [];
+  let dirtyCellCount = 0;
+
+  for (let tick = 0; tick < totalTicks; tick += 1) {
+    const tickIndex = warmupTicks + tick;
+    const input = makeInputsForTick(tickIndex);
+    const tickStart = process.hrtime.bigint();
+    session.transport.advanceTick(input);
+    tickSamplesMs.push(Number(process.hrtime.bigint() - tickStart) / 1e6);
+
+    const snapshotStart = process.hrtime.bigint();
+    session.transport.getClientSnapshot();
+    snapshotSamplesMs.push(Number(process.hrtime.bigint() - snapshotStart) / 1e6);
+
+    dirtyCellCount = getWorldSnapshotMetrics(session.transport.getClientWorld()).dirtyCellCount;
+  }
+
+  gc();
+  const finalMemory = getMemorySnapshot();
+  const finalDigest = serializeDigest(session.transport.getClientWorld());
+
+  return {
+    scenario: "transport-publication",
+    kind: "transportPublication",
+    fallingUpdates: totalTicks,
+    perTickMs: summarize(tickSamplesMs),
+    snapshotAccessMs: summarize(snapshotSamplesMs),
+    dirtyCellCount,
+    memory: {
+      rssDeltaBytes: finalMemory.rssBytes - baselineMemory.rssBytes,
+      heapDeltaBytes: finalMemory.heapUsedBytes - baselineMemory.heapUsedBytes,
+      arrayBuffersDeltaBytes: finalMemory.arrayBuffersBytes - baselineMemory.arrayBuffersBytes,
+      baseline: baselineMemory,
+      final: finalMemory,
+      rssBytes: finalMemory.rssBytes,
+      heapUsedBytes: finalMemory.heapUsedBytes,
+      arrayBuffersBytes: finalMemory.arrayBuffersBytes,
+    },
+    digest: finalDigest,
+  };
+}
+
 export function runBenchmark(options = {}) {
   const results = [];
   for (const scenario of SCENARIOS) {
@@ -237,13 +299,28 @@ export function runBenchmark(options = {}) {
       results.push(runScenario(scenario, schedule, options));
     }
   }
+  results.push(runTransportPublicationBenchmark(options));
   return results;
 }
 
 export function assertBenchmarkResults(results) {
   const minimumFallingUpdates = Math.max(50, Math.floor(TOTAL_TICKS / 4));
   const byKey = new Map();
+  const transportResult = results.find((result) => result.kind === "transportPublication");
+  if (!transportResult) {
+    throw new Error("Missing transport publication benchmark result");
+  }
+  if (!Number.isFinite(transportResult.perTickMs.mean) || transportResult.perTickMs.mean > 8) {
+    throw new Error(`Transport publication tick budget exceeded: ${transportResult.perTickMs.mean}ms`);
+  }
+  if (!Number.isFinite(transportResult.snapshotAccessMs.mean) || transportResult.snapshotAccessMs.mean > 10) {
+    throw new Error(`Transport publication snapshot access budget exceeded: ${transportResult.snapshotAccessMs.mean}ms`);
+  }
+  if (!Number.isFinite(transportResult.dirtyCellCount) || transportResult.dirtyCellCount < 0) {
+    throw new Error(`Transport publication dirty cell count is invalid: ${transportResult.dirtyCellCount}`);
+  }
   for (const result of results) {
+    if (result.kind === "transportPublication") continue;
     byKey.set(`${result.scenario}:${result.hz}`, result);
     if (!Number.isFinite(result.fallingUpdates) || result.fallingUpdates <= minimumFallingUpdates) {
       throw new Error(`Benchmark falling update count too low for ${result.scenario} @ ${result.hz}Hz: ${result.fallingUpdates}`);

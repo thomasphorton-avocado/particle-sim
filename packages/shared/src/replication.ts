@@ -4,6 +4,7 @@ import { MaterialId, MATERIALS } from "./materials.js";
 import { DAY_NIGHT_CYCLE_TICKS } from "./gameplay.js";
 import { deserializeWorldState, serializeWorldState, WORLD_STATE_SCHEMA_VERSION, type WorldStateDto, type PlayerStateDto, type FallingObjectStateDto, type WeatherStateDto, type CommandLedgerDto } from "./serialization.js";
 import { type WorldState, type WeatherState } from "./world-state.js";
+import { type DirtyCellEntry } from "./dirty-journal.js";
 import { createGameplayRandomState, type GameplayRandomState } from "./random.js";
 
 export const WORLD_SNAPSHOT_SCHEMA_VERSION = 1;
@@ -39,17 +40,22 @@ export interface WorldCellDelta {
 
 export interface WorldPlayerDelta {
   playerId: string;
-  state: PlayerStateDto;
+  state: PlayerStateDto | null;
 }
 
 export interface WorldFallingObjectDelta {
   objectId: string;
-  state: FallingObjectStateDto;
+  state: FallingObjectStateDto | null;
 }
 
 export interface WorldMetadataDelta {
   field: "roomId" | "tick" | "paused" | "time" | "weather" | "random" | "ownerPlayerId" | "worldRevision" | "nextAuthorityOrder" | "nextPlayerOrdinal" | "nextObjectOrdinal" | "commandLedger";
   value: unknown;
+}
+
+export interface WorldDeltaBuildOptions {
+  dirtyCellEntries?: DirtyCellEntry[];
+  publishedCellRevisions?: ReadonlyMap<number, number>;
 }
 
 export interface WorldDelta {
@@ -113,7 +119,65 @@ function compareStringCodeUnits(left: string, right: string): number {
 }
 
 function clonePlainObject<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return globalThis.structuredClone ? globalThis.structuredClone(value) as T : JSON.parse(JSON.stringify(value)) as T;
+}
+
+function cloneGridState(grid: Grid): Grid {
+  const clone = new Grid(grid.width, grid.height);
+  clone.ids = new Uint8Array(grid.ids);
+  clone.shade = new Int8Array(grid.shade);
+  clone.auxiliary = new Int8Array(grid.auxiliary);
+  clone.objectIds = Array.from(grid.objectIds);
+  clone.cellRevisions = new Uint32Array(grid.cellRevisions);
+  (clone as unknown as { updated: Uint8Array }).updated = new Uint8Array(grid.width * grid.height);
+  const cloneState = clone as unknown as { objectCellIndex: Map<string, Set<number>>; updated: Uint8Array };
+  cloneState.objectCellIndex = new Map<string, Set<number>>();
+  for (let index = 0; index < clone.objectIds.length; index += 1) {
+    const objectId = clone.objectIds[index];
+    if (!objectId) continue;
+    let cells = cloneState.objectCellIndex.get(objectId);
+    if (!cells) {
+      cells = new Set<number>();
+      cloneState.objectCellIndex.set(objectId, cells);
+    }
+    cells.add(index);
+  }
+  clone.dirtyCells.clear();
+  return clone;
+}
+
+export function cloneWorldState(world: WorldState): WorldState {
+  return {
+    roomId: world.roomId,
+    grid: cloneGridState(world.grid),
+    random: clonePlainObject(world.random),
+    players: Object.fromEntries(Object.entries(world.players).map(([playerId, player]) => [playerId, clonePlainObject(player)])),
+    fallingObjects: Object.fromEntries(Object.entries(world.fallingObjects).map(([objectId, object]) => [objectId, clonePlainObject(object)])),
+    paused: world.paused,
+    tick: world.tick,
+    time: clonePlainObject(world.time),
+    weather: clonePlainObject(world.weather),
+    nextPlayerOrdinal: world.nextPlayerOrdinal,
+    nextObjectOrdinal: world.nextObjectOrdinal,
+    ownerPlayerId: world.ownerPlayerId,
+    worldRevision: world.worldRevision,
+    nextAuthorityOrder: world.nextAuthorityOrder,
+    commandLedger: clonePlainObject(world.commandLedger),
+    commandInbox: clonePlainObject(world.commandInbox),
+  };
+}
+
+export function cloneWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
+  return {
+    version: snapshot.version,
+    worldRevision: snapshot.worldRevision,
+    checksum: snapshot.checksum,
+    worldState: clonePlainObject(snapshot.worldState),
+  };
+}
+
+export function cloneWorldDelta(delta: WorldDelta): WorldDelta {
+  return clonePlainObject(delta);
 }
 
 function stableStringify(value: unknown): string {
@@ -352,6 +416,125 @@ function validateWorldSnapshotMetadataField(field: string, value: unknown): Worl
   return { field: field as WorldMetadataDelta["field"], value };
 }
 
+function serializePlayerState(player: WorldState["players"][string]): PlayerStateDto {
+  return clonePlainObject(player) as PlayerStateDto;
+}
+
+function serializeFallingObjectState(objectState: WorldState["fallingObjects"][string]): FallingObjectStateDto {
+  return clonePlainObject(objectState) as FallingObjectStateDto;
+}
+
+function buildCellDeltaEntries(world: WorldState, dirtyCellEntries: DirtyCellEntry[]): WorldCellDelta[] {
+  const nextCells: WorldCellDelta[] = [];
+  const grid = world.grid;
+  for (const entry of dirtyCellEntries) {
+    if (entry.index < 0 || entry.index >= grid.width * grid.height) continue;
+    nextCells.push({
+      index: entry.index,
+      materialId: entry.materialId,
+      shade: entry.shade,
+      auxiliary: entry.auxiliary,
+      objectId: entry.objectId,
+      revision: entry.revision,
+    });
+  }
+  return nextCells;
+}
+
+export function createWorldDelta(previousSnapshot: WorldSnapshot, world: WorldState, options: WorldDeltaBuildOptions = {}): WorldDelta | null {
+  const previousState = previousSnapshot.worldState;
+  const cells = buildCellDeltaEntries(world, options.dirtyCellEntries ?? world.grid.dirtyCells.readPending());
+  const filteredCells = options.publishedCellRevisions
+    ? cells.filter((cell) => {
+      const previousRevision = options.publishedCellRevisions?.get(cell.index);
+      return previousRevision === undefined || cell.revision > previousRevision;
+    })
+    : cells;
+  const players: WorldPlayerDelta[] = [];
+  const playerIds = new Set([...Object.keys(previousState.players), ...Object.keys(world.players)]);
+  for (const playerId of playerIds) {
+    const previousPlayer = previousState.players[playerId];
+    const nextPlayer = world.players[playerId];
+    if (previousPlayer === undefined && nextPlayer === undefined) continue;
+    if (previousPlayer === undefined) {
+      players.push({ playerId, state: nextPlayer ? serializePlayerState(nextPlayer) : null });
+      continue;
+    }
+    if (nextPlayer === undefined) {
+      players.push({ playerId, state: null });
+      continue;
+    }
+    if (stableStringify(previousPlayer) !== stableStringify(nextPlayer)) {
+      players.push({ playerId, state: serializePlayerState(nextPlayer) });
+    }
+  }
+  const fallingObjects: WorldFallingObjectDelta[] = [];
+  const objectIds = new Set([...Object.keys(previousState.fallingObjects), ...Object.keys(world.fallingObjects)]);
+  for (const objectId of objectIds) {
+    const previousObject = previousState.fallingObjects[objectId];
+    const nextObject = world.fallingObjects[objectId];
+    if (previousObject === undefined && nextObject === undefined) continue;
+    if (previousObject === undefined) {
+      fallingObjects.push({ objectId, state: nextObject ? serializeFallingObjectState(nextObject) : null });
+      continue;
+    }
+    if (nextObject === undefined) {
+      fallingObjects.push({ objectId, state: null });
+      continue;
+    }
+    if (stableStringify(previousObject) !== stableStringify(nextObject)) {
+      fallingObjects.push({ objectId, state: serializeFallingObjectState(nextObject) });
+    }
+  }
+  const metadata: WorldMetadataDelta[] = [];
+  const metadataFields: Array<"roomId" | "tick" | "paused" | "time" | "weather" | "random" | "ownerPlayerId" | "worldRevision" | "nextAuthorityOrder" | "nextPlayerOrdinal" | "nextObjectOrdinal" | "commandLedger"> = ["roomId", "tick", "paused", "time", "weather", "random", "ownerPlayerId", "worldRevision", "nextAuthorityOrder", "nextPlayerOrdinal", "nextObjectOrdinal", "commandLedger"];
+  for (const field of metadataFields) {
+    const previousValue = previousState[field as keyof typeof previousState];
+    const nextValue = field === "roomId"
+      ? world.roomId
+      : field === "tick"
+        ? world.tick
+        : field === "paused"
+          ? world.paused
+          : field === "time"
+            ? world.time
+            : field === "weather"
+              ? world.weather
+              : field === "random"
+                ? world.random
+                : field === "ownerPlayerId"
+                  ? world.ownerPlayerId
+                  : field === "worldRevision"
+                    ? world.worldRevision
+                    : field === "nextAuthorityOrder"
+                      ? world.nextAuthorityOrder
+                      : field === "nextPlayerOrdinal"
+                        ? world.nextPlayerOrdinal
+                        : field === "nextObjectOrdinal"
+                          ? world.nextObjectOrdinal
+                          : world.commandLedger;
+    if (stableStringify(previousValue) !== stableStringify(nextValue)) {
+      metadata.push({ field, value: nextValue });
+    }
+  }
+  if (filteredCells.length === 0 && players.length === 0 && fallingObjects.length === 0 && metadata.length === 0) {
+    return null;
+  }
+  return {
+    version: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    baseRevision: previousSnapshot.worldRevision,
+    targetRevision: world.worldRevision,
+    gridDimensions: {
+      width: world.grid.width,
+      height: world.grid.height,
+    },
+    cells: filteredCells,
+    players,
+    fallingObjects,
+    metadata,
+  };
+}
+
 function canonicalizeWorldStateDto(worldState: WorldStateDto): WorldStateDto {
   const restored = deserializeWorldState(worldState);
   return serializeWorldState(restored);
@@ -372,8 +555,9 @@ function validateWorldDelta(value: unknown): WorldDelta {
   const players = (requireField(obj, "players", "worldDelta.players") as unknown[]).map((entry) => {
     const playerObj = assertObject(entry, "worldDelta.players[]");
     const playerId = validatePlayerId(requireField(playerObj, "playerId", "worldDelta.players[].playerId"), "worldDelta.players[].playerId");
-    const state = validatePlayerStateDto(requireField(playerObj, "state", "worldDelta.players[].state"));
-    if (playerId !== state.id) {
+    const stateValue = requireField(playerObj, "state", "worldDelta.players[].state");
+    const state = stateValue === null ? null : validatePlayerStateDto(stateValue);
+    if (state !== null && playerId !== state.id) {
       throw new TypeError("worldDelta.players[].playerId must match playerDelta.state.id");
     }
     return { playerId, state };
@@ -381,8 +565,9 @@ function validateWorldDelta(value: unknown): WorldDelta {
   const fallingObjects = (requireField(obj, "fallingObjects", "worldDelta.fallingObjects") as unknown[]).map((entry) => {
     const objectObj = assertObject(entry, "worldDelta.fallingObjects[]");
     const objectId = validateObjectId(requireField(objectObj, "objectId", "worldDelta.fallingObjects[].objectId"), "worldDelta.fallingObjects[].objectId");
-    const state = validateFallingObjectStateDto(requireField(objectObj, "state", "worldDelta.fallingObjects[].state"));
-    if (objectId !== state.id) {
+    const stateValue = requireField(objectObj, "state", "worldDelta.fallingObjects[].state");
+    const state = stateValue === null ? null : validateFallingObjectStateDto(stateValue);
+    if (state !== null && objectId !== state.id) {
       throw new TypeError("worldDelta.fallingObjects[].objectId must match fallingObjectDelta.state.id");
     }
     return { objectId, state };
@@ -460,6 +645,53 @@ function replaceGridMembership(grid: WorldStateDto["grid"], index: number, objec
     normalized.push({ x, y, objectId });
   }
   grid.objectMembership = normalized;
+}
+
+export function applyWorldDeltaToSnapshotState(worldState: WorldStateDto, delta: WorldDelta): void {
+  const grid = worldState.grid;
+  const totalCells = grid.width * grid.height;
+  for (const cellDelta of delta.cells) {
+    if (cellDelta.index < 0 || cellDelta.index >= totalCells) {
+      throw new TypeError("worldDelta cell index is out of bounds");
+    }
+    const currentRevision = grid.cellRevisions[cellDelta.index] ?? 0;
+    if (cellDelta.revision <= currentRevision) {
+      throw new TypeError("worldDelta cell revision is stale");
+    }
+  }
+  for (const cellDelta of delta.cells) {
+    if (cellDelta.materialId === MaterialId.Empty && cellDelta.shade === 0 && cellDelta.auxiliary === 0 && cellDelta.objectId === null) {
+      grid.cellRevisions[cellDelta.index] = cellDelta.revision;
+      grid.ids[cellDelta.index] = MaterialId.Empty;
+      grid.shade[cellDelta.index] = 0;
+      grid.auxiliary[cellDelta.index] = 0;
+      replaceGridMembership(grid, cellDelta.index, null);
+      continue;
+    }
+    grid.cellRevisions[cellDelta.index] = cellDelta.revision;
+    grid.ids[cellDelta.index] = cellDelta.materialId;
+    grid.shade[cellDelta.index] = cellDelta.shade;
+    grid.auxiliary[cellDelta.index] = assertAuxiliaryValueForMaterial(cellDelta.materialId, cellDelta.auxiliary);
+    replaceGridMembership(grid, cellDelta.index, cellDelta.objectId);
+  }
+  for (const playerDelta of delta.players) {
+    if (playerDelta.state === null) {
+      delete worldState.players[playerDelta.playerId];
+      continue;
+    }
+    worldState.players[playerDelta.playerId] = playerDelta.state;
+  }
+  for (const fallingObjectDelta of delta.fallingObjects) {
+    if (fallingObjectDelta.state === null) {
+      delete worldState.fallingObjects[fallingObjectDelta.objectId];
+      continue;
+    }
+    worldState.fallingObjects[fallingObjectDelta.objectId] = fallingObjectDelta.state;
+  }
+  for (const metadataDelta of delta.metadata) {
+    applyMetadataDelta(worldState, metadataDelta);
+  }
+  worldState.worldRevision = delta.targetRevision;
 }
 
 function applyMetadataDelta(worldState: WorldStateDto, delta: WorldMetadataDelta): void {
@@ -594,42 +826,7 @@ export function applyWorldDeltaToSnapshot(snapshot: WorldSnapshot, delta: WorldD
     }
   }
   const nextWorldState = clonePlainObject(normalizedSnapshot.worldState);
-  const grid = nextWorldState.grid;
-  const totalCells = grid.width * grid.height;
-  for (const cellDelta of normalizedDelta.cells) {
-    if (cellDelta.index < 0 || cellDelta.index >= totalCells) {
-      throw new TypeError("worldDelta cell index is out of bounds");
-    }
-    const currentRevision = grid.cellRevisions[cellDelta.index] ?? 0;
-    if (cellDelta.revision <= currentRevision) {
-      throw new TypeError("worldDelta cell revision is stale");
-    }
-  }
-  for (const cellDelta of normalizedDelta.cells) {
-    if (cellDelta.materialId === MaterialId.Empty && cellDelta.shade === 0 && cellDelta.auxiliary === 0 && cellDelta.objectId === null) {
-      grid.cellRevisions[cellDelta.index] = cellDelta.revision;
-      grid.ids[cellDelta.index] = MaterialId.Empty;
-      grid.shade[cellDelta.index] = 0;
-      grid.auxiliary[cellDelta.index] = 0;
-      replaceGridMembership(grid, cellDelta.index, null);
-      continue;
-    }
-    grid.cellRevisions[cellDelta.index] = cellDelta.revision;
-    grid.ids[cellDelta.index] = cellDelta.materialId;
-    grid.shade[cellDelta.index] = cellDelta.shade;
-    grid.auxiliary[cellDelta.index] = assertAuxiliaryValueForMaterial(cellDelta.materialId, cellDelta.auxiliary);
-    replaceGridMembership(grid, cellDelta.index, cellDelta.objectId);
-  }
-  for (const playerDelta of normalizedDelta.players) {
-    nextWorldState.players[playerDelta.playerId] = playerDelta.state;
-  }
-  for (const fallingObjectDelta of normalizedDelta.fallingObjects) {
-    nextWorldState.fallingObjects[fallingObjectDelta.objectId] = fallingObjectDelta.state;
-  }
-  for (const metadataDelta of normalizedDelta.metadata) {
-    applyMetadataDelta(nextWorldState, metadataDelta);
-  }
-  nextWorldState.worldRevision = normalizedDelta.targetRevision;
+  applyWorldDeltaToSnapshotState(nextWorldState, normalizedDelta);
   const canonicalWorldState = canonicalizeWorldStateDto(nextWorldState);
   const nextWorldStateSnapshot: WorldSnapshot = {
     version: normalizedSnapshot.version,

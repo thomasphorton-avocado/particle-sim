@@ -1,5 +1,5 @@
 import { createCommandId, createPlayerId, parseCommandId, parseObjectId, parsePlayerId, type CommandId, type ObjectId, type PlayerId } from "./ids.js";
-import { cloneHotbar, type HotbarItem, type InventoryCounts } from "./inventory.js";
+import { cloneHotbar, consumeHotbarMaterial, type HotbarItem, type InventoryCounts } from "./inventory.js";
 import { assertAuxiliaryValueForMaterial, Grid } from "./grid.js";
 import { MATERIALS, MaterialId } from "./materials.js";
 import { findFlowerCluster } from "./harvest.js";
@@ -671,7 +671,7 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
       });
     }
     const nextHotbar = cloneHotbar(actor.hotbar);
-    nextHotbar[slot] = { kind: "material", materialId: hotbarEntry.materialId, count: hotbarEntry.count - 1 };
+    consumeHotbarMaterial(nextHotbar, slot, 1);
     const playerPatch: CommandPlayerPatch = {
       id: actor.id,
       hotbar: nextHotbar,
@@ -700,7 +700,7 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
     return { gridWrites: [], fallingObjects: [], inventoryRevisionDelta: 0, worldRevisionDelta: 0, acceptedEffect: null, resultCode: "inventory" };
   }
   const nextHotbar = cloneHotbar(actor.hotbar);
-  nextHotbar[slot] = { kind: "material", materialId: hotbarEntry.materialId, count: hotbarEntry.count - gridWrites.length };
+  consumeHotbarMaterial(nextHotbar, slot, gridWrites.length);
   const playerPatch: CommandPlayerPatch = {
     id: actor.id,
     hotbar: nextHotbar,

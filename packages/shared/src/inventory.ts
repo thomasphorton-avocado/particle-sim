@@ -44,6 +44,17 @@ export function cloneHotbar(hotbar: HotbarItem[]): HotbarItem[] {
 
 const MAX_STACK = 1000;
 
+export function consumeHotbarMaterial(hotbar: HotbarItem[], slot: number, amount: number): boolean {
+  const entry = hotbar[slot];
+  if (entry?.kind !== "material") return false;
+  if (!Number.isInteger(amount) || amount <= 0) return false;
+  entry.count -= amount;
+  if (entry.count <= 0) {
+    hotbar[slot] = { kind: "empty" };
+  }
+  return true;
+}
+
 export function addToHotbar(hotbar: HotbarItem[], materialId: MaterialId, amount = 1): boolean {
   let remaining = amount;
 
@@ -69,18 +80,5 @@ export function addToHotbar(hotbar: HotbarItem[], materialId: MaterialId, amount
 }
 
 export function removeFromHotbarSlot(hotbar: HotbarItem[], activeSlot: number): boolean {
-  const slot = hotbar[activeSlot];
-  if (slot?.kind !== "material") return false;
-  slot.count -= 1;
-  if (slot.count <= 0) {
-    hotbar[activeSlot] = { kind: "empty" };
-    for (let offset = 1; offset < hotbar.length; offset++) {
-      const prev = activeSlot - offset;
-      if (prev < 0) break;
-      if (hotbar[prev].kind !== "empty") {
-        return true;
-      }
-    }
-  }
-  return true;
+  return consumeHotbarMaterial(hotbar, activeSlot, 1);
 }

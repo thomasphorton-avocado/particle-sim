@@ -1,12 +1,54 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MaterialId, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createPlayerId } from "@particle-sim/shared";
+import { MaterialId, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createPlayerId } from "@particle-sim/shared";
 
 function createWorldWithPlayer() {
   const world = createDefaultWorldState("room_transport");
   const actorId = createPlayerId("player_transport");
   world.players[actorId] = createDefaultPlayerState(actorId);
   return { world, actorId };
+}
+
+function createFingerprint(envelope) {
+  const stableStringify = (value) => {
+    if (Array.isArray(value)) {
+      return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const keys = Object.keys(value).sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+      return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  };
+  return stableStringify({
+    commandId: envelope.commandId,
+    actorId: envelope.actorId,
+    actorSequence: envelope.actorSequence,
+    issuedTick: envelope.issuedTick,
+    command: envelope.command,
+  });
+}
+
+function createForgedAcceptedPauseReceipt(envelope) {
+  return {
+    commandId: envelope.commandId,
+    actorId: envelope.actorId,
+    actorSequence: envelope.actorSequence,
+    authorityOrder: 7,
+    issuedTick: envelope.issuedTick,
+    processedTick: 0,
+    commandType: "pause_world",
+    code: "accepted",
+    accepted: true,
+    beforeWorldRevision: 0,
+    afterWorldRevision: 1,
+    beforeInventoryRevision: 0,
+    afterInventoryRevision: 0,
+    beforeTargetRevision: 0,
+    afterTargetRevision: 0,
+    acceptedEffect: "pause",
+    fingerprint: createFingerprint(envelope),
+  };
 }
 
 test("LocalTransport publishes snapshots and isolated client state after accepted commands", () => {
@@ -35,6 +77,7 @@ test("LocalTransport publishes snapshots and isolated client state after accepte
   assert.equal(lastResults.length, 1);
   assert.equal(lastResults[0].kind, "accepted");
   assert.equal(clientState.revision, transport.getClientWorld().worldRevision);
+  assert.ok(clientState.snapshot);
   assert.equal(clientState.snapshot.worldRevision, transport.getClientWorld().worldRevision);
   assert.equal(clientWorld.players[actorId].input.left, true);
   assert.equal(world.players[actorId].input.left, false);
@@ -49,6 +92,82 @@ test("LocalTransport publishes snapshots and isolated client state after accepte
   clientWorld.players[actorId].input.left = false;
   assert.equal(world.players[actorId].input.left, false);
   assert.equal(seenRevisions.at(-1), afterPauseState.revision);
+});
+
+test("LocalTransport drops externally supplied command inboxes for constructor and editor replacement", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const externalEnvelope = createCommandEnvelope(actorId, 1, 0, { type: "set_input_state", left: true, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false });
+  world.commandInbox.push(externalEnvelope);
+
+  const { transport } = createLocalTransportSession(world, actorId);
+  const clientWorldAfterConstruction = transport.getClientWorld();
+  assert.equal(clientWorldAfterConstruction.commandInbox.length, 0);
+
+  const replacementWorld = createDefaultWorldState("room_transport_replacement");
+  const replacementActorId = createPlayerId("player_transport_replacement");
+  replacementWorld.players[replacementActorId] = createDefaultPlayerState(replacementActorId);
+  replacementWorld.commandInbox.push(createCommandEnvelope(replacementActorId, 1, 0, { type: "pause_world" }));
+
+  const { transport: replacementTransport, editor } = createLocalTransportSession(replacementWorld, replacementActorId);
+  editor.replaceWorld(world);
+  const clientWorldAfterReplacement = replacementTransport.getClientWorld();
+  assert.equal(clientWorldAfterReplacement.commandInbox.length, 0);
+});
+
+test("LocalTransport constructor sanitizes forged command history before processing the next command", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const forgedEnvelope = createCommandEnvelope(actorId, 1, 0, { type: "pause_world", expectedWorldRevision: 0 });
+  world.commandLedger.recent.push(createForgedAcceptedPauseReceipt(forgedEnvelope));
+  world.commandLedger.actorHighWater[actorId] = 1;
+  world.nextAuthorityOrder = 9;
+
+  const { transport } = createLocalTransportSession(world, actorId);
+  const sanitizedWorld = transport.getClientWorld();
+  assert.equal(sanitizedWorld.commandLedger.recent.length, 0);
+  assert.equal(sanitizedWorld.commandLedger.actorHighWater[actorId], undefined);
+  assert.equal(sanitizedWorld.nextAuthorityOrder, 1);
+
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: sanitizedWorld.worldRevision });
+  transport.advanceTick();
+
+  const afterAttackState = transport.getClientWorld();
+  assert.equal(afterAttackState.paused, true);
+  assert.equal(afterAttackState.worldRevision, 1);
+  const lastCommandResults = transport.getLastCommandResults();
+  assert.equal(lastCommandResults.length, 1);
+  assert.equal(lastCommandResults[0].kind, "accepted");
+  assert.equal(lastCommandResults[0].code, "accepted");
+});
+
+test("LocalTransport editor replacement sanitizes forged ledger state before processing the next command", () => {
+  const replacementWorld = createDefaultWorldState("room_transport_editor_replacement");
+  const replacementActorId = createPlayerId("player_transport_editor_replacement");
+  replacementWorld.players[replacementActorId] = createDefaultPlayerState(replacementActorId);
+
+  const incomingWorld = createDefaultWorldState("room_transport_editor_incoming");
+  incomingWorld.players[replacementActorId] = createDefaultPlayerState(replacementActorId);
+  const forgedEnvelope = createCommandEnvelope(replacementActorId, 1, 0, { type: "pause_world", expectedWorldRevision: 0 });
+  incomingWorld.commandLedger.recent.push(createForgedAcceptedPauseReceipt(forgedEnvelope));
+  incomingWorld.commandLedger.actorHighWater[replacementActorId] = 1;
+  incomingWorld.nextAuthorityOrder = 12;
+
+  const { transport, editor } = createLocalTransportSession(replacementWorld, replacementActorId);
+  editor.replaceWorld(incomingWorld);
+  const sanitizedWorld = transport.getClientWorld();
+  assert.equal(sanitizedWorld.commandLedger.recent.length, 0);
+  assert.equal(sanitizedWorld.commandLedger.actorHighWater[replacementActorId], undefined);
+  assert.equal(sanitizedWorld.nextAuthorityOrder, 1);
+
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: sanitizedWorld.worldRevision });
+  transport.advanceTick();
+
+  const afterReplacementState = transport.getClientWorld();
+  assert.equal(afterReplacementState.paused, true);
+  assert.equal(afterReplacementState.worldRevision, 1);
+  const lastCommandResults = transport.getLastCommandResults();
+  assert.equal(lastCommandResults.length, 1);
+  assert.equal(lastCommandResults[0].kind, "accepted");
+  assert.equal(lastCommandResults[0].code, "accepted");
 });
 
 test("LocalTransport pauses deterministic ticking and keeps revisions stable until unpaused", () => {
@@ -316,8 +435,7 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
     state.clientWorld.players[actorId].input.left = false;
     state.clientWorld.players[actorId].activeHotbarSlot = 7;
     state.clientWorld.grid.set(0, 0, MaterialId.Sand);
-    state.snapshot.worldState.paused = false;
-    state.snapshot.worldState.players[actorId].input.left = false;
+    assert.equal(state.snapshot, null);
     state.delta.gridDimensions.width = 999;
     state.lastCommandResults[0].code = "invalid_command";
   });
@@ -332,8 +450,7 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
   assert.equal(firstSubscriberState.clientWorld.players[actorId].input.left, false);
   assert.equal(firstSubscriberState.clientWorld.players[actorId].activeHotbarSlot, 7);
   assert.equal(firstSubscriberState.clientWorld.grid.get(0, 0), MaterialId.Sand);
-  assert.equal(firstSubscriberState.snapshot.worldState.paused, false);
-  assert.equal(firstSubscriberState.snapshot.worldState.players[actorId].input.left, false);
+  assert.equal(firstSubscriberState.snapshot, null);
   assert.equal(firstSubscriberState.delta.gridDimensions.width, 999);
   assert.equal(firstSubscriberState.lastCommandResults[0].code, "invalid_command");
 
@@ -341,8 +458,7 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
   assert.equal(secondSubscriberState.clientWorld.players[actorId].input.left, false);
   assert.equal(secondSubscriberState.clientWorld.players[actorId].activeHotbarSlot, 0);
   assert.equal(secondSubscriberState.clientWorld.grid.get(0, 0), MaterialId.Empty);
-  assert.equal(secondSubscriberState.snapshot.worldState.paused, true);
-  assert.equal(secondSubscriberState.snapshot.worldState.players[actorId].input.left, false);
+  assert.equal(secondSubscriberState.snapshot, null);
   assert.notEqual(secondSubscriberState.delta.gridDimensions.width, 999);
   assert.equal(secondSubscriberState.lastCommandResults[0].code, "accepted");
 
@@ -352,6 +468,198 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
   assert.equal(transport.getClientWorld().grid.get(0, 0), MaterialId.Empty);
   assert.equal(transport.getClientSnapshot().worldState.paused, true);
   assert.equal(transport.getClientState().lastCommandResults[0].code, "accepted");
+});
+
+test("LocalTransport commits canonical state and still notifies later listeners when an earlier subscriber throws", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const player = world.players[actorId];
+  player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
+    ? { kind: "material", materialId: MaterialId.Faucet, count: 1 }
+    : { kind: "empty" });
+  player.activeHotbarSlot = 0;
+
+  const { transport } = createLocalTransportSession(world, actorId);
+  const laterStates = [];
+
+  transport.subscribe(() => {
+    throw new Error("subscriber boom");
+  });
+  transport.subscribe((state) => {
+    laterStates.push(state);
+  });
+
+  transport.enqueueCommand({
+    type: "place",
+    x: 10,
+    y: 10,
+    brushRadius: 1,
+    expectedInventoryRevision: player.inventoryRevision,
+    expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
+  });
+
+  assert.throws(() => transport.advanceTick(), /LocalTransport subscriber publication failed/);
+
+  const clientWorld = transport.getClientWorld();
+  const clientState = transport.getClientState();
+  assert.equal(clientWorld.grid.get(10, 10), MaterialId.Faucet);
+  assert.equal(clientWorld.players[actorId].hotbar[0].kind, "empty");
+  assert.equal(clientState.revision, clientWorld.worldRevision);
+  assert.equal(laterStates.length, 1);
+  assert.equal(laterStates[0].clientWorld.grid.get(10, 10), MaterialId.Faucet);
+  assert.equal(laterStates[0].clientWorld.players[actorId].hotbar[0].kind, "empty");
+  assert.equal(laterStates[0].snapshot, null);
+});
+
+test("LocalTransport queues reentrant publication retries while skipping unsubscribed listeners", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId);
+  let firstListenerCalls = 0;
+  let secondListenerCalls = 0;
+
+  let unsubscribeFirst;
+  unsubscribeFirst = transport.subscribe((state) => {
+    firstListenerCalls += 1;
+    if (firstListenerCalls === 1) {
+      unsubscribeFirst();
+      transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: state.revision });
+      transport.advanceTick();
+    }
+  });
+
+  transport.subscribe(() => {
+    secondListenerCalls += 1;
+  });
+
+  transport.enqueueCommand({ type: "set_input_state", left: true, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false });
+  transport.advanceTick();
+
+  assert.equal(firstListenerCalls, 1);
+  assert.equal(secondListenerCalls, 2);
+  assert.equal(transport.getClientWorld().paused, true);
+  assert.equal(transport.getClientWorld().players[actorId].input.left, false);
+});
+
+test("LocalTransport flushes dirty journal entries after successful publication and avoids reprocessing stale cells", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const player = world.players[actorId];
+  const positions = [{ x: 10, y: 10 }, { x: 20, y: 20 }, { x: 30, y: 30 }, { x: 40, y: 40 }, { x: 50, y: 50 }];
+  player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
+    ? { kind: "material", materialId: MaterialId.Faucet, count: positions.length }
+    : { kind: "empty" });
+  player.activeHotbarSlot = 0;
+
+  const { transport } = createLocalTransportSession(world, actorId);
+
+  for (const position of positions) {
+    const priorState = transport.getClientWorld();
+    transport.enqueueCommand({
+      type: "place",
+      x: position.x,
+      y: position.y,
+      brushRadius: 1,
+      expectedInventoryRevision: priorState.players[actorId].inventoryRevision,
+      expectedAnchorRevision: priorState.grid.cellRevisions[priorState.grid.index(position.x, position.y)] ?? 0,
+    });
+    transport.advanceTick();
+  }
+
+  const firstDelta = transport.getClientDelta();
+  assert.ok(firstDelta);
+  assert.ok(firstDelta.cells.length > 0);
+
+  const initialCellIndex = firstDelta.cells[0].index;
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.advanceTick();
+  const laterDelta = transport.getClientDelta();
+  assert.ok(laterDelta);
+  assert.equal(laterDelta.cells.some((entry) => entry.index === initialCellIndex), false);
+
+  const snapshot = transport.getClientSnapshot();
+  assert.equal(snapshot.worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Faucet);
+
+  const priorState = transport.getClientWorld();
+  transport.enqueueCommand({
+    type: "place",
+    x: 60,
+    y: 60,
+    brushRadius: 1,
+    expectedInventoryRevision: priorState.players[actorId].inventoryRevision,
+    expectedAnchorRevision: priorState.grid.cellRevisions[priorState.grid.index(60, 60)] ?? 0,
+  });
+  transport.advanceTick();
+  const laterPlacementDelta = transport.getClientDelta();
+  assert.ok(laterPlacementDelta);
+  assert.ok(laterPlacementDelta.cells.length > 0);
+});
+
+test("LocalTransport preserves pending dirty state when a subscriber publication fails", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId);
+
+  transport.subscribe(() => {
+    throw new Error("subscriber boom");
+  });
+
+  const index = world.grid.index(0, 0);
+  world.grid.set(0, 0, MaterialId.Sand);
+  assert.equal(world.grid.dirtyCells.size, 1);
+
+  assert.throws(() => transport.advanceTick(), /subscriber boom/);
+  assert.equal(world.grid.dirtyCells.size, 1);
+  assert.equal(transport.getClientWorld().grid.get(0, 0), MaterialId.Empty);
+  assert.equal(transport.getClientSnapshot().worldState.grid.ids[index], MaterialId.Empty);
+});
+
+test("LocalTransport materializes canonical snapshots after deltas and supports repeated subscribe/unsubscribe cycles", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const player = world.players[actorId];
+  player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
+    ? { kind: "material", materialId: MaterialId.Faucet, count: 4 }
+    : { kind: "empty" });
+  player.activeHotbarSlot = 0;
+
+  const { transport, editor } = createLocalTransportSession(world, actorId);
+
+  const unsubscribeFirst = transport.subscribe(() => {});
+  const unsubscribeSecond = transport.subscribe(() => {});
+  unsubscribeFirst();
+  unsubscribeSecond();
+
+  for (let step = 0; step < 4; step += 1) {
+    const priorState = transport.getClientWorld();
+    transport.enqueueCommand({
+      type: "place",
+      x: 10 + step,
+      y: 10 + step,
+      brushRadius: 1,
+      expectedInventoryRevision: priorState.players[actorId].inventoryRevision,
+      expectedAnchorRevision: priorState.grid.cellRevisions[priorState.grid.index(10 + step, 10 + step)] ?? 0,
+    });
+    transport.advanceTick();
+  }
+
+  const explicitSnapshot = transport.getClientSnapshot();
+  const explicitState = transport.getClientState();
+  assert.ok(explicitState.snapshot);
+  assert.equal(explicitSnapshot.checksum, explicitState.snapshot.checksum);
+  assert.equal(explicitSnapshot.worldRevision, transport.getClientWorld().worldRevision);
+  assert.equal(explicitSnapshot.worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Faucet);
+
+  const replacementWorld = createDefaultWorldState("room_transport_snapshot_replacement");
+  const replacementActorId = createPlayerId("player_transport_snapshot_replacement");
+  replacementWorld.players[replacementActorId] = createDefaultPlayerState(replacementActorId);
+  editor.replaceWorld(replacementWorld);
+
+  const replacedSnapshot = transport.getClientSnapshot();
+  assert.equal(replacedSnapshot.worldState.players[replacementActorId].id, replacementActorId);
+  assert.equal(transport.getClientWorld().players[replacementActorId].input.left, false);
+  assert.equal(replacedSnapshot.worldRevision, transport.getClientWorld().worldRevision);
+
+  const unsubscribeAfterReplacement = transport.subscribe(() => {});
+  unsubscribeAfterReplacement();
+  const stateAfterResubscribe = transport.getClientState();
+  assert.ok(stateAfterResubscribe.snapshot);
+  assert.equal(stateAfterResubscribe.snapshot.worldRevision, transport.getClientWorld().worldRevision);
 });
 
 test("LocalTransport constructor and editor replacement clone their input worlds", () => {

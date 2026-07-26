@@ -4,13 +4,16 @@ import {
   advanceWorldTick,
   allocateObjectId,
   createCommandEnvelope,
+  createCommandId,
   createDefaultFallingObjectState,
   createDefaultPlayerState,
   createDefaultWorldState,
   createWorldSnapshot,
+  createWorldDelta,
   restoreWorldState,
   decodeWorldDelta,
   applyWorldDeltaToSnapshot,
+  applyWorldDeltaToSnapshotState,
   applyWorldDeltaStream,
   computeWorldChecksum,
   createPlayerId,
@@ -19,6 +22,7 @@ import {
   MaterialId,
   normalizePlayerInput,
   processCommand,
+  processPendingCommands,
   serializeWorldState,
   createObjectId,
 } from "@particle-sim/shared";
@@ -39,6 +43,102 @@ function createWeatherDeltaState() {
   };
 }
 
+function createReceiptFixture(actorId, authorityOrder, overrides = {}) {
+  return {
+    commandId: createCommandId("command_receipt_fixture"),
+    actorId,
+    actorSequence: 1,
+    authorityOrder,
+    issuedTick: 1,
+    processedTick: 1,
+    commandType: "set_input_state",
+    code: "accepted",
+    accepted: true,
+    beforeWorldRevision: 0,
+    afterWorldRevision: 1,
+    beforeInventoryRevision: 0,
+    afterInventoryRevision: 1,
+    beforeTargetRevision: 0,
+    afterTargetRevision: 1,
+    acceptedEffect: null,
+    fingerprint: "receipt-fingerprint",
+    ...overrides,
+  };
+}
+
+test("receipt validation rejects missing, unknown, and inconsistent fields", () => {
+  const world = createDefaultWorldState("room_receipts");
+  const actorId = createPlayerId("player_receipts");
+  world.players[actorId] = createDefaultPlayerState(actorId);
+
+  const baseReceipt = createReceiptFixture(actorId, 1);
+
+  const missingFieldReceipt = { ...baseReceipt };
+  delete missingFieldReceipt.commandId;
+  world.commandLedger = { actorHighWater: {}, recent: [missingFieldReceipt] };
+  assert.throws(() => serializeWorldState(world), /commandId/i);
+
+  const unknownFieldReceipt = { ...baseReceipt, unexpected: true };
+  world.commandLedger = { actorHighWater: {}, recent: [unknownFieldReceipt] };
+  assert.throws(() => serializeWorldState(world), /unknown field/i);
+
+  const inconsistentReceipt = { ...baseReceipt, accepted: true, code: "paused" };
+  world.commandLedger = { actorHighWater: {}, recent: [inconsistentReceipt] };
+  assert.throws(() => serializeWorldState(world), /accepted/i);
+
+  const invalidTypeReceipt = { ...baseReceipt, commandType: "bogus" };
+  world.commandLedger = { actorHighWater: {}, recent: [invalidTypeReceipt] };
+  assert.throws(() => serializeWorldState(world), /commandType/i);
+
+  const invalidRevisionReceipt = { ...baseReceipt, beforeWorldRevision: "oops" };
+  world.commandLedger = { actorHighWater: {}, recent: [invalidRevisionReceipt] };
+  assert.throws(() => serializeWorldState(world), /beforeWorldRevision/i);
+});
+
+test("forged receipt fingerprints and sequences are rejected as conflicts", () => {
+  const world = createDefaultWorldState("room_receipt_conflict");
+  const actorId = createPlayerId("player_receipt_conflict");
+  world.players[actorId] = createDefaultPlayerState(actorId);
+  const envelope = createCommandEnvelope(actorId, 1, 0, { type: "set_input_state", left: true, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false });
+  world.commandInbox.push(envelope);
+
+  const conflictingReceipt = createReceiptFixture(actorId, null, {
+    commandId: envelope.commandId,
+    actorSequence: envelope.actorSequence,
+    issuedTick: envelope.issuedTick,
+    processedTick: 0,
+    fingerprint: "forged-fingerprint",
+  });
+  world.commandLedger.recent.push(conflictingReceipt);
+
+  const results = processPendingCommands(world);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].kind, "rejected");
+  assert.equal(results[0].code, "conflict");
+});
+
+test("applyWorldDeltaToSnapshotState rejects malformed deltas without mutating the snapshot", () => {
+  const world = createDefaultWorldState("room_delta_reject");
+  const actorId = createPlayerId("player_delta_reject");
+  world.players[actorId] = createDefaultPlayerState(actorId);
+  const beforeState = serializeWorldState(world);
+  const targetState = JSON.parse(JSON.stringify(beforeState));
+  const invalidDelta = {
+    version: 1,
+    baseRevision: world.worldRevision,
+    targetRevision: world.worldRevision + 1,
+    gridDimensions: { width: world.grid.width, height: world.grid.height },
+    cells: [{ index: 0, materialId: MaterialId.Stone, shade: 0, auxiliary: 0, objectId: null, revision: world.worldRevision + 1 }],
+    players: [],
+    fallingObjects: [],
+    metadata: [{ field: "commandLedger", value: { actorHighWater: {}, recent: [createReceiptFixture(actorId, null, { commandId: createCommandId("command_bad_receipt"), issuedTick: 0, processedTick: 0, fingerprint: "" })] } }],
+  };
+
+  assert.throws(() => applyWorldDeltaToSnapshotState(targetState, invalidDelta), /commandId|commandLedger|fingerprint/i);
+  assert.deepEqual(targetState, beforeState);
+  assert.deepEqual(serializeWorldState(world), beforeState);
+});
+
 test("dirty tracking is independent from simulation updated flags", () => {
   const world = createDefaultWorldState("room_dirty");
   assert.equal(world.grid.dirtyCells.size, 0);
@@ -48,6 +148,109 @@ test("dirty tracking is independent from simulation updated flags", () => {
   world.grid.markUpdated(1, 1);
   assert.equal(world.grid.wasUpdated(1, 1), true);
   assert.equal(world.grid.dirtyCells.size, 1);
+});
+
+test("world deltas clone nested authority values before and after application", () => {
+  const world = createDefaultWorldState("room_delta_alias");
+  const playerId = createPlayerId("player_alias");
+  world.players[playerId] = createDefaultPlayerState(playerId);
+  world.players[playerId].hotbar[0] = { kind: "material", materialId: MaterialId.Stone, count: 5 };
+  world.players[playerId].inventory.stone = 9;
+  world.players[playerId].pendingRefunds.refund = 2;
+  world.players[playerId].input.left = true;
+  const fallingObjectId = createObjectId("object_alias");
+  world.fallingObjects[fallingObjectId] = createDefaultFallingObjectState(fallingObjectId, MaterialId.Stone, 1, 2, 3, 4, [[5, 6]]);
+  world.fallingObjects[fallingObjectId].provenance = { source: "alias", tick: 7 };
+  world.time = { dayNightTick: 3 };
+  world.weather = createWeatherDeltaState();
+  world.random = { algorithm: "mulberry32-v1", seed: 11, state: 13 };
+  world.commandLedger = { actorHighWater: { [playerId]: 4 }, recent: [createReceiptFixture(playerId, 4)] };
+  const snapshot = createWorldSnapshot(world);
+  world.grid.set(0, 0, MaterialId.Water);
+  world.players[playerId].hotbar[0] = { kind: "material", materialId: MaterialId.Dirt, count: 8 };
+  world.players[playerId].inventory.stone = 12;
+  world.players[playerId].pendingRefunds.refund = 3;
+  world.players[playerId].input.left = false;
+  world.fallingObjects[fallingObjectId].offsets[0][0] = 99;
+  world.fallingObjects[fallingObjectId].provenance = { source: "updated", tick: 8 };
+  world.time = { dayNightTick: 4 };
+  world.weather = { ...world.weather, episodeElapsed: 77, wind: 2.5 };
+  world.random = { algorithm: "mulberry32-v1", seed: 11, state: 19 };
+  world.commandLedger = { actorHighWater: { [playerId]: 9 }, recent: [createReceiptFixture(playerId, 9)] };
+  const delta = createWorldDelta(snapshot, world);
+  assert.ok(delta);
+  assert.notStrictEqual(delta.players[0].state, world.players[playerId]);
+  assert.notStrictEqual(delta.players[0].state.hotbar, world.players[playerId].hotbar);
+  assert.notStrictEqual(delta.players[0].state.inventory, world.players[playerId].inventory);
+  assert.notStrictEqual(delta.fallingObjects[0].state, world.fallingObjects[fallingObjectId]);
+  assert.notStrictEqual(delta.fallingObjects[0].state.offsets, world.fallingObjects[fallingObjectId].offsets);
+  const weatherDelta = delta.metadata.find((entry) => entry.field === "weather");
+  const timeDelta = delta.metadata.find((entry) => entry.field === "time");
+  const randomDelta = delta.metadata.find((entry) => entry.field === "random");
+  const commandLedgerDelta = delta.metadata.find((entry) => entry.field === "commandLedger");
+  assert.notStrictEqual(weatherDelta?.value, world.weather);
+  assert.notStrictEqual(timeDelta?.value, world.time);
+  assert.notStrictEqual(randomDelta?.value, world.random);
+  assert.notStrictEqual(commandLedgerDelta?.value, world.commandLedger);
+
+  delta.players[0].state.hotbar[0].count = 777;
+  delta.players[0].state.inventory.stone = 333;
+  delta.players[0].state.pendingRefunds.refund = 111;
+  delta.players[0].state.input.left = !delta.players[0].state.input.left;
+  delta.fallingObjects[0].state.offsets[0][0] = 888;
+  delta.fallingObjects[0].state.provenance = { source: "tampered", tick: 999 };
+  weatherDelta.value.episodeElapsed = -1;
+  weatherDelta.value.wind = -2;
+  timeDelta.value.dayNightTick = 123;
+  randomDelta.value.state = 321;
+  commandLedgerDelta.value.recent.push(createReceiptFixture("tampered_player", 123, { commandId: createCommandId("command_tampered_receipt") }));
+
+  assert.equal(world.players[playerId].hotbar[0].count, 8);
+  assert.equal(world.players[playerId].inventory.stone, 12);
+  assert.equal(world.players[playerId].pendingRefunds.refund, 3);
+  assert.equal(world.players[playerId].input.left, false);
+  assert.equal(world.fallingObjects[fallingObjectId].offsets[0][0], 99);
+  assert.equal(world.fallingObjects[fallingObjectId].provenance.tick, 8);
+  assert.equal(world.weather.episodeElapsed, 77);
+  assert.equal(world.time.dayNightTick, 4);
+  assert.equal(world.random.state, 19);
+  assert.equal(world.commandLedger.recent[0].authorityOrder, 9);
+
+  const appliedSnapshot = applyWorldDeltaToSnapshot(snapshot, delta);
+  assert.equal(appliedSnapshot.worldState.players[playerId].hotbar[0].count, 8);
+  assert.equal(appliedSnapshot.worldState.players[playerId].inventory.stone, 12);
+  assert.equal(appliedSnapshot.worldState.players[playerId].pendingRefunds.refund, 3);
+  assert.equal(appliedSnapshot.worldState.players[playerId].input.left, false);
+  assert.equal(appliedSnapshot.worldState.fallingObjects[fallingObjectId].offsets[0][0], 99);
+  assert.equal(appliedSnapshot.worldState.fallingObjects[fallingObjectId].provenance.tick, 8);
+  assert.equal(appliedSnapshot.worldState.weather.episodeElapsed, 77);
+  assert.equal(appliedSnapshot.worldState.time.dayNightTick, 4);
+  assert.equal(appliedSnapshot.worldState.random.state, 19);
+  assert.equal(appliedSnapshot.worldState.commandLedger.recent[0].authorityOrder, 9);
+ 
+  delta.players[0].state.hotbar[0].count = 1;
+  delta.players[0].state.inventory.stone = 2;
+  delta.players[0].state.pendingRefunds.refund = 3;
+  delta.players[0].state.input.left = true;
+  delta.fallingObjects[0].state.offsets[0][0] = 4;
+  delta.fallingObjects[0].state.provenance = { source: "after-apply", tick: 5 };
+  weatherDelta.value.episodeElapsed = 6;
+  weatherDelta.value.wind = 7;
+  timeDelta.value.dayNightTick = 8;
+  randomDelta.value.state = 9;
+  commandLedgerDelta.value.recent.push(createReceiptFixture("after_apply_player", 10, { commandId: createCommandId("command_after_apply_receipt") }));
+
+  assert.equal(appliedSnapshot.worldState.players[playerId].hotbar[0].count, 8);
+  assert.equal(appliedSnapshot.worldState.players[playerId].inventory.stone, 12);
+  assert.equal(appliedSnapshot.worldState.players[playerId].pendingRefunds.refund, 3);
+  assert.equal(appliedSnapshot.worldState.players[playerId].input.left, false);
+  assert.equal(appliedSnapshot.worldState.fallingObjects[fallingObjectId].offsets[0][0], 99);
+  assert.equal(appliedSnapshot.worldState.fallingObjects[fallingObjectId].provenance.tick, 8);
+  assert.equal(appliedSnapshot.worldState.weather.episodeElapsed, 77);
+  assert.equal(appliedSnapshot.worldState.time.dayNightTick, 4);
+  assert.equal(appliedSnapshot.worldState.random.state, 19);
+  assert.equal(appliedSnapshot.worldState.commandLedger.recent[0].authorityOrder, 9);
+  assert.equal(appliedSnapshot.worldState.commandLedger.recent.length, 1);
 });
 
 test("repeated writes coalesce into a single dirty journal entry", () => {

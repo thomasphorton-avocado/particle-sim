@@ -1,7 +1,7 @@
 import { advanceWorldTick, type PlayerInputState } from "./gameplay.js";
 import { createCommandEnvelope, getNextActorSequence, processPendingCommands, type CommandResult, type GameplayCommand } from "./commands.js";
 import { type PlayerId } from "./ids.js";
-import { type WorldState, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
+import { type WorldState, createDefaultCommandLedger, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
 import { createPlayerId } from "./ids.js";
 import { applyWorldDeltaToSnapshotState, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
 import type { DirtyCellEntry } from "./dirty-journal.js";
@@ -45,6 +45,8 @@ interface TransportSubscriber {
 function cloneTransportWorld(world: WorldState): WorldState {
   const cloned = cloneWorldState(world);
   cloned.commandInbox = [];
+  cloned.commandLedger = createDefaultCommandLedger();
+  cloned.nextAuthorityOrder = 1;
   return cloned;
 }
 

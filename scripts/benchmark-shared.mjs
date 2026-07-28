@@ -25,6 +25,8 @@ const SCHEDULES = [
   { hz: 30, substepsPerFrame: 2 },
 ];
 
+const PUBLICATION_HZ_OPTIONS = [60, 30, 20];
+
 const SCENARIOS = ["starter", "stress"];
 
 function createScenario(name) {
@@ -231,14 +233,17 @@ function runScenario(name, schedule, options = {}) {
   };
 }
 
-function runTransportPublicationBenchmark(options = {}) {
+function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
   const world = createDefaultWorldState("bench_transport");
   const player = createDefaultPlayerState("player_1");
   player.x = 20;
   player.y = 30;
   world.players.player_1 = player;
-  const session = createLocalTransportSession(world, "player_1");
-  session.transport.subscribe(() => undefined);
+  const session = createLocalTransportSession(world, "player_1", { publicationHz });
+  let publicationCount = 0;
+  session.transport.subscribe(() => {
+    publicationCount += 1;
+  });
   const warmupTicks = options.warmupTicks ?? WARMUP_TICKS;
   const totalTicks = options.totalTicks ?? 200;
   const gc = getGc(options);
@@ -247,6 +252,7 @@ function runTransportPublicationBenchmark(options = {}) {
     session.transport.advanceTick(makeInputsForTick(tick));
   }
 
+  publicationCount = 0;
   gc();
   const baselineMemory = getMemorySnapshot();
   const tickSamplesMs = [];
@@ -274,6 +280,10 @@ function runTransportPublicationBenchmark(options = {}) {
   return {
     scenario: "transport-publication",
     kind: "transportPublication",
+    publicationHz,
+    publicationIntervalTicks: Math.max(1, Math.round(60 / publicationHz)),
+    publicationCount,
+    publicationsPerSecond: publicationCount / (totalTicks / 60),
     fallingUpdates: totalTicks,
     perTickMs: summarize(tickSamplesMs),
     snapshotAccessMs: summarize(snapshotSamplesMs),
@@ -299,25 +309,32 @@ export function runBenchmark(options = {}) {
       results.push(runScenario(scenario, schedule, options));
     }
   }
-  results.push(runTransportPublicationBenchmark(options));
+  for (const publicationHz of PUBLICATION_HZ_OPTIONS) {
+    results.push(runTransportPublicationBenchmark(options, publicationHz));
+  }
   return results;
 }
 
 export function assertBenchmarkResults(results) {
   const minimumFallingUpdates = Math.max(50, Math.floor(TOTAL_TICKS / 4));
   const byKey = new Map();
-  const transportResult = results.find((result) => result.kind === "transportPublication");
-  if (!transportResult) {
+  const transportResults = results.filter((result) => result.kind === "transportPublication");
+  if (transportResults.length === 0) {
     throw new Error("Missing transport publication benchmark result");
   }
-  if (!Number.isFinite(transportResult.perTickMs.mean) || transportResult.perTickMs.mean > 8) {
-    throw new Error(`Transport publication tick budget exceeded: ${transportResult.perTickMs.mean}ms`);
-  }
-  if (!Number.isFinite(transportResult.snapshotAccessMs.mean) || transportResult.snapshotAccessMs.mean > 10) {
-    throw new Error(`Transport publication snapshot access budget exceeded: ${transportResult.snapshotAccessMs.mean}ms`);
-  }
-  if (!Number.isFinite(transportResult.dirtyCellCount) || transportResult.dirtyCellCount < 0) {
-    throw new Error(`Transport publication dirty cell count is invalid: ${transportResult.dirtyCellCount}`);
+  for (const transportResult of transportResults) {
+    if (!Number.isFinite(transportResult.perTickMs.mean) || transportResult.perTickMs.mean > 8) {
+      throw new Error(`Transport publication tick budget exceeded for ${transportResult.publicationHz}Hz: ${transportResult.perTickMs.mean}ms`);
+    }
+    if (!Number.isFinite(transportResult.snapshotAccessMs.mean) || transportResult.snapshotAccessMs.mean > 10) {
+      throw new Error(`Transport publication snapshot access budget exceeded for ${transportResult.publicationHz}Hz: ${transportResult.snapshotAccessMs.mean}ms`);
+    }
+    if (!Number.isFinite(transportResult.dirtyCellCount) || transportResult.dirtyCellCount < 0) {
+      throw new Error(`Transport publication dirty cell count is invalid for ${transportResult.publicationHz}Hz: ${transportResult.dirtyCellCount}`);
+    }
+    if (!Number.isFinite(transportResult.publicationCount) || transportResult.publicationCount < 0) {
+      throw new Error(`Transport publication count is invalid for ${transportResult.publicationHz}Hz: ${transportResult.publicationCount}`);
+    }
   }
   for (const result of results) {
     if (result.kind === "transportPublication") continue;

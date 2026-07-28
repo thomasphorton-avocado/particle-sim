@@ -12,8 +12,9 @@ import { enqueueInputStateCommand, enqueueMineTransitionCommand, processProducti
 const CELL_SIZE = 5;
 const TICK_MS = 1000 / 60;
 const MAX_TICKS_PER_FRAME = 8;
+const PRODUCTION_PUBLICATION_HZ = 20;
 
-const session = createLocalTransportSession(createStarterWorld({ roomId: "room_default" }), createPlayerId("player_1"));
+const session = createLocalTransportSession(createStarterWorld({ roomId: "room_default" }), createPlayerId("player_1"), { publicationHz: PRODUCTION_PUBLICATION_HZ });
 state.transport = session.transport;
 const initialGrid = state.world.grid;
 

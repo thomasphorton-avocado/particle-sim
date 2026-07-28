@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MaterialId, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createPlayerId } from "@particle-sim/shared";
+import { MaterialId, PublicationCadence, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createPlayerId } from "@particle-sim/shared";
 
 function createWorldWithPlayer() {
   const world = createDefaultWorldState("room_transport");
@@ -51,7 +51,41 @@ function createForgedAcceptedPauseReceipt(envelope) {
   };
 }
 
-test("LocalTransport publishes snapshots and isolated client state after accepted commands", () => {
+test("PublicationCadence schedules 60/30/20 Hz publications from authoritative revisions", () => {
+  const cadence60 = new PublicationCadence({ publicationHz: 60 });
+  cadence60.reset(0);
+  assert.equal(cadence60.observe(1).shouldPublish, true);
+
+  const cadence30 = new PublicationCadence({ publicationHz: 30 });
+  cadence30.reset(0);
+  assert.equal(cadence30.observe(1).shouldPublish, false);
+  assert.equal(cadence30.observe(2).shouldPublish, true);
+
+  const cadence20 = new PublicationCadence({ publicationHz: 20 });
+  cadence20.reset(0);
+  assert.equal(cadence20.observe(1).shouldPublish, false);
+  assert.equal(cadence20.observe(2).shouldPublish, false);
+  assert.equal(cadence20.observe(3).shouldPublish, true);
+});
+
+test("LocalTransport coalesces delayed publications across ticks while preserving subscriber state", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 30 });
+  const revisions = [];
+  transport.subscribe((state) => {
+    revisions.push(state.revision);
+  });
+
+  await Promise.resolve();
+  assert.equal(revisions.length, 1);
+  transport.advanceTick();
+  assert.equal(revisions.length, 1);
+  transport.advanceTick();
+  assert.equal(revisions.length, 2);
+  assert.equal(revisions.at(-1), 2);
+});
+
+test("LocalTransport publishes snapshots and isolated client state after accepted commands", async () => {
   const { world, actorId } = createWorldWithPlayer();
   const { transport } = createLocalTransportSession(world, actorId);
   const seenRevisions = [];
@@ -59,6 +93,8 @@ test("LocalTransport publishes snapshots and isolated client state after accepte
   transport.subscribe((state) => {
     seenRevisions.push(state.revision);
   });
+
+  await Promise.resolve();
 
   transport.enqueueCommand({
     type: "set_input_state",
@@ -422,7 +458,7 @@ test("LocalTransport rejects owner-only pause and time commands for a different 
   assert.equal(world.ownerPlayerId, ownerActorId);
 });
 
-test("LocalTransport isolates subscriber callback state and preserves authoritative outcomes", () => {
+test("LocalTransport isolates subscriber callback state and preserves authoritative outcomes", async () => {
   const { world, actorId } = createWorldWithPlayer();
   const { transport } = createLocalTransportSession(world, actorId);
 
@@ -442,6 +478,8 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
   transport.subscribe((state) => {
     secondSubscriberState = state;
   });
+
+  await Promise.resolve();
 
   transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
   transport.advanceTick();
@@ -470,7 +508,7 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
   assert.equal(transport.getClientState().lastCommandResults[0].code, "accepted");
 });
 
-test("LocalTransport commits canonical state and still notifies later listeners when an earlier subscriber throws", () => {
+test("LocalTransport commits canonical state and still notifies later listeners when an earlier subscriber throws", async () => {
   const { world, actorId } = createWorldWithPlayer();
   const player = world.players[actorId];
   player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
@@ -487,6 +525,8 @@ test("LocalTransport commits canonical state and still notifies later listeners 
   transport.subscribe((state) => {
     laterStates.push(state);
   });
+
+  await Promise.resolve();
 
   transport.enqueueCommand({
     type: "place",
@@ -510,7 +550,7 @@ test("LocalTransport commits canonical state and still notifies later listeners 
   assert.equal(laterStates[0].snapshot, null);
 });
 
-test("LocalTransport queues reentrant publication retries while skipping unsubscribed listeners", () => {
+test("LocalTransport queues reentrant publication retries while skipping unsubscribed listeners", async () => {
   const { world, actorId } = createWorldWithPlayer();
   const { transport } = createLocalTransportSession(world, actorId);
   let firstListenerCalls = 0;
@@ -529,6 +569,8 @@ test("LocalTransport queues reentrant publication retries while skipping unsubsc
   transport.subscribe(() => {
     secondListenerCalls += 1;
   });
+
+  await Promise.resolve();
 
   transport.enqueueCommand({ type: "set_input_state", left: true, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false });
   transport.advanceTick();

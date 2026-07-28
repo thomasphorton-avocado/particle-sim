@@ -63,7 +63,8 @@ function createInitialWorld(): WorldState {
 
 const initialLocalPlayerId = createPlayerId("player_1");
 const initialWorld = createInitialWorld();
-const initialSession = createLocalTransportSession(initialWorld, initialLocalPlayerId);
+const PRODUCTION_PUBLICATION_HZ = 20;
+const initialSession = createLocalTransportSession(initialWorld, initialLocalPlayerId, { publicationHz: PRODUCTION_PUBLICATION_HZ });
 let transport = initialSession.transport;
 let currentWorld: WorldState = transport.getClientWorld();
 let unsubscribeTransport: (() => void) | null = null;

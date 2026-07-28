@@ -7,7 +7,7 @@ const { runBenchmark: typedRunBenchmark } = benchmarkModule as { runBenchmark: (
 describe("benchmark self-verification", () => {
   it("keeps 60Hz and 30Hz cadences canonically identical", () => {
     const results = typedRunBenchmark({ warmupTicks: 20, totalTicks: 60, gc: () => undefined });
-    expect(results).toHaveLength(5);
+    expect(results).toHaveLength(7);
 
     const byScenario = new Map<string, { hz: number; digest: string }>();
     for (const result of results) {

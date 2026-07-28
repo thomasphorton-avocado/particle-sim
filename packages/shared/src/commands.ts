@@ -331,12 +331,12 @@ function createCommandResult(planOrRejection: ValidatedCommandPlan | CommandReje
     authorityOrder: planOrRejection.authorityOrder,
     issuedTick: planOrRejection.envelope.issuedTick,
     processedTick: world.tick,
-    beforeWorldRevision: world.worldRevision,
-    afterWorldRevision: world.worldRevision,
+    beforeWorldRevision: getAuthorityRevision(world),
+    afterWorldRevision: getAuthorityRevision(world),
     beforeInventoryRevision: actor?.inventoryRevision ?? 0,
     afterInventoryRevision: actor?.inventoryRevision ?? 0,
-    beforeTargetRevision: world.worldRevision,
-    afterTargetRevision: world.worldRevision,
+    beforeTargetRevision: getAuthorityRevision(world),
+    afterTargetRevision: getAuthorityRevision(world),
     acceptedEffect: null,
   };
 }
@@ -785,6 +785,10 @@ function clonePlayerStateForPatch(player: PlayerState): CommandPlayerPatch {
   };
 }
 
+function getAuthorityRevision(world: WorldState): number {
+  return Math.max(world.tick, world.worldRevision);
+}
+
 export function validateCommand(world: WorldState, envelopeInput: unknown): ValidatedCommandPlan | CommandRejection {
   const envelope = parseEnvelope(envelopeInput);
   if (!envelope) {
@@ -821,9 +825,9 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
     return createRejection(envelope, "paused", true);
   }
 
-  const beforeWorldRevision = world.worldRevision;
+  const beforeWorldRevision = getAuthorityRevision(world);
   const beforeInventoryRevision = actor.inventoryRevision;
-  const beforeTargetRevision = world.worldRevision;
+  const beforeTargetRevision = getAuthorityRevision(world);
   let playerPatch: CommandPlayerPatch | undefined;
   let gridWrites: CommandGridWrite[] = [];
   let fallingObjects: CommandFallingObjectCreate[] = [];
@@ -977,7 +981,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
         resultCode = "already_state";
         break;
       }
-      if (envelope.command.expectedWorldRevision !== world.worldRevision) {
+      if (envelope.command.expectedWorldRevision !== getAuthorityRevision(world)) {
         resultCode = "revision";
         break;
       }
@@ -995,7 +999,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
         resultCode = "already_state";
         break;
       }
-      if (envelope.command.expectedWorldRevision !== world.worldRevision) {
+      if (envelope.command.expectedWorldRevision !== getAuthorityRevision(world)) {
         resultCode = "revision";
         break;
       }
@@ -1009,7 +1013,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
         resultCode = "not_owner";
         break;
       }
-      if (envelope.command.expectedWorldRevision !== world.worldRevision) {
+      if (envelope.command.expectedWorldRevision !== getAuthorityRevision(world)) {
         resultCode = "revision";
         break;
       }

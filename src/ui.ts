@@ -132,8 +132,8 @@ export function buildUi(root: HTMLElement, editor: LocalTransportEditorCapabilit
   pauseBtn.textContent = "Pause";
   pauseBtn.addEventListener("click", () => {
     const command = state.world.paused
-      ? { type: "resume_world" as const, expectedWorldRevision: state.world.worldRevision }
-      : { type: "pause_world" as const, expectedWorldRevision: state.world.worldRevision };
+      ? { type: "resume_world" as const, expectedWorldRevision: state.transport.getClientState().revision }
+      : { type: "pause_world" as const, expectedWorldRevision: state.transport.getClientState().revision };
     state.transport.enqueueCommand(command);
     requestAnimationFrame(() => {
       pauseBtn.textContent = state.world.paused ? "Resume" : "Pause";

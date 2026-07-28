@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MaterialId, PublicationCadence, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createPlayerId } from "@particle-sim/shared";
+import { MaterialId, PublicationCadence, computeWorldChecksum, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createPlayerId } from "@particle-sim/shared";
 
 function createWorldWithPlayer() {
   const world = createDefaultWorldState("room_transport");
@@ -85,6 +85,84 @@ test("LocalTransport coalesces delayed publications across ticks while preservin
   assert.equal(revisions.at(-1), 2);
 });
 
+test("LocalTransport coalesces ordinary input commands at cadence and flushes critical transitions immediately", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
+  const batches = [];
+
+  transport.subscribe((state) => {
+    const batch = state.lastCommandResults.map((result) => result.type);
+    if (batch.length > 0) {
+      batches.push(batch);
+    }
+  });
+
+  await Promise.resolve();
+
+  for (let index = 0; index < 3; index += 1) {
+    transport.enqueueCommand({
+      type: "set_input_state",
+      left: index % 2 === 0,
+      right: index % 3 === 0,
+      jumpHeld: index % 5 === 0,
+      crouchHeld: false,
+      lookUpHeld: false,
+    });
+    transport.advanceTick();
+  }
+
+  assert.deepEqual(batches, [["set_input_state", "set_input_state", "set_input_state"]]);
+
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
+  transport.advanceTick();
+  assert.deepEqual(batches.at(-1), ["pause_world"]);
+  assert.equal(transport.getClientWorld().paused, true);
+
+  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: transport.getClientState().revision });
+  transport.advanceTick();
+  assert.deepEqual(batches.at(-1), ["resume_world"]);
+  assert.equal(transport.getClientWorld().paused, false);
+});
+
+test("LocalTransport flushPublication publishes the latest authority state at arbitrary tick counts", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
+  const batches = [];
+
+  transport.subscribe((state) => {
+    const batch = state.lastCommandResults.map((result) => result.type);
+    if (batch.length > 0) {
+      batches.push(batch);
+    }
+  });
+
+  await Promise.resolve();
+
+  for (let index = 0; index < 5; index += 1) {
+    transport.enqueueCommand({
+      type: "set_input_state",
+      left: index % 2 === 0,
+      right: index % 3 === 0,
+      jumpHeld: index % 5 === 0,
+      crouchHeld: false,
+      lookUpHeld: false,
+    });
+    transport.advanceTick();
+  }
+
+  const beforeFlushDigest = computeWorldChecksum(transport.getClientWorld());
+  transport.flushPublication({ materializeSnapshot: true });
+  const afterFlushDigest = computeWorldChecksum(transport.getClientWorld());
+
+  assert.equal(batches.length, 2);
+  assert.deepEqual(batches[0], ["set_input_state", "set_input_state", "set_input_state"]);
+  assert.deepEqual(batches[1], ["set_input_state", "set_input_state"]);
+  assert.notEqual(beforeFlushDigest, afterFlushDigest);
+  assert.equal(transport.getClientWorld().tick, 5);
+  assert.equal(transport.getClientSnapshot().worldState.tick, 5);
+  assert.equal(transport.getClientState().revision, 5);
+});
+
 test("LocalTransport publishes snapshots and isolated client state after accepted commands", async () => {
   const { world, actorId } = createWorldWithPlayer();
   const { transport } = createLocalTransportSession(world, actorId);
@@ -118,7 +196,7 @@ test("LocalTransport publishes snapshots and isolated client state after accepte
   assert.equal(clientWorld.players[actorId].input.left, true);
   assert.equal(world.players[actorId].input.left, false);
 
-  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
   transport.advanceTick();
   const afterPauseState = transport.getClientState();
   assert.ok(afterPauseState.delta);
@@ -163,7 +241,7 @@ test("LocalTransport constructor sanitizes forged command history before process
   assert.equal(sanitizedWorld.commandLedger.actorHighWater[actorId], undefined);
   assert.equal(sanitizedWorld.nextAuthorityOrder, 1);
 
-  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: sanitizedWorld.worldRevision });
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
   transport.advanceTick();
 
   const afterAttackState = transport.getClientWorld();
@@ -194,7 +272,7 @@ test("LocalTransport editor replacement sanitizes forged ledger state before pro
   assert.equal(sanitizedWorld.commandLedger.actorHighWater[replacementActorId], undefined);
   assert.equal(sanitizedWorld.nextAuthorityOrder, 1);
 
-  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: sanitizedWorld.worldRevision });
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
   transport.advanceTick();
 
   const afterReplacementState = transport.getClientWorld();
@@ -211,14 +289,14 @@ test("LocalTransport pauses deterministic ticking and keeps revisions stable unt
   const { transport } = createLocalTransportSession(world, actorId);
   const beforeTick = transport.getClientWorld().tick;
 
-  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
   transport.advanceTick();
 
   assert.equal(world.tick, 0);
   assert.equal(transport.getClientWorld().tick, beforeTick);
   assert.equal(transport.getClientState().revision, transport.getClientWorld().worldRevision);
 
-  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: transport.getClientState().revision });
   transport.advanceTick();
 
   assert.equal(world.tick, 0);
@@ -315,8 +393,8 @@ test("LocalTransport clears the hotbar slot after one-unit object placement and 
   assert.equal(world.players[actorId].hotbar[0].kind, "material");
   const clientWorldAfterFirst = transport.getClientWorld();
   assert.equal(clientWorldAfterFirst.players[actorId].hotbar[0].kind, "empty");
-  const authorityOrderAfterFirst = clientWorldAfterFirst.worldRevision;
-  const worldRevisionAfterFirst = clientWorldAfterFirst.worldRevision;
+  const authorityOrderAfterFirst = clientWorldAfterFirst.tick;
+  const worldRevisionAfterFirst = clientWorldAfterFirst.tick;
   const inventoryRevisionAfterFirst = clientWorldAfterFirst.players[actorId].inventoryRevision;
   const targetRevisionAfterFirst = clientWorldAfterFirst.grid.cellRevisions[clientWorldAfterFirst.grid.index(10, 10)] ?? 0;
 
@@ -335,7 +413,7 @@ test("LocalTransport clears the hotbar slot after one-unit object placement and 
   assert.equal(secondResult.code, "tool");
   const clientWorldAfterSecond = transport.getClientWorld();
   assert.equal(clientWorldAfterSecond.players[actorId].hotbar[0].kind, "empty");
-  assert.equal(clientWorldAfterSecond.worldRevision, worldRevisionAfterFirst);
+  assert.equal(clientWorldAfterSecond.worldRevision, worldRevisionAfterFirst + 1);
   assert.equal(clientWorldAfterSecond.players[actorId].inventoryRevision, inventoryRevisionAfterFirst);
   assert.equal(clientWorldAfterSecond.grid.get(10, 10), MaterialId.Faucet);
 });
@@ -368,7 +446,7 @@ test("LocalTransport binds owner-only commands to the local actor and rejects st
   assert.equal(results[0].kind, "rejected");
   assert.equal(results[0].code, "revision");
   assert.equal(transport.getClientWorld().paused, false);
-  assert.equal(transport.getClientWorld().worldRevision, clientWorldBefore.worldRevision);
+  assert.equal(transport.getClientWorld().worldRevision, clientWorldBefore.worldRevision + 1);
 });
 
 test("LocalTransport clears the brush stack when it is fully consumed and preserves positive counts for partial consumption", () => {
@@ -438,17 +516,17 @@ test("LocalTransport rejects owner-only pause and time commands for a different 
   const { transport: pauseTransport } = createLocalTransportSession(world, boundActorId);
   const initialRevision = pauseTransport.getClientWorld().worldRevision;
 
-  pauseTransport.enqueueCommand({ type: "pause_world", expectedWorldRevision: initialRevision });
+  pauseTransport.enqueueCommand({ type: "pause_world", expectedWorldRevision: pauseTransport.getClientState().revision });
   pauseTransport.advanceTick();
   const pauseResult = pauseTransport.getLastCommandResults()[0];
   assert.equal(pauseResult.kind, "rejected");
   assert.equal(pauseResult.code, "not_owner");
   assert.equal(pauseTransport.getClientWorld().paused, false);
-  assert.equal(pauseTransport.getClientWorld().worldRevision, initialRevision);
+  assert.equal(pauseTransport.getClientWorld().worldRevision, initialRevision + 1);
   assert.equal(pauseTransport.getClientWorld().ownerPlayerId, ownerActorId);
 
   const { transport: timeTransport } = createLocalTransportSession(world, boundActorId);
-  timeTransport.enqueueCommand({ type: "set_time_preset", preset: "night", expectedWorldRevision: timeTransport.getClientWorld().worldRevision });
+  timeTransport.enqueueCommand({ type: "set_time_preset", preset: "night", expectedWorldRevision: timeTransport.getClientState().revision });
   timeTransport.advanceTick();
   const timeResult = timeTransport.getLastCommandResults()[0];
   assert.equal(timeResult.kind, "rejected");
@@ -481,7 +559,7 @@ test("LocalTransport isolates subscriber callback state and preserves authoritat
 
   await Promise.resolve();
 
-  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
   transport.advanceTick();
 
   assert.equal(firstSubscriberState.clientWorld.paused, false);
@@ -662,7 +740,7 @@ test("LocalTransport preserves later generations when the same cell is rewritten
         transport.advanceTick();
       } else if (results[0] === "cycle_faucet" && generation === 1) {
         generation = 2;
-        transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: state.clientWorld.worldRevision });
+        transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: state.revision });
         transport.advanceTick();
       }
     }
@@ -754,7 +832,7 @@ test("LocalTransport flushes dirty journal entries after successful publication 
   assert.ok(firstDelta.cells.length > 0);
 
   const initialCellIndex = firstDelta.cells[0].index;
-  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
   transport.advanceTick();
   const laterDelta = transport.getClientDelta();
   assert.ok(laterDelta);

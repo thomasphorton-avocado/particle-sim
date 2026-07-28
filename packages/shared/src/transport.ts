@@ -48,6 +48,12 @@ interface TransportSubscriber {
   replica: TransportReplica;
 }
 
+interface PublicationGenerationState {
+  generation: number;
+  commandResults: CommandResult[];
+  dirtyCells: DirtyCellEntry[];
+}
+
 function cloneTransportWorld(world: WorldState): WorldState {
   const cloned = cloneWorldState(world);
   cloned.commandInbox = [];
@@ -70,6 +76,7 @@ export class LocalTransport {
   #initialSyncFailed: boolean;
   #publicationCadence: PublicationCadence;
   #publicationSubscriberSnapshot: TransportSubscriber[] | null;
+  #publicationGeneration: number;
 
   constructor(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1"), options: LocalTransportOptions = {}) {
     this.#world = cloneTransportWorld(world);
@@ -85,6 +92,7 @@ export class LocalTransport {
     this.#publishQueued = false;
     this.#initialSyncFailed = false;
     this.#publicationSubscriberSnapshot = null;
+    this.#publicationGeneration = 0;
     this.#publicationCadence = new PublicationCadence(options.publicationCadence ?? {
       publicationHz: options.publicationHz ?? DEFAULT_PUBLICATION_HZ,
     });
@@ -96,7 +104,6 @@ export class LocalTransport {
       listener,
       replica: this.#createReplica(this.#getSubscriptionSnapshot()),
     };
-    const initialSubscriberSnapshot = this.#subscribers.slice();
     const unsubscribe = () => {
       this.#subscribers = this.#subscribers.filter((entry) => entry.listener !== listener);
     };
@@ -106,6 +113,7 @@ export class LocalTransport {
         if (this.#initialSyncFailed) {
           return;
         }
+        const initialSubscriberSnapshot = this.#subscribers.filter((entry) => entry.listener !== listener);
         this.#publicationSubscriberSnapshot = initialSubscriberSnapshot;
         try {
           subscriber.listener(this.#buildClientState(subscriber.replica, true));
@@ -142,6 +150,10 @@ export class LocalTransport {
     return this.#replica.lastCommandResults.map((result) => cloneCommandResult(result));
   }
 
+  flushPublication(options: { materializeSnapshot?: boolean } = {}): void {
+    this.#publish({ force: true, materializeSnapshot: options.materializeSnapshot ?? true });
+  }
+
   enqueueCommand(command: GameplayCommand): void {
     const actorId = this.#ownerPlayerId;
     const envelope = createCommandEnvelope(actorId, getNextActorSequence(this.#world, actorId), this.#world.tick, command);
@@ -162,13 +174,13 @@ export class LocalTransport {
         this.#lastCommandResults = this.#lastCommandResults.slice(-256);
       }
     }
-    const shouldPublishImmediately = this.#pendingCommandResults.length > 0 || previousPaused !== this.#world.paused;
+    const shouldPublishImmediately = this.#shouldPublishImmediately(results, previousPaused);
     if (this.#world.paused) {
       clearPendingInputs(this.#world);
       const cadenceDecision = this.#publicationCadence.observe(this.#getAuthorityRevision(this.#world), { force: shouldPublishImmediately });
       const shouldPublish = cadenceDecision.shouldPublish || shouldPublishImmediately;
       if (shouldPublish) {
-        this.#publish({ force: shouldPublishImmediately, materializeSnapshot: false });
+        this.#publish({ force: shouldPublishImmediately, materializeSnapshot: false, publishResults: cadenceDecision.shouldPublish || shouldPublishImmediately });
       }
       return;
     }
@@ -177,8 +189,28 @@ export class LocalTransport {
     const cadenceDecision = this.#publicationCadence.observe(this.#getAuthorityRevision(this.#world), { force: shouldPublishImmediately });
     const shouldPublish = cadenceDecision.shouldPublish || shouldPublishImmediately;
     if (shouldPublish) {
-      this.#publish({ force: shouldPublishImmediately, materializeSnapshot: false });
+      this.#publish({ force: shouldPublishImmediately, materializeSnapshot: false, publishResults: cadenceDecision.shouldPublish || shouldPublishImmediately });
     }
+  }
+
+  #shouldPublishImmediately(results: CommandResult[], previousPaused: boolean): boolean {
+    if (previousPaused !== this.#world.paused) {
+      return true;
+    }
+    return results.some((result) => result.kind === "accepted" && (result.type === "pause_world" || result.type === "resume_world" || result.type === "set_time_preset"));
+  }
+
+  #capturePendingPublicationState(): PublicationGenerationState {
+    const generation = this.#publicationGeneration + 1;
+    this.#publicationGeneration = generation;
+    const pendingCommandResults = this.#pendingCommandResults;
+    this.#pendingCommandResults = [];
+    const pendingCellEntries = this.#world.grid.dirtyCells.capturePending();
+    return {
+      generation,
+      commandResults: pendingCommandResults.map((result) => cloneCommandResult(result)),
+      dirtyCells: pendingCellEntries.map((entry) => ({ ...entry })),
+    };
   }
 
   #getAuthorityRevision(world: WorldState): number {
@@ -264,7 +296,7 @@ export class LocalTransport {
     return this.#materializeSnapshot(this.#replica);
   }
 
-  #publish(options: { force?: boolean; materializeSnapshot?: boolean; throwOnError?: boolean } = {}): void {
+  #publish(options: { force?: boolean; materializeSnapshot?: boolean; publishResults?: boolean; throwOnError?: boolean } = {}): void {
     if (this.#publishInProgress) {
       this.#publishQueued = true;
       return;
@@ -298,20 +330,20 @@ export class LocalTransport {
     }
   }
 
-  #publishOnce(options: { force?: boolean; materializeSnapshot?: boolean } = {}, subscribers: TransportSubscriber[] = this.#subscribers.slice()): unknown[] {
-    const pendingCommandResults = this.#pendingCommandResults;
-    this.#pendingCommandResults = [];
-    const pendingCellEntries = this.#world.grid.dirtyCells.capturePending();
+  #publishOnce(options: { force?: boolean; materializeSnapshot?: boolean; publishResults?: boolean } = {}, subscribers: TransportSubscriber[] = this.#subscribers.slice()): unknown[] {
+    const publicationState = this.#capturePendingPublicationState();
+    const pendingCommandResults = publicationState.commandResults;
+    const pendingCellEntries = publicationState.dirtyCells;
     const nextDelta = this.#buildDelta(this.#replica.snapshot, pendingCellEntries);
     const lastCommandResults = pendingCommandResults.map((result) => cloneCommandResult(result));
-    const shouldPublish = Boolean(options.force || lastCommandResults.length > 0 || nextDelta !== null);
+    const shouldPublish = Boolean(options.force || nextDelta !== null || (options.publishResults && lastCommandResults.length > 0));
     if (!shouldPublish) {
       this.#replica.lastCommandResults = lastCommandResults;
       return [];
     }
-    const authorityRevision = this.#world.worldRevision;
-    const publicationRevision = this.#getAuthorityRevision(this.#world);
-    const effectiveRevision = Boolean(options.force || lastCommandResults.length > 0) ? authorityRevision : publicationRevision;
+    const authorityRevision = this.#getAuthorityRevision(this.#world);
+    const publicationRevision = authorityRevision;
+    const effectiveRevision = authorityRevision;
     const forceResync = Boolean(options.materializeSnapshot || (options.force && nextDelta === null));
     this.#commitPublication(nextDelta, lastCommandResults, pendingCellEntries, authorityRevision, effectiveRevision, { forceResync, materializeSnapshot: options.materializeSnapshot });
     this.#publicationCadence.markPublished(publicationRevision);

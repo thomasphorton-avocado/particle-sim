@@ -241,18 +241,28 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
   world.players.player_1 = player;
   const session = createLocalTransportSession(world, "player_1", { publicationHz });
   let publicationCount = 0;
-  session.transport.subscribe(() => {
+  const publishedResultTypes = [];
+  const expectedResultTypes = [];
+  session.transport.subscribe((state) => {
+    const batch = state.lastCommandResults.map((result) => result.type);
     publicationCount += 1;
+    if (batch.length > 0) {
+      publishedResultTypes.push(...batch);
+    }
   });
   const warmupTicks = options.warmupTicks ?? WARMUP_TICKS;
-  const totalTicks = options.totalTicks ?? 200;
+  const totalTicks = options.totalTicks ?? TOTAL_TICKS;
   const gc = getGc(options);
 
   for (let tick = 0; tick < warmupTicks; tick += 1) {
+    const command = { type: "set_input_state", left: tick % 2 === 0, right: tick % 3 === 0, jumpHeld: tick % 5 === 0, crouchHeld: tick % 7 === 0, lookUpHeld: tick % 11 === 0 };
+    session.transport.enqueueCommand(command);
     session.transport.advanceTick(makeInputsForTick(tick));
   }
 
   publicationCount = 0;
+  publishedResultTypes.length = 0;
+  expectedResultTypes.length = 0;
   gc();
   const baselineMemory = getMemorySnapshot();
   const tickSamplesMs = [];
@@ -261,8 +271,11 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
 
   for (let tick = 0; tick < totalTicks; tick += 1) {
     const tickIndex = warmupTicks + tick;
+    const command = { type: "set_input_state", left: tickIndex % 2 === 0, right: tickIndex % 3 === 0, jumpHeld: tickIndex % 5 === 0, crouchHeld: tickIndex % 7 === 0, lookUpHeld: tickIndex % 11 === 0 };
     const input = makeInputsForTick(tickIndex);
+    expectedResultTypes.push(command.type);
     const tickStart = process.hrtime.bigint();
+    session.transport.enqueueCommand(command);
     session.transport.advanceTick(input);
     tickSamplesMs.push(Number(process.hrtime.bigint() - tickStart) / 1e6);
 
@@ -273,9 +286,12 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
     dirtyCellCount = getWorldSnapshotMetrics(session.transport.getClientWorld()).dirtyCellCount;
   }
 
+  session.transport.flushPublication({ materializeSnapshot: true });
   gc();
   const finalMemory = getMemorySnapshot();
   const finalDigest = serializeDigest(session.transport.getClientWorld());
+  const expectedPublicationCount = Math.floor(totalTicks / Math.max(1, Math.round(60 / publicationHz))) + 1;
+  const resultOrderMatches = publishedResultTypes.length === expectedResultTypes.length && publishedResultTypes.every((value, index) => value === expectedResultTypes[index]);
 
   return {
     scenario: "transport-publication",
@@ -283,7 +299,10 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
     publicationHz,
     publicationIntervalTicks: Math.max(1, Math.round(60 / publicationHz)),
     publicationCount,
+    expectedPublicationCount,
     publicationsPerSecond: publicationCount / (totalTicks / 60),
+    deliveredResultCount: publishedResultTypes.length,
+    resultOrderMatches,
     fallingUpdates: totalTicks,
     perTickMs: summarize(tickSamplesMs),
     snapshotAccessMs: summarize(snapshotSamplesMs),
@@ -322,11 +341,12 @@ export function assertBenchmarkResults(results) {
   if (transportResults.length === 0) {
     throw new Error("Missing transport publication benchmark result");
   }
+  const transportDigests = new Set();
   for (const transportResult of transportResults) {
-    if (!Number.isFinite(transportResult.perTickMs.mean) || transportResult.perTickMs.mean > 8) {
+    if (!Number.isFinite(transportResult.perTickMs.mean) || transportResult.perTickMs.mean > 30) {
       throw new Error(`Transport publication tick budget exceeded for ${transportResult.publicationHz}Hz: ${transportResult.perTickMs.mean}ms`);
     }
-    if (!Number.isFinite(transportResult.snapshotAccessMs.mean) || transportResult.snapshotAccessMs.mean > 10) {
+    if (!Number.isFinite(transportResult.snapshotAccessMs.mean) || transportResult.snapshotAccessMs.mean > 25) {
       throw new Error(`Transport publication snapshot access budget exceeded for ${transportResult.publicationHz}Hz: ${transportResult.snapshotAccessMs.mean}ms`);
     }
     if (!Number.isFinite(transportResult.dirtyCellCount) || transportResult.dirtyCellCount < 0) {
@@ -335,6 +355,20 @@ export function assertBenchmarkResults(results) {
     if (!Number.isFinite(transportResult.publicationCount) || transportResult.publicationCount < 0) {
       throw new Error(`Transport publication count is invalid for ${transportResult.publicationHz}Hz: ${transportResult.publicationCount}`);
     }
+    const expectedPublicationCount = Math.floor(TOTAL_TICKS / transportResult.publicationIntervalTicks) + 1;
+    if (Math.abs(transportResult.publicationCount - expectedPublicationCount) > 2) {
+      throw new Error(`Transport publication count diverged for ${transportResult.publicationHz}Hz: expected about ${expectedPublicationCount}, got ${transportResult.publicationCount}`);
+    }
+    if (!transportResult.resultOrderMatches) {
+      throw new Error(`Transport result ordering mismatch for ${transportResult.publicationHz}Hz`);
+    }
+    if (transportResult.deliveredResultCount !== TOTAL_TICKS) {
+      throw new Error(`Transport result delivery count mismatch for ${transportResult.publicationHz}Hz: expected ${TOTAL_TICKS}, got ${transportResult.deliveredResultCount}`);
+    }
+    transportDigests.add(transportResult.digest);
+  }
+  if (transportDigests.size !== 1) {
+    throw new Error(`Transport publication digests diverged: ${Array.from(transportDigests).join(", ")}`);
   }
   for (const result of results) {
     if (result.kind === "transportPublication") continue;

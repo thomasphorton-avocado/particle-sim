@@ -124,7 +124,7 @@ export function setDayNightPreset(preset: DayNightPreset): void {
   state.transport.enqueueCommand({
    type: "set_time_preset",
    preset,
-   expectedWorldRevision: state.world.worldRevision,
+   expectedWorldRevision: state.transport.getClientState().revision,
   });
 }
 

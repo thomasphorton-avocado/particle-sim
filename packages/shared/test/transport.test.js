@@ -139,6 +139,31 @@ test("LocalTransport coalesces ordinary input commands at cadence and flushes cr
   assert.equal(transport.getClientWorld().paused, false);
 });
 
+test("LocalTransport preserves bounded command-ledger state across incremental ledger deltas", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
+
+  for (let index = 0; index < 320; index += 1) {
+    transport.enqueueCommand({
+      type: "set_input_state",
+      left: index % 2 === 0,
+      right: index % 3 === 0,
+      jumpHeld: index % 5 === 0,
+      crouchHeld: false,
+      lookUpHeld: false,
+    });
+    transport.advanceTick();
+  }
+
+  transport.flushPublication({ materializeSnapshot: true });
+  const clientWorld = transport.getClientWorld();
+  assert.equal(clientWorld.commandLedger.recent.length, 256);
+  assert.equal(clientWorld.commandLedger.actorHighWater[actorId], 320);
+  assert.equal(clientWorld.commandLedger.recent[0].actorSequence, 65);
+  assert.equal(clientWorld.commandLedger.recent.at(-1).actorSequence, 320);
+  assert.deepEqual(clientWorld.commandLedger.recent.slice(-5).map((entry) => entry.actorSequence), [316, 317, 318, 319, 320]);
+});
+
 test("LocalTransport rejects stale revision control commands but accepts them after a fresh published boundary", () => {
   const { world, actorId } = createWorldWithPlayer();
   const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });

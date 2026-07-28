@@ -3,7 +3,7 @@ import { createCommandEnvelope, processPendingCommands, type CommandResult, type
 import { type PlayerId } from "./ids.js";
 import { type WorldState, createDefaultCommandLedger, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
 import { createPlayerId } from "./ids.js";
-import { applyWorldDeltaToSnapshotState, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
+import { applyWorldDeltaToSnapshotState, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, createCommandLedgerDelta, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
 import type { DirtyCellEntry } from "./dirty-journal.js";
 import { DEFAULT_PUBLICATION_HZ, PublicationCadence, type PublicationCadenceConfig } from "./publication-cadence.js";
 
@@ -423,9 +423,11 @@ export class LocalTransport {
   }
 
   #buildDelta(previousSnapshot: WorldSnapshot, dirtyCellEntries: DirtyCellEntry[]): WorldDelta | null {
+    const commandLedgerDelta = createCommandLedgerDelta(this.#replica.snapshot.worldState.commandLedger, this.#world.commandLedger);
     return createWorldDelta(previousSnapshot, this.#world, {
       dirtyCellEntries,
       publishedCellRevisions: this.#publishedCellRevisions,
+      commandLedgerDelta,
     });
   }
 
@@ -533,9 +535,28 @@ export class LocalTransport {
       case "nextObjectOrdinal":
         world.nextObjectOrdinal = delta.value as typeof world.nextObjectOrdinal;
         return;
-      case "commandLedger":
+      case "commandLedger": {
+        const ledgerValue = cloneDeltaValue(delta.value) as unknown;
+        if (typeof ledgerValue === "object" && ledgerValue !== null && !Array.isArray(ledgerValue) && (ledgerValue as Record<string, unknown>)["kind"] === "incremental") {
+          const incrementalLedger = ledgerValue as { actorHighWater: Record<string, number>; appendedReceipts: Array<unknown>; trimmedCount: number };
+          const ledger = world.commandLedger;
+          for (const [actorId, actorSequence] of Object.entries(incrementalLedger.actorHighWater)) {
+            ledger.actorHighWater[actorId] = actorSequence;
+          }
+          if (incrementalLedger.trimmedCount > 0) {
+            ledger.recent.splice(0, Math.min(incrementalLedger.trimmedCount, ledger.recent.length));
+          }
+          for (const receipt of incrementalLedger.appendedReceipts) {
+            ledger.recent.push(receipt as typeof ledger.recent[number]);
+          }
+          if (ledger.recent.length > 256) {
+            ledger.recent.splice(0, ledger.recent.length - 256);
+          }
+          return;
+        }
         world.commandLedger = cloneDeltaValue(delta.value) as typeof world.commandLedger;
         return;
+      }
     }
   }
 
@@ -596,5 +617,8 @@ function cloneWorldState(world: WorldState): WorldState {
 }
 
 function cloneCommandResult(result: CommandResult): CommandResult {
-  return JSON.parse(JSON.stringify(result));
+  return {
+    ...result,
+    command: result.command ? { ...result.command } : result.command,
+  };
 }

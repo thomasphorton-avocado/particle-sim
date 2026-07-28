@@ -2,10 +2,11 @@ import { assertAuxiliaryValueForMaterial, Grid } from "./grid.js";
 import { parseObjectId, parsePlayerId, parseRoomId } from "./ids.js";
 import { MaterialId, MATERIALS } from "./materials.js";
 import { DAY_NIGHT_CYCLE_TICKS } from "./gameplay.js";
-import { deserializeWorldState, serializeWorldState, WORLD_STATE_SCHEMA_VERSION, validateCommandReceipt, type WorldStateDto, type PlayerStateDto, type FallingObjectStateDto, type WeatherStateDto, type CommandLedgerDto } from "./serialization.js";
+import { deserializeWorldState, serializeWorldState, WORLD_STATE_SCHEMA_VERSION, validateCommandReceipt, type WorldStateDto, type PlayerStateDto, type FallingObjectStateDto, type WeatherStateDto, type CommandLedgerDto, type GameplayRandomStateDto } from "./serialization.js";
 import { type WorldState, type WeatherState } from "./world-state.js";
 import { type DirtyCellEntry } from "./dirty-journal.js";
 import { createGameplayRandomState, type GameplayRandomState } from "./random.js";
+import type { CommandReceipt } from "./commands.js";
 
 export const WORLD_SNAPSHOT_SCHEMA_VERSION = 1;
 
@@ -53,9 +54,17 @@ export interface WorldMetadataDelta {
   value: unknown;
 }
 
+export interface CommandLedgerDeltaValue {
+  kind: "incremental";
+  actorHighWater: Record<string, number>;
+  appendedReceipts: CommandReceipt[];
+  trimmedCount: number;
+}
+
 export interface WorldDeltaBuildOptions {
   dirtyCellEntries?: DirtyCellEntry[];
   publishedCellRevisions?: ReadonlyMap<number, number>;
+  commandLedgerDelta?: CommandLedgerDeltaValue | null;
 }
 
 export interface WorldDelta {
@@ -116,6 +125,203 @@ function assertArray(value: unknown, label: string): unknown[] {
 
 function compareStringCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function areInventoryCountsEqual(left: Record<string, number>, right: Record<string, number>): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+  for (const key of leftKeys) {
+    if (left[key] !== right[key]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function areHotbarItemsEqual(left: PlayerStateDto["hotbar"], right: PlayerStateDto["hotbar"]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftEntry = left[index];
+    const rightEntry = right[index];
+    if (leftEntry === null || rightEntry === null) {
+      if (leftEntry !== rightEntry) {
+        return false;
+      }
+      continue;
+    }
+    if (leftEntry.kind !== rightEntry.kind) {
+      return false;
+    }
+    if (leftEntry.kind === "material" && rightEntry.kind === "material") {
+      if (leftEntry.materialId !== rightEntry.materialId || leftEntry.count !== rightEntry.count) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function arePendingRefundsEqual(left: Record<string, number>, right: Record<string, number>): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+  for (const key of leftKeys) {
+    if (left[key] !== right[key]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function arePlayerStatesEqual(left: PlayerStateDto, right: PlayerStateDto): boolean {
+  return left.id === right.id
+    && left.x === right.x
+    && left.y === right.y
+    && left.vx === right.vx
+    && left.vy === right.vy
+    && left.width === right.width
+    && left.height === right.height
+    && left.grounded === right.grounded
+    && left.facing === right.facing
+    && left.airTicks === right.airTicks
+    && left.previousJumpHeld === right.previousJumpHeld
+    && left.swingElapsedTicks === right.swingElapsedTicks
+    && left.faucetCooldownUntilTick === right.faucetCooldownUntilTick
+    && left.crouching === right.crouching
+    && left.lookingUp === right.lookingUp
+    && left.swimming === right.swimming
+    && left.input.left === right.input.left
+    && left.input.right === right.input.right
+    && left.input.jumpHeld === right.input.jumpHeld
+    && left.input.crouchHeld === right.input.crouchHeld
+    && left.input.lookUpHeld === right.input.lookUpHeld
+    && left.input.mineHeld === right.input.mineHeld
+    && areInventoryCountsEqual(left.inventory, right.inventory)
+    && areHotbarItemsEqual(left.hotbar, right.hotbar)
+    && left.activeHotbarSlot === right.activeHotbarSlot
+    && left.inventoryRevision === right.inventoryRevision
+    && arePendingRefundsEqual(left.pendingRefunds, right.pendingRefunds);
+}
+
+function areFallingObjectStatesEqual(left: FallingObjectStateDto, right: FallingObjectStateDto): boolean {
+  if (left.id !== right.id || left.materialId !== right.materialId || left.x !== right.x || left.y !== right.y || left.restY !== right.restY || left.vy !== right.vy || left.offsets.length !== right.offsets.length) {
+    return false;
+  }
+  for (let index = 0; index < left.offsets.length; index += 1) {
+    const [leftDx, leftDy] = left.offsets[index];
+    const [rightDx, rightDy] = right.offsets[index];
+    if (leftDx !== rightDx || leftDy !== rightDy) {
+      return false;
+    }
+  }
+  if (left.provenance.kind !== right.provenance.kind) {
+    return false;
+  }
+  if (left.provenance.kind === "placement" && right.provenance.kind === "placement") {
+    return left.provenance.actorId === right.provenance.actorId
+      && left.provenance.commandId === right.provenance.commandId
+      && left.provenance.sourceSlot === right.provenance.sourceSlot
+      && left.provenance.materialId === right.provenance.materialId
+      && left.provenance.amount === right.provenance.amount;
+  }
+  return true;
+}
+
+function areWeatherStatesEqual(left: WeatherStateDto, right: WeatherStateDto): boolean {
+  return left.kind === right.kind
+    && left.episodeElapsed === right.episodeElapsed
+    && left.episodeDuration === right.episodeDuration
+    && left.wind === right.wind
+    && left.visualTime === right.visualTime
+    && left.rainAccumulator === right.rainAccumulator
+    && left.lightningFlash === right.lightningFlash
+    && left.lightningCooldown === right.lightningCooldown
+    && left.boltX === right.boltX
+    && left.boltY === right.boltY
+    && left.boltSeed === right.boltSeed;
+}
+
+function areGameplayRandomStatesEqual(left: GameplayRandomStateDto, right: GameplayRandomStateDto): boolean {
+  return left.algorithm === right.algorithm && left.seed === right.seed && left.state === right.state;
+}
+
+function areCommandLedgerStatesEqual(left: CommandLedgerDto, right: CommandLedgerDto): boolean {
+  if (left.actorHighWater === right.actorHighWater) {
+    return true;
+  }
+  const leftActorIds = Object.keys(left.actorHighWater);
+  const rightActorIds = Object.keys(right.actorHighWater);
+  if (leftActorIds.length !== rightActorIds.length) {
+    return false;
+  }
+  for (const actorId of leftActorIds) {
+    if (left.actorHighWater[actorId] !== right.actorHighWater[actorId]) {
+      return false;
+    }
+  }
+  if (left.recent.length !== right.recent.length) {
+    return false;
+  }
+  for (let index = 0; index < left.recent.length; index += 1) {
+    if (!areCommandReceiptsEqual(left.recent[index], right.recent[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function areMetadataValuesEqual(field: WorldMetadataDelta["field"], left: unknown, right: unknown): boolean {
+  switch (field) {
+    case "roomId":
+      return left === right;
+    case "tick":
+    case "worldRevision":
+    case "nextAuthorityOrder":
+    case "nextPlayerOrdinal":
+    case "nextObjectOrdinal":
+      return left === right;
+    case "paused":
+      return left === right;
+    case "time":
+      return typeof left === "object" && left !== null && typeof right === "object" && right !== null && (left as { dayNightTick: number }).dayNightTick === (right as { dayNightTick: number }).dayNightTick;
+    case "weather":
+      return typeof left === "object" && left !== null && typeof right === "object" && right !== null && areWeatherStatesEqual(left as WeatherStateDto, right as WeatherStateDto);
+    case "random":
+      return typeof left === "object" && left !== null && typeof right === "object" && right !== null && areGameplayRandomStatesEqual(left as GameplayRandomStateDto, right as GameplayRandomStateDto);
+    case "ownerPlayerId":
+      return left === right;
+    case "commandLedger":
+      return typeof left === "object" && left !== null && typeof right === "object" && right !== null && areCommandLedgerStatesEqual(left as CommandLedgerDto, right as CommandLedgerDto);
+    default:
+      return false;
+  }
+}
+
+function areCommandReceiptsEqual(left: CommandReceipt, right: CommandReceipt): boolean {
+  return left.commandId === right.commandId
+    && left.actorId === right.actorId
+    && left.actorSequence === right.actorSequence
+    && left.authorityOrder === right.authorityOrder
+    && left.issuedTick === right.issuedTick
+    && left.processedTick === right.processedTick
+    && left.commandType === right.commandType
+    && left.code === right.code
+    && left.accepted === right.accepted
+    && left.beforeWorldRevision === right.beforeWorldRevision
+    && left.afterWorldRevision === right.afterWorldRevision
+    && left.beforeInventoryRevision === right.beforeInventoryRevision
+    && left.afterInventoryRevision === right.afterInventoryRevision
+    && left.beforeTargetRevision === right.beforeTargetRevision
+    && left.afterTargetRevision === right.afterTargetRevision
+    && left.acceptedEffect === right.acceptedEffect
+    && left.fingerprint === right.fingerprint;
 }
 
 function clonePlainObject<T>(value: T): T {
@@ -516,6 +722,31 @@ function validateCommandLedgerDto(value: unknown): CommandLedgerDto {
   return normalized;
 }
 
+function validateCommandLedgerDeltaValue(value: unknown): CommandLedgerDeltaValue {
+  const obj = assertObject(value, "commandLedger delta value");
+  if (obj["kind"] !== "incremental") {
+    throw new TypeError("commandLedger delta value must use kind=incremental");
+  }
+  const actorHighWater = cloneDeltaValue(assertObject(requireField(obj, "actorHighWater", "commandLedgerDelta.actorHighWater"), "commandLedgerDelta.actorHighWater"));
+  const appendedReceipts = assertArray(requireField(obj, "appendedReceipts", "commandLedgerDelta.appendedReceipts"), "commandLedgerDelta.appendedReceipts");
+  const trimmedCount = assertInteger(requireField(obj, "trimmedCount", "commandLedgerDelta.trimmedCount"), "commandLedgerDelta.trimmedCount", 0, MAX_SAFE_INTEGER);
+  const normalized: CommandLedgerDeltaValue = { kind: "incremental", actorHighWater: {}, appendedReceipts: [], trimmedCount };
+  for (const [key, entry] of Object.entries(actorHighWater)) {
+    normalized.actorHighWater[key] = assertInteger(entry, `commandLedgerDelta.actorHighWater.${key}`, 0, MAX_SAFE_INTEGER);
+  }
+  for (const item of appendedReceipts) {
+    normalized.appendedReceipts.push(validateCommandReceipt(item, "commandLedgerDelta.appendedReceipts[]") as unknown as CommandReceipt);
+  }
+  return normalized;
+}
+
+function validateCommandLedgerMetadataValue(value: unknown): CommandLedgerDto | CommandLedgerDeltaValue {
+  if (typeof value === "object" && value !== null && !Array.isArray(value) && (value as Record<string, unknown>)["kind"] === "incremental") {
+    return validateCommandLedgerDeltaValue(value);
+  }
+  return validateCommandLedgerDto(value);
+}
+
 function validateGameplayRandomStateDto(value: unknown): GameplayRandomState {
   const obj = assertObject(value, "random delta state");
   const algorithm = requireField(obj, "algorithm", "randomDelta.state.algorithm");
@@ -557,7 +788,7 @@ function validateWorldSnapshotMetadataField(field: string, value: unknown): Worl
     case "nextObjectOrdinal":
       return { field: field as WorldMetadataDelta["field"], value: assertInteger(value, "worldDelta.metadata[].value", 1, MAX_SAFE_INTEGER) };
     case "commandLedger":
-      return { field: field as WorldMetadataDelta["field"], value: validateCommandLedgerDto(value) };
+      return { field: field as WorldMetadataDelta["field"], value: validateCommandLedgerMetadataValue(value) };
     default:
       throw new TypeError("worldDelta.metadata[].field has an unsupported value");
   }
@@ -588,6 +819,42 @@ function buildCellDeltaEntries(world: WorldState, dirtyCellEntries: DirtyCellEnt
   return nextCells;
 }
 
+export function createCommandLedgerDelta(previousLedger: { actorHighWater: Record<string, number>; recent: ReadonlyArray<CommandReceipt> }, nextLedger: { actorHighWater: Record<string, number>; recent: ReadonlyArray<CommandReceipt> }): CommandLedgerDeltaValue | null {
+  const previousRecent = Array.from(previousLedger.recent ?? []);
+  const nextRecent = Array.from(nextLedger.recent ?? []);
+  let overlapLength = 0;
+  const maxOverlap = Math.min(previousRecent.length, nextRecent.length);
+  for (let offset = 0; offset < maxOverlap; offset += 1) {
+    const previousReceipt = previousRecent[previousRecent.length - 1 - offset];
+    const nextReceipt = nextRecent[offset];
+    if (previousReceipt === undefined || nextReceipt === undefined || !areCommandReceiptsEqual(previousReceipt, nextReceipt)) {
+      break;
+    }
+    overlapLength = offset + 1;
+  }
+  const actorHighWater: Record<string, number> = {};
+  const actorIds = new Set([...Object.keys(previousLedger.actorHighWater ?? {}), ...Object.keys(nextLedger.actorHighWater ?? {})]);
+  for (const actorId of actorIds) {
+    const previousValue = previousLedger.actorHighWater?.[actorId];
+    const nextValue = nextLedger.actorHighWater?.[actorId];
+    if (previousValue !== nextValue) {
+      actorHighWater[actorId] = nextValue ?? 0;
+    }
+  }
+  const appendedReceipts = nextRecent.slice(overlapLength).map((receipt) => cloneDeltaValue(receipt) as CommandReceipt);
+  const trimmedCount = Math.max(0, previousRecent.length - overlapLength);
+  const hasChanges = Object.keys(actorHighWater).length > 0 || trimmedCount > 0 || appendedReceipts.length > 0;
+  if (!hasChanges) {
+    return null;
+  }
+  return {
+    kind: "incremental",
+    actorHighWater,
+    appendedReceipts,
+    trimmedCount,
+  };
+}
+
 export function createWorldDelta(previousSnapshot: WorldSnapshot, world: WorldState, options: WorldDeltaBuildOptions = {}): WorldDelta | null {
   const previousState = previousSnapshot.worldState;
   const cells = buildCellDeltaEntries(world, options.dirtyCellEntries ?? world.grid.dirtyCells.readPending());
@@ -611,7 +878,7 @@ export function createWorldDelta(previousSnapshot: WorldSnapshot, world: WorldSt
       players.push({ playerId, state: null });
       continue;
     }
-    if (stableStringify(previousPlayer) !== stableStringify(nextPlayer)) {
+    if (!arePlayerStatesEqual(previousPlayer, nextPlayer)) {
       players.push({ playerId, state: serializePlayerState(nextPlayer) });
     }
   }
@@ -629,12 +896,13 @@ export function createWorldDelta(previousSnapshot: WorldSnapshot, world: WorldSt
       fallingObjects.push({ objectId, state: null });
       continue;
     }
-    if (stableStringify(previousObject) !== stableStringify(nextObject)) {
+    if (!areFallingObjectStatesEqual(previousObject, nextObject)) {
       fallingObjects.push({ objectId, state: serializeFallingObjectState(nextObject) });
     }
   }
   const metadata: WorldMetadataDelta[] = [];
   const metadataFields: Array<"roomId" | "tick" | "paused" | "time" | "weather" | "random" | "ownerPlayerId" | "worldRevision" | "nextAuthorityOrder" | "nextPlayerOrdinal" | "nextObjectOrdinal" | "commandLedger"> = ["roomId", "tick", "paused", "time", "weather", "random", "ownerPlayerId", "worldRevision", "nextAuthorityOrder", "nextPlayerOrdinal", "nextObjectOrdinal", "commandLedger"];
+  const commandLedgerValue = options.commandLedgerDelta ?? createCommandLedgerDelta(previousState.commandLedger, world.commandLedger);
   for (const field of metadataFields) {
     const previousValue = previousState[field as keyof typeof previousState];
     const nextValue = field === "roomId"
@@ -660,7 +928,13 @@ export function createWorldDelta(previousSnapshot: WorldSnapshot, world: WorldSt
                         : field === "nextObjectOrdinal"
                           ? world.nextObjectOrdinal
                           : world.commandLedger;
-    if (stableStringify(previousValue) !== stableStringify(nextValue)) {
+    if (field === "commandLedger") {
+      if (commandLedgerValue) {
+        metadata.push({ field, value: cloneDeltaValueForPublication(commandLedgerValue) });
+      }
+      continue;
+    }
+    if (!areMetadataValuesEqual(field, previousValue, nextValue)) {
       metadata.push({ field, value: cloneDeltaValueForPublication(nextValue) });
     }
   }
@@ -915,7 +1189,24 @@ function applyMetadataDelta(worldState: WorldStateDto, delta: WorldMetadataDelta
       return;
     }
     case "commandLedger": {
-      worldState.commandLedger = validateCommandLedgerDto(delta.value);
+      const ledgerValue = validateCommandLedgerMetadataValue(delta.value);
+      if ("kind" in ledgerValue && ledgerValue["kind"] === "incremental") {
+        const ledger = worldState.commandLedger;
+        for (const [actorId, actorSequence] of Object.entries(ledgerValue.actorHighWater)) {
+          ledger.actorHighWater[actorId] = actorSequence;
+        }
+        if (ledgerValue.trimmedCount > 0) {
+          ledger.recent.splice(0, Math.min(ledgerValue.trimmedCount, ledger.recent.length));
+        }
+        for (const receipt of ledgerValue.appendedReceipts) {
+          ledger.recent.push(receipt);
+        }
+        if (ledger.recent.length > 256) {
+          ledger.recent.splice(0, ledger.recent.length - 256);
+        }
+        return;
+      }
+      worldState.commandLedger = ledgerValue as CommandLedgerDto;
       return;
     }
     default: {

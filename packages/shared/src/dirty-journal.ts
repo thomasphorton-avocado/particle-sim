@@ -33,10 +33,16 @@ export class DirtyCellJournal {
       .sort((left, right) => left.index - right.index);
   }
 
-  flush(): DirtyCellEntry[] {
+  capturePending(): DirtyCellEntry[] {
     const entries = this.readPending();
-    this.pendingEntries.clear();
+    for (const entry of entries) {
+      this.pendingEntries.delete(entry.index);
+    }
     return entries;
+  }
+
+  flush(): DirtyCellEntry[] {
+    return this.capturePending();
   }
 
   clear(): void {

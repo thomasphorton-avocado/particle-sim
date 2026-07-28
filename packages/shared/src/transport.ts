@@ -299,13 +299,14 @@ export class LocalTransport {
   }
 
   #publishOnce(options: { force?: boolean; materializeSnapshot?: boolean } = {}, subscribers: TransportSubscriber[] = this.#subscribers.slice()): unknown[] {
-    const pendingCellEntries = this.#world.grid.dirtyCells.readPending();
+    const pendingCommandResults = this.#pendingCommandResults;
+    this.#pendingCommandResults = [];
+    const pendingCellEntries = this.#world.grid.dirtyCells.capturePending();
     const nextDelta = this.#buildDelta(this.#replica.snapshot, pendingCellEntries);
-    const lastCommandResults = this.#pendingCommandResults.map((result) => cloneCommandResult(result));
+    const lastCommandResults = pendingCommandResults.map((result) => cloneCommandResult(result));
     const shouldPublish = Boolean(options.force || lastCommandResults.length > 0 || nextDelta !== null);
     if (!shouldPublish) {
       this.#replica.lastCommandResults = lastCommandResults;
-      this.#world.grid.dirtyCells.flush();
       return [];
     }
     const authorityRevision = this.#world.worldRevision;
@@ -333,10 +334,6 @@ export class LocalTransport {
       }
     }
 
-    if (errors.length === 0) {
-      this.#pendingCommandResults = [];
-      this.#world.grid.dirtyCells.flush();
-    }
     return errors;
   }
 

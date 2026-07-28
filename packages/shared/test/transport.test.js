@@ -581,6 +581,150 @@ test("LocalTransport queues reentrant publication retries while skipping unsubsc
   assert.equal(transport.getClientWorld().players[actorId].input.left, false);
 });
 
+test("LocalTransport preserves pause and dirty state across reentrant callback generations", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const player = world.players[actorId];
+  player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
+    ? { kind: "material", materialId: MaterialId.Faucet, count: 1 }
+    : { kind: "empty" });
+  player.activeHotbarSlot = 0;
+
+  const { transport } = createLocalTransportSession(world, actorId);
+  const publishedResultTypes = [];
+  const publishedDeltaSummary = [];
+  let reentrantTriggered = false;
+
+  transport.subscribe((state) => {
+    const results = state.lastCommandResults.map((result) => result.type);
+    if (results.length > 0) {
+      publishedResultTypes.push(results);
+      publishedDeltaSummary.push({
+        hasCells: state.delta ? state.delta.cells.length > 0 : false,
+        hasPausedMetadata: state.delta ? state.delta.metadata.some((entry) => entry.field === "paused") : false,
+      });
+    }
+    if (!reentrantTriggered && results[0] === "place") {
+      reentrantTriggered = true;
+      transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: state.revision });
+      transport.advanceTick();
+    }
+  });
+
+  await Promise.resolve();
+
+  transport.enqueueCommand({
+    type: "place",
+    x: 10,
+    y: 10,
+    brushRadius: 1,
+    expectedInventoryRevision: player.inventoryRevision,
+    expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
+  });
+  transport.advanceTick();
+
+  assert.deepEqual(publishedResultTypes, [["place"], ["pause_world"]]);
+  assert.equal(publishedDeltaSummary[0].hasCells, true);
+  assert.equal(publishedDeltaSummary[1].hasPausedMetadata, true);
+  assert.equal(transport.getClientWorld().paused, true);
+  assert.equal(transport.getClientWorld().grid.get(10, 10), MaterialId.Faucet);
+  assert.equal(transport.getClientWorld().worldRevision, transport.getClientState().clientWorld.worldRevision);
+  assert.equal(transport.getClientState().lastCommandResults[0].type, "pause_world");
+  assert.equal(transport.getClientWorld().grid.get(10, 10), transport.getClientState().clientWorld.grid.get(10, 10));
+  assert.equal(transport.getClientWorld().paused, transport.getClientState().clientWorld.paused);
+});
+
+test("LocalTransport preserves later generations when the same cell is rewritten across reentrant publications", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const player = world.players[actorId];
+  player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
+    ? { kind: "material", materialId: MaterialId.Faucet, count: 2 }
+    : { kind: "empty" });
+  player.activeHotbarSlot = 0;
+
+  const { transport } = createLocalTransportSession(world, actorId);
+  const publishedResultTypes = [];
+  let generation = 0;
+
+  transport.subscribe((state) => {
+    const results = state.lastCommandResults.map((result) => result.type);
+    if (results.length > 0) {
+      publishedResultTypes.push(...results);
+      if (results[0] === "place" && generation === 0) {
+        generation = 1;
+        const objectId = state.clientWorld.grid.getObjectId(10, 10);
+        transport.enqueueCommand({
+          type: "cycle_faucet",
+          x: 10,
+          y: 10,
+          objectId,
+          expectedTargetRevision: state.clientWorld.grid.cellRevisions[state.clientWorld.grid.index(10, 10)] ?? 0,
+        });
+        transport.advanceTick();
+      } else if (results[0] === "cycle_faucet" && generation === 1) {
+        generation = 2;
+        transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: state.clientWorld.worldRevision });
+        transport.advanceTick();
+      }
+    }
+  });
+
+  await Promise.resolve();
+
+  transport.enqueueCommand({
+    type: "place",
+    x: 10,
+    y: 10,
+    brushRadius: 1,
+    expectedInventoryRevision: player.inventoryRevision,
+    expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(10, 10)] ?? 0,
+  });
+  transport.advanceTick();
+
+  assert.deepEqual(publishedResultTypes, ["place", "cycle_faucet", "pause_world"]);
+  assert.equal(transport.getClientWorld().grid.getFaucetFlow(10, 10), 2);
+  assert.equal(transport.getClientWorld().paused, true);
+});
+
+test("LocalTransport handles throwing and unsubscribed listeners across reentrant generations without duplicate delivery", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId);
+  const publishedResultTypes = [];
+  let reentrantTriggered = false;
+
+  let unsubscribeFirst;
+  unsubscribeFirst = transport.subscribe((state) => {
+    const results = state.lastCommandResults.map((result) => result.type);
+    if (results.length > 0) {
+      publishedResultTypes.push(...results);
+      if (!reentrantTriggered && results[0] === "set_input_state") {
+        reentrantTriggered = true;
+        unsubscribeFirst();
+        transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: state.revision });
+        transport.advanceTick();
+        throw new Error("subscriber boom");
+      }
+    }
+  });
+
+  transport.subscribe((state) => {
+    const results = state.lastCommandResults.map((result) => result.type);
+    if (results.length > 0) {
+      publishedResultTypes.push(...results);
+    }
+  });
+
+  await Promise.resolve();
+
+  transport.enqueueCommand({ type: "set_input_state", left: true, right: false, jumpHeld: false, crouchHeld: false, lookUpHeld: false });
+  assert.throws(() => transport.advanceTick(), /LocalTransport subscriber publication failed/);
+
+  assert.deepEqual(publishedResultTypes.filter((type) => type === "set_input_state"), ["set_input_state", "set_input_state"]);
+  assert.deepEqual(publishedResultTypes.filter((type) => type === "pause_world"), ["pause_world"]);
+  assert.equal(transport.getClientWorld().paused, true);
+  assert.equal(transport.getClientWorld().players[actorId].input.left, false);
+  assert.equal(transport.getClientState().lastCommandResults[0].type, "pause_world");
+});
+
 test("LocalTransport flushes dirty journal entries after successful publication and avoids reprocessing stale cells", () => {
   const { world, actorId } = createWorldWithPlayer();
   const player = world.players[actorId];

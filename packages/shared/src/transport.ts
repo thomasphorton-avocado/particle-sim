@@ -1,5 +1,5 @@
 import { advanceWorldTick, type PlayerInputState } from "./gameplay.js";
-import { createCommandEnvelope, getNextActorSequence, processPendingCommands, type CommandResult, type GameplayCommand } from "./commands.js";
+import { createCommandEnvelope, processPendingCommands, type CommandResult, type GameplayCommand } from "./commands.js";
 import { type PlayerId } from "./ids.js";
 import { type WorldState, createDefaultCommandLedger, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
 import { createPlayerId } from "./ids.js";
@@ -69,6 +69,8 @@ export class LocalTransport {
   #subscribers: TransportSubscriber[];
   #pendingCommandResults: CommandResult[];
   #lastCommandResults: CommandResult[];
+  #pendingPublicationGenerations: PublicationGenerationState[];
+  #nextActorSequenceByPlayer: Map<PlayerId, number>;
   #publishedCellRevisions: Map<number, number>;
   #editorCapability: LocalTransportEditorCapability;
   #publishInProgress: boolean;
@@ -86,6 +88,9 @@ export class LocalTransport {
     this.#subscribers = [];
     this.#pendingCommandResults = [];
     this.#lastCommandResults = [];
+    this.#pendingPublicationGenerations = [];
+    this.#nextActorSequenceByPlayer = new Map<PlayerId, number>();
+    this.#nextActorSequenceByPlayer.set(this.#ownerPlayerId, (this.#world.commandLedger.actorHighWater[this.#ownerPlayerId] ?? 0) + 1);
     this.#publishedCellRevisions = new Map<number, number>();
     this.#editorCapability = this.#createEditorCapability();
     this.#publishInProgress = false;
@@ -156,7 +161,8 @@ export class LocalTransport {
 
   enqueueCommand(command: GameplayCommand): void {
     const actorId = this.#ownerPlayerId;
-    const envelope = createCommandEnvelope(actorId, getNextActorSequence(this.#world, actorId), this.#world.tick, command);
+    const actorSequence = this.#getNextActorSequence(actorId);
+    const envelope = createCommandEnvelope(actorId, actorSequence, this.#world.tick, command);
     this.#world.commandInbox.push(envelope);
   }
 
@@ -191,6 +197,12 @@ export class LocalTransport {
     if (shouldPublish) {
       this.#publish({ force: shouldPublishImmediately, materializeSnapshot: false, publishResults: cadenceDecision.shouldPublish || shouldPublishImmediately });
     }
+  }
+
+  #getNextActorSequence(actorId: PlayerId): number {
+    const nextSequence = this.#nextActorSequenceByPlayer.get(actorId) ?? ((this.#world.commandLedger.actorHighWater[actorId] ?? 0) + 1);
+    this.#nextActorSequenceByPlayer.set(actorId, nextSequence + 1);
+    return nextSequence;
   }
 
   #shouldPublishImmediately(results: CommandResult[], previousPaused: boolean): boolean {
@@ -240,6 +252,9 @@ export class LocalTransport {
     this.#publishedCellRevisions.clear();
     this.#pendingCommandResults = [];
     this.#lastCommandResults = [];
+    this.#pendingPublicationGenerations = [];
+    this.#nextActorSequenceByPlayer = new Map<PlayerId, number>();
+    this.#nextActorSequenceByPlayer.set(this.#ownerPlayerId, (this.#world.commandLedger.actorHighWater[this.#ownerPlayerId] ?? 0) + 1);
     this.#publicationCadence.reset(this.#getAuthorityRevision(this.#world));
     this.#publish({ force: true, materializeSnapshot: true });
   }
@@ -310,11 +325,17 @@ export class LocalTransport {
         shouldRun = false;
         const startRevision = this.#getAuthorityRevision(this.#world);
         const subscribers = this.#publicationSubscriberSnapshot ?? this.#subscribers.slice();
-        const iterationErrors = this.#publishOnce(options, subscribers);
+        const publicationState = this.#capturePendingPublicationState();
+        this.#pendingPublicationGenerations.push(publicationState);
+        const nextGeneration = this.#pendingPublicationGenerations.shift();
+        if (!nextGeneration) {
+          continue;
+        }
+        const iterationErrors = this.#publishOnce(nextGeneration, options, subscribers);
         errors.push(...iterationErrors);
         if (this.#publishQueued) {
           const endRevision = this.#getAuthorityRevision(this.#world);
-          const hasPendingResults = this.#pendingCommandResults.length > 0;
+          const hasPendingResults = this.#pendingCommandResults.length > 0 || this.#pendingPublicationGenerations.length > 0;
           const hasPendingCells = this.#world.grid.dirtyCells.readPending().length > 0;
           this.#publishQueued = false;
           shouldRun = Boolean(options.force || hasPendingResults || hasPendingCells || endRevision !== startRevision);
@@ -330,8 +351,7 @@ export class LocalTransport {
     }
   }
 
-  #publishOnce(options: { force?: boolean; materializeSnapshot?: boolean; publishResults?: boolean } = {}, subscribers: TransportSubscriber[] = this.#subscribers.slice()): unknown[] {
-    const publicationState = this.#capturePendingPublicationState();
+  #publishOnce(publicationState: PublicationGenerationState, options: { force?: boolean; materializeSnapshot?: boolean; publishResults?: boolean } = {}, subscribers: TransportSubscriber[] = this.#subscribers.slice()): unknown[] {
     const pendingCommandResults = publicationState.commandResults;
     const pendingCellEntries = publicationState.dirtyCells;
     const nextDelta = this.#buildDelta(this.#replica.snapshot, pendingCellEntries);

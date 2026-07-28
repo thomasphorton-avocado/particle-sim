@@ -1,5 +1,5 @@
 import { MATERIALS, MaterialId, type HotbarItem, type LocalTransportEditorCapability } from "@particle-sim/shared";
-import { getLocalPlayer, setDayNightPreset, state } from "./state";
+import { getLocalPlayer, setDayNightPreset, setPauseWorld, state } from "./state";
 import { setTouchControl } from "./character";
 import { buildMetadata, getVersionBadgeDetails } from "./version";
 
@@ -131,10 +131,7 @@ export function buildUi(root: HTMLElement, editor: LocalTransportEditorCapabilit
   const pauseBtn = document.createElement("button");
   pauseBtn.textContent = "Pause";
   pauseBtn.addEventListener("click", () => {
-    const command = state.world.paused
-      ? { type: "resume_world" as const, expectedWorldRevision: state.transport.getClientState().revision }
-      : { type: "pause_world" as const, expectedWorldRevision: state.transport.getClientState().revision };
-    state.transport.enqueueCommand(command);
+    setPauseWorld(!state.world.paused);
     requestAnimationFrame(() => {
       pauseBtn.textContent = state.world.paused ? "Resume" : "Pause";
     });

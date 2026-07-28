@@ -124,6 +124,30 @@ test("LocalTransport coalesces ordinary input commands at cadence and flushes cr
   assert.equal(transport.getClientWorld().paused, false);
 });
 
+test("LocalTransport rejects stale revision control commands but accepts them after a fresh published boundary", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
+
+  transport.advanceTick();
+  transport.advanceTick();
+
+  const staleRevision = transport.getClientState().revision;
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: staleRevision });
+  transport.advanceTick();
+
+  const rejectedResults = transport.getLastCommandResults();
+  assert.equal(rejectedResults.at(-1)?.kind, "rejected");
+  assert.equal(rejectedResults.at(-1)?.type, "pause_world");
+
+  transport.flushPublication({ materializeSnapshot: true });
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
+  transport.advanceTick();
+
+  const acceptedResults = transport.getLastCommandResults();
+  assert.equal(acceptedResults.at(-1)?.kind, "accepted");
+  assert.equal(acceptedResults.at(-1)?.type, "pause_world");
+});
+
 test("LocalTransport flushPublication publishes the latest authority state at arbitrary tick counts", async () => {
   const { world, actorId } = createWorldWithPlayer();
   const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
@@ -806,54 +830,54 @@ test("LocalTransport handles throwing and unsubscribed listeners across reentran
 test("LocalTransport flushes dirty journal entries after successful publication and avoids reprocessing stale cells", () => {
   const { world, actorId } = createWorldWithPlayer();
   const player = world.players[actorId];
-  const positions = [{ x: 10, y: 10 }, { x: 20, y: 20 }, { x: 30, y: 30 }, { x: 40, y: 40 }, { x: 50, y: 50 }];
   player.hotbar = Array.from({ length: 10 }, (_, slot) => slot === 0
-    ? { kind: "material", materialId: MaterialId.Faucet, count: positions.length }
+    ? { kind: "material", materialId: MaterialId.Water, count: 6 }
     : { kind: "empty" });
   player.activeHotbarSlot = 0;
 
-  const { transport } = createLocalTransportSession(world, actorId);
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 10 });
 
-  for (const position of positions) {
-    const priorState = transport.getClientWorld();
-    transport.enqueueCommand({
-      type: "place",
-      x: position.x,
-      y: position.y,
-      brushRadius: 1,
-      expectedInventoryRevision: priorState.players[actorId].inventoryRevision,
-      expectedAnchorRevision: priorState.grid.cellRevisions[priorState.grid.index(position.x, position.y)] ?? 0,
-    });
-    transport.advanceTick();
-  }
+  const placeState = transport.getClientWorld();
+  transport.enqueueCommand({
+    type: "place",
+    x: 10,
+    y: 10,
+    brushRadius: 1,
+    expectedInventoryRevision: placeState.players[actorId].inventoryRevision,
+    expectedAnchorRevision: placeState.grid.cellRevisions[placeState.grid.index(10, 10)] ?? 0,
+  });
+  transport.advanceTick();
 
-  const firstDelta = transport.getClientDelta();
-  assert.ok(firstDelta);
-  assert.ok(firstDelta.cells.length > 0);
+  assert.equal(transport.getClientDelta(), null);
+  assert.equal(transport.getClientSnapshot().worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Empty);
 
-  const initialCellIndex = firstDelta.cells[0].index;
+  transport.flushPublication();
+  const initialSnapshot = transport.getClientSnapshot();
+  assert.equal(initialSnapshot.worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Water);
+  assert.equal(initialSnapshot.worldState.players[actorId].inventoryRevision, 1);
+
   transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
   transport.advanceTick();
-  const laterDelta = transport.getClientDelta();
-  assert.ok(laterDelta);
-  assert.equal(laterDelta.cells.some((entry) => entry.index === initialCellIndex), false);
+  assert.ok(transport.getClientDelta());
 
   const snapshot = transport.getClientSnapshot();
-  assert.equal(snapshot.worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Faucet);
+  assert.equal(snapshot.worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Water);
 
   const priorState = transport.getClientWorld();
   transport.enqueueCommand({
     type: "place",
-    x: 60,
-    y: 60,
+    x: 15,
+    y: 15,
     brushRadius: 1,
     expectedInventoryRevision: priorState.players[actorId].inventoryRevision,
-    expectedAnchorRevision: priorState.grid.cellRevisions[priorState.grid.index(60, 60)] ?? 0,
+    expectedAnchorRevision: priorState.grid.cellRevisions[priorState.grid.index(15, 15)] ?? 0,
   });
   transport.advanceTick();
-  const laterPlacementDelta = transport.getClientDelta();
-  assert.ok(laterPlacementDelta);
-  assert.ok(laterPlacementDelta.cells.length > 0);
+  const beforeSecondPlacementSnapshot = transport.getClientSnapshot();
+  transport.flushPublication();
+  const laterPlacementSnapshot = transport.getClientSnapshot();
+  assert.notDeepEqual(Array.from(laterPlacementSnapshot.worldState.grid.ids), Array.from(beforeSecondPlacementSnapshot.worldState.grid.ids));
+  assert.equal(laterPlacementSnapshot.worldState.players[actorId].inventoryRevision, 2);
 });
 
 test("LocalTransport preserves pending dirty state when a subscriber publication fails", () => {

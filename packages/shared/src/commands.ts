@@ -821,10 +821,6 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
     return createRejection(envelope, "unknown_actor", false);
   }
 
-  if (world.paused && envelope.command.type !== "pause_world" && envelope.command.type !== "resume_world") {
-    return createRejection(envelope, "paused", true);
-  }
-
   const beforeWorldRevision = getAuthorityRevision(world);
   const beforeInventoryRevision = actor.inventoryRevision;
   const beforeTargetRevision = getAuthorityRevision(world);
@@ -1118,9 +1114,13 @@ export function processCommand(world: WorldState, envelopeInput: unknown): Comma
   const validation = validateCommand(world, envelope);
   if (validation.kind === "rejection") {
     const authorityOrder = validation.admitted ? world.nextAuthorityOrder : null;
+    const shouldAdvanceActorHighWater = validation.code !== "future_tick" && validation.code !== "stale" && validation.code !== "conflict" && validation.code !== "invalid_command";
     if (authorityOrder !== null) {
       validation.authorityOrder = authorityOrder;
       world.nextAuthorityOrder = authorityOrder + 1;
+      world.commandLedger.actorHighWater[envelope.actorId] = envelope.actorSequence;
+    } else if (shouldAdvanceActorHighWater) {
+      validation.authorityOrder = null;
       world.commandLedger.actorHighWater[envelope.actorId] = envelope.actorSequence;
     }
     const result = createCommandResult(validation, world);

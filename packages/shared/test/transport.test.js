@@ -113,12 +113,12 @@ test("LocalTransport coalesces ordinary input commands at cadence and flushes cr
 
   assert.deepEqual(batches, [["set_input_state", "set_input_state", "set_input_state"]]);
 
-  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
   transport.advanceTick();
   assert.deepEqual(batches.at(-1), ["pause_world"]);
   assert.equal(transport.getClientWorld().paused, true);
 
-  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: transport.getClientState().revision });
+  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
   transport.advanceTick();
   assert.deepEqual(batches.at(-1), ["resume_world"]);
   assert.equal(transport.getClientWorld().paused, false);
@@ -131,7 +131,7 @@ test("LocalTransport rejects stale revision control commands but accepts them af
   transport.advanceTick();
   transport.advanceTick();
 
-  const staleRevision = transport.getClientState().revision;
+  const staleRevision = transport.getClientWorld().worldRevision;
   transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: staleRevision });
   transport.advanceTick();
 
@@ -140,12 +140,45 @@ test("LocalTransport rejects stale revision control commands but accepts them af
   assert.equal(rejectedResults.at(-1)?.type, "pause_world");
 
   transport.flushPublication({ materializeSnapshot: true });
-  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
   transport.advanceTick();
 
   const acceptedResults = transport.getLastCommandResults();
   assert.equal(acceptedResults.at(-1)?.kind, "accepted");
   assert.equal(acceptedResults.at(-1)?.type, "pause_world");
+});
+
+test("LocalTransport rejects gameplay commands while paused and preserves the authority revision", () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
+
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.advanceTick();
+
+  const pausedRevision = transport.getClientWorld().worldRevision;
+  transport.enqueueCommand({
+    type: "set_input_state",
+    left: true,
+    right: false,
+    jumpHeld: false,
+    crouchHeld: false,
+    lookUpHeld: false,
+  });
+  transport.advanceTick();
+
+  const rejectedResult = transport.getLastCommandResults().at(-1);
+  assert.equal(rejectedResult?.kind, "rejected");
+  assert.equal(rejectedResult?.code, "paused");
+  assert.equal(transport.getClientWorld().worldRevision, pausedRevision);
+  assert.equal(transport.getClientWorld().players[actorId].input.left, false);
+
+  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.advanceTick();
+
+  const resumedResult = transport.getLastCommandResults().at(-1);
+  assert.equal(resumedResult?.kind, "accepted");
+  assert.equal(resumedResult?.type, "resume_world");
+  assert.equal(transport.getClientWorld().paused, false);
 });
 
 test("LocalTransport flushPublication publishes the latest authority state at arbitrary tick counts", async () => {
@@ -859,6 +892,9 @@ test("LocalTransport flushes dirty journal entries after successful publication 
   transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientState().revision });
   transport.advanceTick();
   assert.ok(transport.getClientDelta());
+
+  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: transport.getClientState().revision });
+  transport.advanceTick();
 
   const snapshot = transport.getClientSnapshot();
   assert.equal(snapshot.worldState.grid.ids[transport.getClientWorld().grid.index(10, 10)], MaterialId.Water);

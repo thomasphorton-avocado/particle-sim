@@ -128,7 +128,7 @@ function enqueueRevisionGuardedOwnerCommand(command: { type: "pause_world" | "re
   // owner command. This keeps UI/state callers aligned with the current publication cadence
   // without exposing any authority-only revision accessors.
   state.transport.flushPublication({ materializeSnapshot: true });
-  const publishedRevision = state.transport.getClientState().revision;
+  const publishedRevision = state.world.worldRevision;
   const guardedCommand = {
    ...command,
    expectedWorldRevision: publishedRevision,

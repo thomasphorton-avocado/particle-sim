@@ -716,7 +716,7 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
       hotbar: nextHotbar,
       inventoryRevision: actor.inventoryRevision + 1,
     };
-    return { gridWrites, fallingObjects, playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 1, acceptedEffect: "inventory", resultCode: "accepted" };
+    return { gridWrites, fallingObjects, playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 0, acceptedEffect: "inventory", resultCode: "accepted" };
   }
 
   const candidates: Array<[number, number]> = [];
@@ -745,7 +745,7 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
     hotbar: nextHotbar,
     inventoryRevision: actor.inventoryRevision + 1,
   };
-  return { gridWrites, fallingObjects: [], playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 1, acceptedEffect: "inventory", resultCode: "accepted" };
+  return { gridWrites, fallingObjects: [], playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 0, acceptedEffect: "inventory", resultCode: "accepted" };
 }
 
 function createPlan(envelope: CommandEnvelope, resultCode: CommandResultCode, accepted: boolean, beforeWorldRevision: number, afterWorldRevision: number, beforeInventoryRevision: number, afterInventoryRevision: number, beforeTargetRevision: number, afterTargetRevision: number, acceptedEffect: string | null, playerPatch?: CommandPlayerPatch, gridWrites: CommandGridWrite[] = [], fallingObjects: CommandFallingObjectCreate[] = [], paused?: boolean, timeTick?: number, worldRevisionDelta = 0, inventoryRevisionDelta = 0, targetRevisionDelta = 0): ValidatedCommandPlan {
@@ -786,7 +786,11 @@ function clonePlayerStateForPatch(player: PlayerState): CommandPlayerPatch {
 }
 
 function getAuthorityRevision(world: WorldState): number {
-  return Math.max(world.tick, world.worldRevision);
+  return world.worldRevision;
+}
+
+function isGameplayCommandBlockedWhilePaused(type: GameplayCommandType): boolean {
+  return type === "set_input_state" || type === "mine_start" || type === "mine_stop" || type === "select_slot" || type === "place" || type === "harvest" || type === "cycle_faucet";
 }
 
 export function validateCommand(world: WorldState, envelopeInput: unknown): ValidatedCommandPlan | CommandRejection {
@@ -825,6 +829,10 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
   const beforeInventoryRevision = actor.inventoryRevision;
   const beforeTargetRevision = getAuthorityRevision(world);
   let playerPatch: CommandPlayerPatch | undefined;
+
+  if (world.paused && isGameplayCommandBlockedWhilePaused(envelope.command.type)) {
+    return createRejection(envelope, "paused", false);
+  }
   let gridWrites: CommandGridWrite[] = [];
   let fallingObjects: CommandFallingObjectCreate[] = [];
   let paused: boolean | undefined;
@@ -919,7 +927,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
       gridWrites = harvestPlan.cells.map(([x, y]) => ({ x, y, id: MaterialId.Empty, shade: 0, auxiliary: 0, objectId: null }));
       acceptedEffect = "inventory";
       inventoryRevisionDelta = 1;
-      worldRevisionDelta = 1;
+      worldRevisionDelta = 0;
       break;
     }
     case "cycle_faucet": {
@@ -965,7 +973,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
       }
       gridWrites = writes;
       acceptedEffect = "target";
-      worldRevisionDelta = 1;
+      worldRevisionDelta = 0;
       break;
     }
     case "pause_world": {

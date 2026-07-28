@@ -34,15 +34,30 @@ export class DirtyCellJournal {
   }
 
   capturePending(): DirtyCellEntry[] {
-    const entries = this.readPending();
+    return this.readPending();
+  }
+
+  commitPending(entries: ReadonlyArray<DirtyCellEntry>): void {
     for (const entry of entries) {
+      const current = this.pendingEntries.get(entry.index);
+      if (!current) continue;
+      if (current.materialId !== entry.materialId || current.shade !== entry.shade || current.auxiliary !== entry.auxiliary || current.objectId !== entry.objectId || current.revision !== entry.revision) {
+        continue;
+      }
       this.pendingEntries.delete(entry.index);
     }
-    return entries;
+  }
+
+  restorePending(entries: ReadonlyArray<DirtyCellEntry>): void {
+    for (const entry of entries) {
+      this.pendingEntries.set(entry.index, { ...entry });
+    }
   }
 
   flush(): DirtyCellEntry[] {
-    return this.capturePending();
+    const entries = this.capturePending();
+    this.pendingEntries.clear();
+    return entries;
   }
 
   clear(): void {

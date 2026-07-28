@@ -415,6 +415,7 @@ export function advanceWorldTick(world: WorldState, inputs: Readonly<Record<stri
   advanceFallingObjects(world);
 
   world.tick += 1;
+  world.worldRevision += 1;
   return true;
 }
 

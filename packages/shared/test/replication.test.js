@@ -722,7 +722,7 @@ function runReplayFixture(world, actorId, options = {}) {
       advanceActorTick(world, actorId, { left: true, jumpHeld: true }, 5);
     },
     () => {
-      const setNight = enqueueReplayCommand(world, actorId, { type: "set_time_preset", preset: "night", expectedWorldRevision: Math.max(world.tick, world.worldRevision) });
+      const setNight = enqueueReplayCommand(world, actorId, { type: "set_time_preset", preset: "night", expectedWorldRevision: world.worldRevision });
       assert.equal(setNight.kind, "accepted");
       advanceActorTick(world, actorId, {}, 6);
     },
@@ -840,20 +840,20 @@ function runSubsystemReplayFixture(world, actorId) {
 }
 
 const canonicalReplayGoldenCheckpoints = {
-  movement: "c4b3ecebc3b3eb58c6b3f011c5b3ee7ec8b3f337c7b3f1a4cab3f65dc9b3f4ca",
-  mining: "40340b6b3f3409d842340e9141340cfe443411b743341024463414dd4534134a",
-  flower_harvest: "e7c39639e6c394a6e5c39313e4c39180ebc39c85eac39af2e9c3995fe8c397cc",
-  faucet_water: "dd8dfb95dc8dfa02db8df86fda8df6dcd98df549d88df3b6d78df223d68df090",
-  night_transition: "c3f9a537c2f9a3a4c5f9a85dc4f9a6cabff99eebbef99d58c1f9a211c0f9a07e",
-  final: "c3f9a537c2f9a3a4c5f9a85dc4f9a6cabff99eebbef99d58c1f9a211c0f9a07e",
+  movement: "73e4007772e3fee475e4039d74e4020a6fe3fa2b6ee3f89871e3fd5170e3fbbe",
+  mining: "e0fb7dd6e1fb7f69defb7ab0dffb7c43e4fb8422e5fb85b5e2fb80fce3fb828f",
+  flower_harvest: "5de68e765ee690095be68b505ce68ce361e694c262e696555fe6919c60e6932f",
+  faucet_water: "058912c90489113603890fa302890e100989191508891782078915ef0689145c",
+  night_transition: "e118b656e218b7e9df18b330e018b4c3e518bca2e618be35e318b97ce418bb0f",
+  final: "e118b656e218b7e9df18b330e018b4c3e518bca2e618be35e318b97ce418bb0f",
 };
 
 const canonicalSubsystemGoldenCheckpoints = {
-  swimming: "7cdc249e7ddc26317adc21787bdc230b80dc2aea81dc2c7d7edc27c47fdc2957",
-  falling_object_settled: "7af7707779f76ee47cf7739d7bf7720a76f76a2b75f7689878f76d5177f76bbe",
-  mined_settled_object: "650c708d640c6efa630c6d67620c6bd4610c6a41600c68ae5f0c671b5e0c6588",
-  gardening_growth: "4df8b45f4cf8b2cc4ff8b7854ef8b5f249f8ae1348f8ac804bf8b1394af8afa6",
-  final: "4df8b45f4cf8b2cc4ff8b7854ef8b5f249f8ae1348f8ac804bf8b1394af8afa6",
+  swimming: "a5401168a64012fba740148ea8401621a94017b4aa401947ab401adaac401c6d",
+  falling_object_settled: "fe52826cff5283ff0052859201528725fa527c20fb527db3fc527f46fd5280d9",
+  mined_settled_object: "7af4ba467bf4bbd978f4b72079f4b8b37ef4c0927ff4c2257cf4bd6c7df4beff",
+  gardening_growth: "ecf102a0edf10433eef105c6eff10759f0f108ecf1f10a7ff2f10c12f3f10da5",
+  final: "ecf102a0edf10433eef105c6eff10759f0f108ecf1f10a7ff2f10c12f3f10da5",
 };
 
 test("deterministic replay fixtures converge across replay and checkpoint restore", () => {

@@ -789,8 +789,8 @@ function getAuthorityRevision(world: WorldState): number {
   return world.worldRevision;
 }
 
-function isGameplayCommandBlockedWhilePaused(type: GameplayCommandType): boolean {
-  return type === "set_input_state" || type === "mine_start" || type === "mine_stop" || type === "select_slot" || type === "place" || type === "harvest" || type === "cycle_faucet";
+function isGameplayCommandAllowedWhilePaused(type: GameplayCommandType): boolean {
+  return type === "resume_world";
 }
 
 export function validateCommand(world: WorldState, envelopeInput: unknown): ValidatedCommandPlan | CommandRejection {
@@ -830,7 +830,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
   const beforeTargetRevision = getAuthorityRevision(world);
   let playerPatch: CommandPlayerPatch | undefined;
 
-  if (world.paused && isGameplayCommandBlockedWhilePaused(envelope.command.type)) {
+  if (world.paused && !isGameplayCommandAllowedWhilePaused(envelope.command.type)) {
     return createRejection(envelope, "paused", false);
   }
   let gridWrites: CommandGridWrite[] = [];

@@ -1,12 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MaterialId, PublicationCadence, computeWorldChecksum, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createPlayerId } from "@particle-sim/shared";
+import { MaterialId, PublicationCadence, computeWorldChecksum, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createObjectId, createPlayerId } from "@particle-sim/shared";
 
 function createWorldWithPlayer() {
   const world = createDefaultWorldState("room_transport");
   const actorId = createPlayerId("player_transport");
   world.players[actorId] = createDefaultPlayerState(actorId);
   return { world, actorId };
+}
+
+function captureWorldSnapshot(world, actorId) {
+  return {
+    checksum: computeWorldChecksum(world),
+    revision: world.worldRevision,
+    tick: world.tick,
+    paused: world.paused,
+    inputLeft: world.players[actorId].input.left,
+    inventoryRevision: world.players[actorId].inventoryRevision,
+    timeDayNightTick: world.time.dayNightTick,
+    timeDayNightCycle: world.time.dayNightCycle,
+    weatherKind: world.weather.kind,
+    rngSeed: world.random.seed,
+  };
 }
 
 function createFingerprint(envelope) {
@@ -149,36 +164,177 @@ test("LocalTransport rejects stale revision control commands but accepts them af
 });
 
 test("LocalTransport rejects gameplay commands while paused and preserves the authority revision", () => {
-  const { world, actorId } = createWorldWithPlayer();
+  const commandCases = [
+    {
+      name: "set_input_state",
+      build: () => ({
+        type: "set_input_state",
+        left: true,
+        right: false,
+        jumpHeld: false,
+        crouchHeld: false,
+        lookUpHeld: false,
+      }),
+    },
+    {
+      name: "mine_start",
+      build: () => ({ type: "mine_start" }),
+    },
+    {
+      name: "mine_stop",
+      build: () => ({ type: "mine_stop" }),
+    },
+    {
+      name: "select_slot",
+      build: () => ({ type: "select_slot", slot: 3, expectedInventoryRevision: 0 }),
+    },
+    {
+      name: "place",
+      build: () => ({ type: "place", x: 1, y: 1, brushRadius: 1, expectedInventoryRevision: 0, expectedAnchorRevision: 0 }),
+    },
+    {
+      name: "harvest",
+      build: () => ({ type: "harvest", x: 1, y: 1, expectedTargetRevision: 0 }),
+    },
+    {
+      name: "cycle_faucet",
+      build: () => ({ type: "cycle_faucet", x: 1, y: 1, objectId: createObjectId("object_test"), expectedTargetRevision: 0 }),
+    },
+    {
+      name: "pause_world",
+      build: () => ({ type: "pause_world", expectedWorldRevision: 0 }),
+    },
+    {
+      name: "set_time_preset",
+      build: () => ({ type: "set_time_preset", preset: "night", expectedWorldRevision: 0 }),
+    },
+    {
+      name: "resume_world",
+      build: () => ({ type: "resume_world", expectedWorldRevision: 0 }),
+    },
+  ];
+
+  for (const commandCase of commandCases) {
+    const { world, actorId } = createWorldWithPlayer();
+    world.ownerPlayerId = actorId;
+    world.paused = true;
+
+    const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
+    const before = captureWorldSnapshot(transport.getClientWorld(), actorId);
+    transport.enqueueCommand(commandCase.build());
+    transport.advanceTick();
+
+    const result = transport.getLastCommandResults().at(-1);
+    if (commandCase.name === "resume_world") {
+      assert.equal(result?.kind, "accepted");
+      assert.equal(result?.type, "resume_world");
+      assert.equal(transport.getClientWorld().paused, false);
+      assert.ok(transport.getClientWorld().worldRevision >= before.revision + 1);
+      assert.equal(transport.getClientWorld().players[actorId].inventoryRevision, before.inventoryRevision);
+      assert.ok(transport.getClientWorld().time.dayNightTick >= before.timeDayNightTick);
+      assert.ok(transport.getClientWorld().time.dayNightCycle >= before.timeDayNightCycle);
+      assert.equal(transport.getClientWorld().weather.kind, before.weatherKind);
+      assert.equal(transport.getClientWorld().random.seed, before.rngSeed);
+      assert.notEqual(computeWorldChecksum(transport.getClientWorld()), before.checksum);
+    } else {
+      assert.equal(result?.kind, "rejected");
+      assert.equal(result?.code, "paused");
+      assert.equal(transport.getClientWorld().worldRevision, before.revision);
+      assert.equal(transport.getClientWorld().paused, true);
+      assert.equal(transport.getClientWorld().players[actorId].input.left, false);
+      assert.equal(transport.getClientWorld().players[actorId].inventoryRevision, before.inventoryRevision);
+      assert.equal(transport.getClientWorld().time.dayNightTick, before.timeDayNightTick);
+      assert.equal(transport.getClientWorld().time.dayNightCycle, before.timeDayNightCycle);
+      assert.equal(transport.getClientWorld().weather.kind, before.weatherKind);
+      assert.equal(transport.getClientWorld().random.seed, before.rngSeed);
+      assert.equal(computeWorldChecksum(transport.getClientWorld()), before.checksum);
+    }
+  }
+});
+
+test("LocalTransport rejects paused gameplay commands for a non-owner and preserves authority state", () => {
+  const ownerActorId = createPlayerId("player_transport_owner");
+  const actorId = createPlayerId("player_transport_bound");
+  const world = createDefaultWorldState("room_transport_non_owner_paused");
+  world.ownerPlayerId = ownerActorId;
+  world.players[ownerActorId] = createDefaultPlayerState(ownerActorId);
+  world.players[actorId] = createDefaultPlayerState(actorId);
+  world.paused = true;
+
   const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
+  const allowedCommands = [
+    {
+      name: "set_input_state",
+      build: () => ({
+        type: "set_input_state",
+        left: true,
+        right: false,
+        jumpHeld: false,
+        crouchHeld: false,
+        lookUpHeld: false,
+      }),
+    },
+    {
+      name: "mine_start",
+      build: () => ({ type: "mine_start" }),
+    },
+    {
+      name: "mine_stop",
+      build: () => ({ type: "mine_stop" }),
+    },
+    {
+      name: "select_slot",
+      build: () => ({ type: "select_slot", slot: 3, expectedInventoryRevision: 0 }),
+    },
+    {
+      name: "place",
+      build: () => ({ type: "place", x: 1, y: 1, brushRadius: 1, expectedInventoryRevision: 0, expectedAnchorRevision: 0 }),
+    },
+    {
+      name: "harvest",
+      build: () => ({ type: "harvest", x: 1, y: 1, expectedTargetRevision: 0 }),
+    },
+    {
+      name: "cycle_faucet",
+      build: () => ({ type: "cycle_faucet", x: 1, y: 1, objectId: createObjectId("object_test_2"), expectedTargetRevision: 0 }),
+    },
+    {
+      name: "pause_world",
+      build: () => ({ type: "pause_world", expectedWorldRevision: 0 }),
+    },
+    {
+      name: "set_time_preset",
+      build: () => ({ type: "set_time_preset", preset: "night", expectedWorldRevision: 0 }),
+    },
+    {
+      name: "resume_world",
+      build: () => ({ type: "resume_world", expectedWorldRevision: 0 }),
+    },
+  ];
 
-  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
-  transport.advanceTick();
+  for (const commandCase of allowedCommands) {
+    const before = captureWorldSnapshot(transport.getClientWorld(), actorId);
+    transport.enqueueCommand(commandCase.build());
+    transport.advanceTick();
 
-  const pausedRevision = transport.getClientWorld().worldRevision;
-  transport.enqueueCommand({
-    type: "set_input_state",
-    left: true,
-    right: false,
-    jumpHeld: false,
-    crouchHeld: false,
-    lookUpHeld: false,
-  });
-  transport.advanceTick();
-
-  const rejectedResult = transport.getLastCommandResults().at(-1);
-  assert.equal(rejectedResult?.kind, "rejected");
-  assert.equal(rejectedResult?.code, "paused");
-  assert.equal(transport.getClientWorld().worldRevision, pausedRevision);
-  assert.equal(transport.getClientWorld().players[actorId].input.left, false);
-
-  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
-  transport.advanceTick();
-
-  const resumedResult = transport.getLastCommandResults().at(-1);
-  assert.equal(resumedResult?.kind, "accepted");
-  assert.equal(resumedResult?.type, "resume_world");
-  assert.equal(transport.getClientWorld().paused, false);
+    const result = transport.getLastCommandResults().at(-1);
+    if (commandCase.name === "resume_world") {
+      assert.equal(result?.kind, "rejected");
+      assert.equal(result?.code, "not_owner");
+    } else {
+      assert.equal(result?.kind, "rejected");
+      assert.equal(result?.code, "paused");
+    }
+    assert.equal(transport.getClientWorld().worldRevision, before.revision);
+    assert.equal(transport.getClientWorld().paused, true);
+    assert.equal(transport.getClientWorld().players[actorId].input.left, false);
+    assert.equal(transport.getClientWorld().players[actorId].inventoryRevision, before.inventoryRevision);
+    assert.equal(transport.getClientWorld().time.dayNightTick, before.timeDayNightTick);
+    assert.equal(transport.getClientWorld().time.dayNightCycle, before.timeDayNightCycle);
+    assert.equal(transport.getClientWorld().weather.kind, before.weatherKind);
+    assert.equal(transport.getClientWorld().random.seed, before.rngSeed);
+    assert.equal(computeWorldChecksum(transport.getClientWorld()), before.checksum);
+  }
 });
 
 test("LocalTransport flushPublication publishes the latest authority state at arbitrary tick counts", async () => {

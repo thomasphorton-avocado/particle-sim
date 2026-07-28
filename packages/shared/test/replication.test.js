@@ -204,7 +204,7 @@ test("world deltas clone nested authority values before and after application", 
   weatherDelta.value.wind = -2;
   timeDelta.value.dayNightTick = 123;
   randomDelta.value.state = 321;
-  commandLedgerDelta.value.appendedReceipts.push(createReceiptFixture("tampered_player", 123, { commandId: createCommandId("command_tampered_receipt") }));
+  commandLedgerDelta.value.appendedReceipts.push(createReceiptFixture(createPlayerId("player_tampered"), 123, { commandId: createCommandId("command_tampered_receipt") }));
 
   assert.equal(world.players[playerId].hotbar[0].count, 8);
   assert.equal(world.players[playerId].inventory.stone, 12);
@@ -239,7 +239,7 @@ test("world deltas clone nested authority values before and after application", 
   weatherDelta.value.wind = 7;
   timeDelta.value.dayNightTick = 8;
   randomDelta.value.state = 9;
-  commandLedgerDelta.value.appendedReceipts.push(createReceiptFixture("after_apply_player", 10, { commandId: createCommandId("command_after_apply_receipt") }));
+  commandLedgerDelta.value.appendedReceipts.push(createReceiptFixture(createPlayerId("player_after_apply"), 10, { commandId: createCommandId("command_after_apply_receipt") }));
 
   assert.equal(appliedSnapshot.worldState.players[playerId].hotbar[0].count, 8);
   assert.equal(appliedSnapshot.worldState.players[playerId].inventory.stone, 12);

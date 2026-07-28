@@ -3,7 +3,7 @@ import { createCommandEnvelope, processPendingCommands, type CommandResult, type
 import { type PlayerId } from "./ids.js";
 import { type WorldState, createDefaultCommandLedger, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
 import { createPlayerId } from "./ids.js";
-import { applyWorldDeltaToSnapshotState, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, createCommandLedgerDelta, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
+import { applyWorldDeltaToSnapshotStateFast, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, createCommandLedgerDelta, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
 import type { DirtyCellEntry } from "./dirty-journal.js";
 import { DEFAULT_PUBLICATION_HZ, PublicationCadence, type PublicationCadenceConfig } from "./publication-cadence.js";
 
@@ -436,7 +436,7 @@ export class LocalTransport {
       this.#syncReplicaFromAuthority(replica, authorityRevision, replicaRevision);
       return;
     }
-    replica.delta = delta ? cloneWorldDelta(delta) : null;
+    replica.delta = delta ?? null;
     if (!delta) {
       replica.snapshot.checksum = "";
       replica.canonicalSnapshot = null;
@@ -444,7 +444,7 @@ export class LocalTransport {
       return;
     }
     try {
-      applyWorldDeltaToSnapshotState(replica.snapshot.worldState, delta);
+      applyWorldDeltaToSnapshotStateFast(replica.snapshot.worldState, delta);
     } catch (error) {
       if (this.#isReplicaResyncError(error)) {
         this.#resyncReplicaToAuthority(replica, authorityRevision, replicaRevision);

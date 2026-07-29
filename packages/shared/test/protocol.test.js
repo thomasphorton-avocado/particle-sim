@@ -382,6 +382,277 @@ test("accepts acknowledgements from real processCommand results and rejects impo
   }), /malformed_message/);
 });
 
+test("rejects invalid hotbar values, falling-object provenance mismatches, and weather domain violations", () => {
+  const fixture = createProtocolFixture();
+
+  const invalidHotbarSnapshot = structuredClone(fixture.snapshot);
+  invalidHotbarSnapshot.worldState.players[fixture.playerId].hotbar = Array.from({ length: 10 }, (_value, index) => index === 0 ? { kind: "material", materialId: 0, count: 0 } : null);
+  assert.throws(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 300,
+    snapshot: invalidHotbarSnapshot,
+  }), /malformed_message/);
+
+  const overstackedHotbarSnapshot = structuredClone(fixture.snapshot);
+  overstackedHotbarSnapshot.worldState.players[fixture.playerId].hotbar = Array.from({ length: 10 }, (_value, index) => index === 0 ? { kind: "material", materialId: MaterialId.Clock, count: 1001 } : null);
+  assert.throws(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 301,
+    snapshot: overstackedHotbarSnapshot,
+  }), /invalid_integer/);
+
+  const mismatchedProvenanceSnapshot = structuredClone(fixture.snapshot);
+  mismatchedProvenanceSnapshot.worldState.fallingObjects = {
+    object_mismatch: {
+      id: "object_mismatch",
+      materialId: MaterialId.Clock,
+      x: 0,
+      y: 0,
+      restY: 0,
+      vy: 0,
+      offsets: [[0, 0]],
+      provenance: {
+        kind: "placement",
+        actorId: fixture.playerId,
+        commandId: "command_mismatch",
+        sourceSlot: 0,
+        materialId: MaterialId.Wall,
+        amount: 1,
+      },
+    },
+  };
+  assert.throws(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 302,
+    snapshot: mismatchedProvenanceSnapshot,
+  }), /malformed_message/);
+
+  const negativeWeatherSnapshot = structuredClone(fixture.snapshot);
+  negativeWeatherSnapshot.worldState.weather = {
+    kind: "storm",
+    episodeElapsed: -1,
+    episodeDuration: 1,
+    wind: -0.25,
+    visualTime: 0,
+    rainAccumulator: -2,
+    lightningFlash: null,
+    lightningCooldown: null,
+    boltX: null,
+    boltY: null,
+    boltSeed: 7,
+  };
+  assert.throws(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 303,
+    snapshot: negativeWeatherSnapshot,
+  }), /invalid_integer/);
+
+  const validStormSnapshot = structuredClone(fixture.snapshot);
+  validStormSnapshot.worldState.weather = {
+    kind: "storm",
+    episodeElapsed: 1,
+    episodeDuration: 2,
+    wind: -0.25,
+    visualTime: 3,
+    rainAccumulator: 4,
+    lightningFlash: 5,
+    lightningCooldown: 6,
+    boltX: 7,
+    boltY: 8,
+    boltSeed: 9,
+  };
+  validStormSnapshot.checksum = computeWorldChecksum(validStormSnapshot);
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 304,
+    snapshot: validStormSnapshot,
+  }));
+});
+
+test("enforces ack invariants and canonical command-ledger metadata shapes", () => {
+  const fixture = createProtocolFixture();
+  const actorId = fixture.playerId;
+  const world = structuredClone(fixture.world);
+  world.ownerPlayerId = actorId;
+  world.worldRevision = 1;
+
+  const acceptedEnvelope = {
+    commandId: createCommandId("command_ack_accept"),
+    actorId,
+    actorSequence: 1,
+    issuedTick: 0,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  };
+  const acceptedResult = processCommand(world, acceptedEnvelope);
+  assert.equal(acceptedResult.kind, "accepted");
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "command_acknowledgement",
+    streamSequence: 305,
+    acknowledgements: [{
+      clientSequence: acceptedEnvelope.actorSequence,
+      issuedTick: acceptedEnvelope.issuedTick,
+      accepted: true,
+      code: acceptedResult.code,
+      authorityOrder: acceptedResult.authorityOrder,
+      processedTick: 5,
+      beforeWorldRevision: acceptedResult.beforeWorldRevision,
+      afterWorldRevision: acceptedResult.afterWorldRevision,
+      beforeInventoryRevision: acceptedResult.beforeInventoryRevision,
+      afterInventoryRevision: acceptedResult.afterInventoryRevision,
+      beforeTargetRevision: acceptedResult.beforeTargetRevision,
+      afterTargetRevision: acceptedResult.afterTargetRevision,
+      acceptedEffect: acceptedResult.acceptedEffect,
+    }],
+  }));
+
+  assert.throws(() => decodeProtocolMessage({
+    kind: "command_acknowledgement",
+    streamSequence: 306,
+    acknowledgements: [{
+      clientSequence: 2,
+      issuedTick: 1,
+      accepted: true,
+      code: "accepted",
+      authorityOrder: 0,
+      processedTick: 5,
+      beforeWorldRevision: 1,
+      afterWorldRevision: 2,
+      beforeInventoryRevision: 0,
+      afterInventoryRevision: 1,
+      beforeTargetRevision: 0,
+      afterTargetRevision: 1,
+      acceptedEffect: "effect",
+    }],
+  }), /invalid_integer|malformed_message/);
+
+  const rejectedEnvelope = {
+    commandId: createCommandId("command_ack_reject"),
+    actorId,
+    actorSequence: 2,
+    issuedTick: 0,
+    command: { type: "pause_world", expectedWorldRevision: 999 },
+  };
+  const rejectedResult = processCommand(world, rejectedEnvelope);
+  assert.equal(rejectedResult.kind, "rejected");
+  assert.throws(() => decodeProtocolMessage({
+    kind: "command_acknowledgement",
+    streamSequence: 307,
+    acknowledgements: [{
+      clientSequence: rejectedEnvelope.actorSequence,
+      issuedTick: rejectedEnvelope.issuedTick,
+      accepted: false,
+      code: rejectedResult.code,
+      authorityOrder: 7,
+      processedTick: 6,
+      beforeWorldRevision: rejectedResult.beforeWorldRevision,
+      afterWorldRevision: rejectedResult.afterWorldRevision,
+      beforeInventoryRevision: rejectedResult.beforeInventoryRevision,
+      afterInventoryRevision: rejectedResult.afterInventoryRevision,
+      beforeTargetRevision: rejectedResult.beforeTargetRevision,
+      afterTargetRevision: rejectedResult.afterTargetRevision,
+      acceptedEffect: null,
+    }],
+  }), /malformed_message/);
+
+  const fullLedgerDelta = structuredClone(fixture.delta);
+  fullLedgerDelta.metadata = [{
+    field: "commandLedger",
+    value: {
+      actorHighWater: { [actorId]: 1 },
+      recent: [{
+        commandId: createCommandId("command_receipt_full"),
+        actorId,
+        actorSequence: 1,
+        authorityOrder: 1,
+        issuedTick: 0,
+        processedTick: 0,
+        commandType: "pause_world",
+        code: "accepted",
+        accepted: true,
+        beforeWorldRevision: 0,
+        afterWorldRevision: 1,
+        beforeInventoryRevision: 0,
+        afterInventoryRevision: 0,
+        beforeTargetRevision: 0,
+        afterTargetRevision: 0,
+        acceptedEffect: "effect",
+        fingerprint: "fp",
+      }],
+    },
+  }];
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "delta",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 308,
+    delta: fullLedgerDelta,
+  }));
+
+  const incrementalLedgerDelta = structuredClone(fixture.delta);
+  incrementalLedgerDelta.metadata = [{
+    field: "commandLedger",
+    value: {
+      kind: "incremental",
+      actorHighWater: { [actorId]: 2 },
+      appendedReceipts: [{
+        commandId: createCommandId("command_receipt_incremental"),
+        actorId,
+        actorSequence: 2,
+        authorityOrder: 2,
+        issuedTick: 1,
+        processedTick: 1,
+        commandType: "pause_world",
+        code: "accepted",
+        accepted: true,
+        beforeWorldRevision: 1,
+        afterWorldRevision: 2,
+        beforeInventoryRevision: 0,
+        afterInventoryRevision: 0,
+        beforeTargetRevision: 0,
+        afterTargetRevision: 0,
+        acceptedEffect: "effect",
+        fingerprint: "fp2",
+      }],
+      trimmedCount: 1,
+    },
+  }];
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "delta",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 309,
+    delta: incrementalLedgerDelta,
+  }));
+
+  const wrapperLedgerDelta = structuredClone(fixture.delta);
+  wrapperLedgerDelta.metadata = [{ field: "commandLedger", value: { kind: "full", actorHighWater: {}, recent: [] } }];
+  assert.throws(() => decodeProtocolMessage({
+    kind: "delta",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 310,
+    delta: wrapperLedgerDelta,
+  }), /malformed_message/);
+});
+
 test("round-trips every protocol message variant", () => {
   const fixture = createProtocolFixture();
   const messages = [
@@ -438,7 +709,7 @@ test("round-trips every protocol message variant", () => {
           afterInventoryRevision: 1,
           beforeTargetRevision: 0,
           afterTargetRevision: 1,
-          acceptedEffect: null,
+          acceptedEffect: "effect",
         },
       ],
     },
@@ -644,7 +915,7 @@ test("rejects unknown fields and invalid IDs, integers, revisions, and dimension
       streamSequence: 1,
       delta: malformedReceiptDelta,
     }),
-    /invalid_id/,
+    /malformed_message/,
   );
 
   assert.throws(

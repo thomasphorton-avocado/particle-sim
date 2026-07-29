@@ -21,18 +21,17 @@ function toUtf8Bytes(input: ProtocolFrameInput): Uint8Array {
     if (input.length > MAX_FRAME_BYTES) {
       throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
     }
-    const destination = new Uint8Array(MAX_FRAME_BYTES);
-    const { read, written } = textEncoder.encodeInto(input, destination);
-    if (read !== input.length) {
+    const encoded = textEncoder.encode(input);
+    if (encoded.byteLength > MAX_FRAME_BYTES) {
       throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
     }
-    return destination.subarray(0, written);
+    return encoded;
   }
   if (input instanceof Uint8Array) {
     if (input.byteLength > MAX_FRAME_BYTES) {
       throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
     }
-    return input;
+    return new Uint8Array(input);
   }
   if (input instanceof ArrayBuffer) {
     if (input.byteLength > MAX_FRAME_BYTES) {
@@ -45,7 +44,9 @@ function toUtf8Bytes(input: ProtocolFrameInput): Uint8Array {
     if (view.byteLength > MAX_FRAME_BYTES) {
       throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
     }
-    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    const bytes = new Uint8Array(view.byteLength);
+    bytes.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+    return bytes;
   }
   return new Uint8Array();
 }

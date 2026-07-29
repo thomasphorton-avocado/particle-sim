@@ -1,5 +1,7 @@
 import { parseGameplayCommand } from "../commands.js";
+import { MAX_STACK } from "../inventory.js";
 import { parseCommandId, parseObjectId, parsePlayerId, parseRoomId } from "../ids.js";
+import { MATERIALS, MaterialId } from "../materials.js";
 import { decodeWorldDelta, decodeWorldSnapshot, WORLD_SNAPSHOT_SCHEMA_VERSION } from "../replication.js";
 import { WORLD_STATE_SCHEMA_VERSION } from "../serialization.js";
 import { MAX_BATCH_COMMANDS, MAX_CELL_DELTAS, MAX_DECODER_WORK, MAX_ENTITY_DELTAS, MAX_ID_LENGTH, MAX_INTEGER, MAX_METADATA_ENTRIES, MAX_NESTED_COLLECTION_ITEMS, MAX_OBJECT_FIELDS, MAX_STRING_LENGTH, MIN_INTEGER, MAX_NESTING_DEPTH, PROTOCOL_VERSION } from "./limits.js";
@@ -131,15 +133,34 @@ function assertFiniteNumber(value: unknown, label: string, work: DecoderWork): n
   return value;
 }
 
-function assertOptionalFiniteNumber(value: unknown, label: string, work: DecoderWork): number | null {
+function assertMaterialId(value: unknown, label: string, work: DecoderWork): number {
+  const materialId = assertInteger(value, label, work, 0, MAX_INTEGER);
+  if (materialId === MaterialId.Empty) {
+    throw new ProtocolCodecError("malformed_message", `${label} must reference a non-empty material`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(MATERIALS, materialId)) {
+    throw new ProtocolCodecError("malformed_message", `${label} must reference a known material`);
+  }
+  return materialId;
+}
+
+function assertNonNegativeFiniteNumber(value: unknown, label: string, work: DecoderWork): number {
+  const finite = assertFiniteNumber(value, label, work);
+  if (finite < 0) {
+    throw new ProtocolCodecError("invalid_integer", `${label} must be >= 0`);
+  }
+  return finite;
+}
+
+function assertOptionalNonNegativeFiniteNumber(value: unknown, label: string, work: DecoderWork): number | null {
   if (value === null) {
     return null;
   }
-  return assertFiniteNumber(value, label, work);
+  return assertNonNegativeFiniteNumber(value, label, work);
 }
 
 function assertNonNegativeInteger(value: unknown, label: string, work: DecoderWork): number {
-  return assertInteger(value, label, work, MIN_INTEGER, MAX_INTEGER);
+  return assertInteger(value, label, work, 0, MAX_INTEGER);
 }
 
 function assertLiteralString<T extends string>(value: unknown, label: string, work: DecoderWork, allowedValues: ReadonlySet<T>): T {
@@ -520,8 +541,8 @@ function assertHotbarShape(value: unknown, label: string, work: DecoderWork): vo
       ? assertReplicaObject(entry, `${label}[${index}]`, new Set(["kind", "materialId", "count"]), work)
       : assertReplicaObject(entry, `${label}[${index}]`, new Set(["kind"]), work);
     if (kind === "material") {
-      assertNonNegativeInteger(item["materialId"], `${label}[${index}].materialId`, work);
-      assertNonNegativeInteger(item["count"], `${label}[${index}].count`, work);
+      assertMaterialId(item["materialId"], `${label}[${index}].materialId`, work);
+      assertInteger(item["count"], `${label}[${index}].count`, work, 1, MAX_STACK);
     }
   }
 }
@@ -545,7 +566,7 @@ function assertFallingObjectMapShape(value: unknown, work: DecoderWork): void {
 function assertFallingObjectShape(value: unknown, label: string, work: DecoderWork): void {
   const fallingObject = assertReplicaObject(value, label, new Set(["id", "materialId", "x", "y", "restY", "vy", "offsets", "provenance"]), work);
   assertObjectId(fallingObject["id"], `${label}.id`, work);
-  assertNonNegativeInteger(fallingObject["materialId"], `${label}.materialId`, work);
+  const materialId = assertMaterialId(fallingObject["materialId"], `${label}.materialId`, work);
   assertReplicaValue(fallingObject["x"], `${label}.x`, work);
   assertReplicaValue(fallingObject["y"], `${label}.y`, work);
   assertReplicaValue(fallingObject["restY"], `${label}.restY`, work);
@@ -559,10 +580,10 @@ function assertFallingObjectShape(value: unknown, label: string, work: DecoderWo
     assertReplicaValue(entry[0], `${label}.offsets[${index}][0]`, work);
     assertReplicaValue(entry[1], `${label}.offsets[${index}][1]`, work);
   }
-  assertFallingProvenanceShape(fallingObject["provenance"], `${label}.provenance`, work);
+  assertFallingProvenanceShape(fallingObject["provenance"], `${label}.provenance`, work, materialId);
 }
 
-function assertFallingProvenanceShape(value: unknown, label: string, work: DecoderWork): void {
+function assertFallingProvenanceShape(value: unknown, label: string, work: DecoderWork, objectMaterialId?: number): void {
   const provenance = assertReplicaRecord(value, label, work);
   const kind = assertString(provenance["kind"], `${label}.kind`, work, false);
   if (kind === "legacy") {
@@ -574,8 +595,11 @@ function assertFallingProvenanceShape(value: unknown, label: string, work: Decod
     assertPlayerId(provenance["actorId"], `${label}.actorId`, work);
     assertCommandId(provenance["commandId"], `${label}.commandId`, work);
     assertInteger(provenance["sourceSlot"], `${label}.sourceSlot`, work, 0, 9);
-    assertInteger(provenance["materialId"], `${label}.materialId`, work, 0, 15);
+    const materialId = assertMaterialId(provenance["materialId"], `${label}.materialId`, work);
     assertInteger(provenance["amount"], `${label}.amount`, work, 1, 1);
+    if (objectMaterialId !== undefined && materialId !== objectMaterialId) {
+      throw new ProtocolCodecError("malformed_message", `${label}.materialId must match the falling object material`);
+    }
     return;
   }
   throw new ProtocolCodecError("malformed_message", `${label}.kind must be 'legacy' or 'placement'`);
@@ -601,16 +625,16 @@ function assertWeatherShape(value: unknown, label: string, work: DecoderWork): v
     "boltSeed",
   ]), work);
   assertLiteralString(weather["kind"], `${label}.kind`, work, new Set(["clear", "rain", "storm"]));
-  assertFiniteNumber(weather["episodeElapsed"], `${label}.episodeElapsed`, work);
-  assertFiniteNumber(weather["episodeDuration"], `${label}.episodeDuration`, work);
+  assertNonNegativeFiniteNumber(weather["episodeElapsed"], `${label}.episodeElapsed`, work);
+  assertNonNegativeFiniteNumber(weather["episodeDuration"], `${label}.episodeDuration`, work);
   assertFiniteNumber(weather["wind"], `${label}.wind`, work);
-  assertFiniteNumber(weather["visualTime"], `${label}.visualTime`, work);
-  assertFiniteNumber(weather["rainAccumulator"], `${label}.rainAccumulator`, work);
-  assertOptionalFiniteNumber(weather["lightningFlash"], `${label}.lightningFlash`, work);
-  assertOptionalFiniteNumber(weather["lightningCooldown"], `${label}.lightningCooldown`, work);
-  assertOptionalFiniteNumber(weather["boltX"], `${label}.boltX`, work);
-  assertOptionalFiniteNumber(weather["boltY"], `${label}.boltY`, work);
-  assertFiniteNumber(weather["boltSeed"], `${label}.boltSeed`, work);
+  assertNonNegativeFiniteNumber(weather["visualTime"], `${label}.visualTime`, work);
+  assertNonNegativeFiniteNumber(weather["rainAccumulator"], `${label}.rainAccumulator`, work);
+  assertOptionalNonNegativeFiniteNumber(weather["lightningFlash"], `${label}.lightningFlash`, work);
+  assertOptionalNonNegativeFiniteNumber(weather["lightningCooldown"], `${label}.lightningCooldown`, work);
+  assertOptionalNonNegativeFiniteNumber(weather["boltX"], `${label}.boltX`, work);
+  assertOptionalNonNegativeFiniteNumber(weather["boltY"], `${label}.boltY`, work);
+  assertNonNegativeFiniteNumber(weather["boltSeed"], `${label}.boltSeed`, work);
 }
 
 function assertCommandLedgerShape(value: unknown, work: DecoderWork): void {
@@ -816,9 +840,9 @@ function assertDeltaMetadataShape(value: unknown, label: string, work: DecoderWo
 
 function assertCommandLedgerMetadataShape(value: unknown, label: string, work: DecoderWork): void {
   const ledger = assertReplicaRecord(value, label, work);
-  if (ledger["kind"] === "incremental") {
-    assertAllowedFields(ledger, label, new Set(["kind", "actorHighWater", "appendedReceipts", "trimmedCount"]), work);
+  if (Object.prototype.hasOwnProperty.call(ledger, "kind")) {
     assertLiteralString(ledger["kind"], `${label}.kind`, work, new Set(["incremental"]));
+    assertAllowedFields(ledger, label, new Set(["kind", "actorHighWater", "appendedReceipts", "trimmedCount"]), work);
     const actorHighWater = assertReplicaMap(ledger["actorHighWater"], `${label}.actorHighWater`, work, MAX_ENTITY_DELTAS, "entity_too_large");
     for (const [actorId, entry] of Object.entries(actorHighWater)) {
       assertPlayerId(actorId, `${label}.actorHighWater.${actorId}`, work);
@@ -829,20 +853,6 @@ function assertCommandLedgerMetadataShape(value: unknown, label: string, work: D
       assertCommandReceiptShape(appendedReceipts[index], `${label}.appendedReceipts[${index}]`, work);
     }
     assertNonNegativeInteger(ledger["trimmedCount"], `${label}.trimmedCount`, work);
-    return;
-  }
-  if (ledger["kind"] === "full") {
-    assertAllowedFields(ledger, label, new Set(["kind", "actorHighWater", "recent"]), work);
-    assertLiteralString(ledger["kind"], `${label}.kind`, work, new Set(["full"]));
-    const actorHighWater = assertReplicaMap(ledger["actorHighWater"], `${label}.actorHighWater`, work, MAX_ENTITY_DELTAS, "entity_too_large");
-    for (const [actorId, entry] of Object.entries(actorHighWater)) {
-      assertPlayerId(actorId, `${label}.actorHighWater.${actorId}`, work);
-      assertNonNegativeInteger(entry, `${label}.actorHighWater.${actorId}`, work);
-    }
-    const recent = assertReplicaArray(ledger["recent"], `${label}.recent`, work, MAX_ENTITY_DELTAS, "entity_too_large");
-    for (let index = 0; index < recent.length; index += 1) {
-      assertCommandReceiptShape(recent[index], `${label}.recent[${index}]`, work);
-    }
     return;
   }
   assertAllowedFields(ledger, label, new Set(["actorHighWater", "recent"]), work);
@@ -959,7 +969,7 @@ function assertCommandAcknowledgement(value: unknown, work: DecoderWork): Protoc
     "invalid_command",
   ]));
   const authorityOrderValue = assertRequiredField(ackObject, "authorityOrder", "authorityOrder");
-  const authorityOrder = authorityOrderValue === null ? null : assertNonNegativeInteger(authorityOrderValue, "authorityOrder", work);
+  const authorityOrder = authorityOrderValue === null ? null : assertInteger(authorityOrderValue, "authorityOrder", work, 1, MAX_INTEGER);
   const processedTick = assertNonNegativeInteger(assertRequiredField(ackObject, "processedTick", "processedTick"), "processedTick", work);
   const beforeWorldRevision = assertNonNegativeInteger(assertRequiredField(ackObject, "beforeWorldRevision", "beforeWorldRevision"), "beforeWorldRevision", work);
   const afterWorldRevision = assertNonNegativeInteger(assertRequiredField(ackObject, "afterWorldRevision", "afterWorldRevision"), "afterWorldRevision", work);
@@ -976,8 +986,11 @@ function assertCommandAcknowledgement(value: unknown, work: DecoderWork): Protoc
     throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must not use the accepted code");
   }
   if (accepted) {
-    if (authorityOrder === null) {
-      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements must include a non-null authorityOrder");
+    if (authorityOrder === null || authorityOrder < 1) {
+      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements must include a positive authorityOrder");
+    }
+    if (acceptedEffect === null) {
+      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements must include a non-null acceptedEffect");
     }
     if (afterWorldRevision < beforeWorldRevision) {
       throw new ProtocolCodecError("malformed_message", "accepted acknowledgements cannot decrease world revisions");
@@ -989,17 +1002,20 @@ function assertCommandAcknowledgement(value: unknown, work: DecoderWork): Protoc
       throw new ProtocolCodecError("malformed_message", "accepted acknowledgements cannot decrease target revisions");
     }
   } else {
+    if (authorityOrder !== null) {
+      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must use a null authorityOrder");
+    }
     if (acceptedEffect !== null) {
       throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must use a null acceptedEffect");
     }
-    if (afterWorldRevision < beforeWorldRevision) {
-      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements cannot decrease world revisions");
+    if (afterWorldRevision !== beforeWorldRevision) {
+      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must preserve world revisions");
     }
-    if (afterInventoryRevision < beforeInventoryRevision) {
-      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements cannot decrease inventory revisions");
+    if (afterInventoryRevision !== beforeInventoryRevision) {
+      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must preserve inventory revisions");
     }
-    if (afterTargetRevision < beforeTargetRevision) {
-      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements cannot decrease target revisions");
+    if (afterTargetRevision !== beforeTargetRevision) {
+      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must preserve target revisions");
     }
   }
   return {

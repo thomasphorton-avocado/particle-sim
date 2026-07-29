@@ -8,10 +8,25 @@ export interface ProcessAdapter {
   exitCode?: number;
 }
 
+export interface ServerHandle {
+  readonly server: ReturnType<typeof createHttpServer>;
+  readonly roomManager: RoomManager;
+  readonly stop: () => Promise<void>;
+}
+
 function closeHttpServer(server: ReturnType<typeof createHttpServer>): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
     server.close((error) => {
       if (error) {
+        const nodeError = error as NodeJS.ErrnoException;
+        if (nodeError.code === "ERR_SERVER_NOT_RUNNING") {
+          resolve();
+          return;
+        }
         reject(error);
         return;
       }
@@ -20,7 +35,7 @@ function closeHttpServer(server: ReturnType<typeof createHttpServer>): Promise<v
   });
 }
 
-export async function startServer(config = parseServerConfig()): Promise<{ server: ReturnType<typeof createHttpServer>; roomManager: RoomManager }> {
+export async function startServer(config = parseServerConfig()): Promise<ServerHandle> {
   const roomManager = new RoomManager({
     maxRooms: config.maxRooms,
     minCapacity: config.minCapacity,
@@ -32,8 +47,41 @@ export async function startServer(config = parseServerConfig()): Promise<{ serve
     reconnectTombstoneLimit: config.reconnectTombstoneLimit,
   });
   const server = createHttpServer({ config, roomManager });
-  await new Promise<void>((resolve) => server.listen(config.port, config.host, resolve));
-  return { server, roomManager };
+
+  let stopPromise: Promise<void> | null = null;
+  const stop = () => {
+    if (stopPromise) {
+      return stopPromise;
+    }
+    stopPromise = stopServer(server, roomManager, config.defaultShutdownGraceMs, process as unknown as ProcessAdapter);
+    return stopPromise;
+  };
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        server.removeListener("error", onError);
+        void cleanupStartServerResources(server, roomManager).catch(() => undefined);
+        reject(error);
+      };
+      const onListening = () => {
+        server.removeListener("error", onError);
+        resolve();
+      };
+      server.once("error", onError);
+      server.listen(config.port, config.host, onListening);
+    });
+  } catch (error) {
+    await cleanupStartServerResources(server, roomManager);
+    throw error;
+  }
+
+  return { server, roomManager, stop };
+}
+
+async function cleanupStartServerResources(server: ReturnType<typeof createHttpServer>, roomManager: RoomManager): Promise<void> {
+  await closeHttpServer(server).catch(() => undefined);
+  await roomManager.shutdown(0).catch(() => undefined);
 }
 
 export async function stopServer(

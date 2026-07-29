@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import test from "node:test";
 import { createGameplayRandomState, type RoomId } from "@particle-sim/shared";
 import { parseServerConfig } from "../src/config.js";
+import { startServer } from "../src/main.js";
 import { Room, type RoomConfig, type RoomDependencies } from "../src/room/room.js";
 import { DeadlineScheduler, ManualDeadlineTimerDriver, type Clock } from "../src/room/scheduler.js";
 import { MemoryPublisher, RoomManager, type RoomTimerAdapter } from "../src/room/room-manager.js";
@@ -430,6 +432,150 @@ test("pending reservations keep an identity and reject duplicate joins", async (
 
   assert.equal(room.room.memberships[0]?.membershipId, firstJoin.membership!.membershipId);
   assert.equal(room.room.world.commandLedger.recent.length, 1);
+});
+
+test("startServer rejects EADDRINUSE without uncaught errors", async () => {
+  const blocker = createTcpServer();
+  await new Promise<void>((resolve, reject) => {
+    blocker.listen(0, "127.0.0.1", (error?: Error) => {
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    });
+  });
+  const address = blocker.address() as AddressInfo;
+  const uncaught: unknown[] = [];
+  const onUncaught = (error: unknown) => {
+    uncaught.push(error);
+  };
+  process.once("uncaughtException", onUncaught);
+  try {
+    const config = parseServerConfig({
+      ...process.env,
+      HOST: "127.0.0.1",
+      PORT: String(address.port),
+      MAX_ROOMS: "4",
+      MIN_CAPACITY: "2",
+      MAX_CAPACITY: "4",
+      TICK_HZ: "60",
+      MAX_CATCH_UP_TICKS: "3",
+      SHUTDOWN_GRACE_MS: "2000",
+      IDLE_CLEANUP_THRESHOLD_MS: "30000",
+      RECONNECT_TIMEOUT_MS: "10000",
+      RECONNECT_TOMBSTONE_LIMIT: "8",
+    });
+    await assert.rejects(startServer(config), (error: unknown) => {
+      const nodeError = error as NodeJS.ErrnoException;
+      assert.equal(nodeError.code, "EADDRINUSE");
+      return true;
+    });
+    assert.deepEqual(uncaught, []);
+  } finally {
+    process.removeListener("uncaughtException", onUncaught);
+    await new Promise<void>((resolve, reject) => blocker.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("handle.stop memoizes concurrent shutdown", async () => {
+  const config = parseServerConfig({
+    ...process.env,
+    PORT: "0",
+    HOST: "127.0.0.1",
+    MAX_ROOMS: "4",
+    MIN_CAPACITY: "2",
+    MAX_CAPACITY: "4",
+    TICK_HZ: "60",
+    MAX_CATCH_UP_TICKS: "3",
+    SHUTDOWN_GRACE_MS: "2000",
+    IDLE_CLEANUP_THRESHOLD_MS: "30000",
+    RECONNECT_TIMEOUT_MS: "10000",
+    RECONNECT_TOMBSTONE_LIMIT: "8",
+  });
+  const handle = await startServer(config);
+  try {
+    const first = handle.stop();
+    const second = handle.stop();
+    assert.strictEqual(second, first);
+    await Promise.all([first, second]);
+    assert.equal(handle.server.listening, false);
+  } finally {
+    if (handle.server.listening) {
+      await handle.stop();
+    }
+  }
+});
+
+test("command before leave still processes in queue order and later commands are rejected", async () => {
+  const room = createTestRoom({ maxCapacity: 2 });
+
+  assert.equal(room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const membership = room.room.memberships[0];
+  assert.ok(membership);
+  const command = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: membership!.generation,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(command.accepted, true);
+
+  const leave = room.room.enqueueLeave({
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 3,
+    generation: membership!.generation,
+    membershipId: membership!.membershipId,
+  });
+  assert.equal(leave.accepted, true);
+
+  const laterCommand = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 4,
+    generation: membership!.generation,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(laterCommand.accepted, false);
+  assert.equal(laterCommand.code, "leave_pending");
+
+  await room.room.flushPendingIngresses();
+
+  const receipts = room.room.world.commandLedger.recent as Array<{ actorSequence: number }>;
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0]?.actorSequence, 1);
+  assert.equal(room.room.memberships.length, 0);
+});
+
+test("same-boundary leave replacement clears old command sequence state", async () => {
+  const room = createTestRoom({ maxCapacity: 2 });
+
+  assert.equal(room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const membership = room.room.memberships[0];
+  assert.ok(membership);
+  const leave = room.room.enqueueLeave({
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: membership!.generation,
+    membershipId: membership!.membershipId,
+  });
+  assert.equal(leave.accepted, true);
+
+  const replacement = room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1b", connectionOrdinal: 3 });
+  assert.equal(replacement.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  assert.equal(room.room.memberships.length, 1);
+  assert.equal((room.room as unknown as { commandSequenceMapSize: number }).commandSequenceMapSize, 1);
 });
 
 test("oldest tombstones are evicted when reconnect state exceeds the bound", async () => {

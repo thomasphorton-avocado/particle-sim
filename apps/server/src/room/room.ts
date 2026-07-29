@@ -448,6 +448,9 @@ export class Room {
       membership.leftAtTick = null;
       membership.leftAtMs = null;
       membership.joinedAtTick = this.#world.tick;
+      if (tombstone?.membershipId && tombstone.membershipId !== membership.membershipId) {
+        this.#commandSequencesByMembership.delete(tombstone.membershipId);
+      }
       this.#commandSequencesByMembership.set(membership.membershipId, membership.nextCommandSequence);
       this.#tombstonesBySession.delete(membership.sessionId);
       this.#membershipsById.set(membership.membershipId, membership);
@@ -538,9 +541,6 @@ export class Room {
     }
     const membership = this.#membershipsBySession.get(ingress.sessionId);
     if (!membership || !membership.connected) {
-      return;
-    }
-    if (this.#hasPendingLeave(ingress.sessionId)) {
       return;
     }
     if (membership.membershipId !== ingress.membershipId || membership.connectionId !== ingress.connectionId || membership.generation !== ingress.generation) {

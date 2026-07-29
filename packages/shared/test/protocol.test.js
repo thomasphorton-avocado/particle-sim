@@ -11,6 +11,7 @@ import {
   MAX_CELL_DELTAS,
   MAX_ENTITY_DELTAS,
   MAX_FRAME_BYTES,
+  MAX_ID_LENGTH,
   MAX_METADATA_ENTRIES,
   MaterialId,
   PROTOCOL_VERSION,
@@ -71,7 +72,7 @@ test("round-trips every protocol message variant", () => {
       worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
       worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
       roomId: fixture.roomId,
-      playerId: createPlayerId("player_join"),
+      resumeToken: "resume-1",
     },
     {
       kind: "join_accepted",
@@ -190,19 +191,21 @@ test("rejects frame size overshoots and accepts the boundary when within the lim
   while (low < high) {
     const mid = Math.floor((low + high + 1) / 2);
     const candidate = "x".repeat(mid);
-    const candidateBytes = encodeProtocolMessage({ kind: "ping", streamSequence: 0, nonce: candidate });
-    if (candidateBytes.byteLength <= MAX_FRAME_BYTES) {
-      bestNonce = candidate;
-      low = mid;
-    } else {
+    try {
+      const candidateBytes = encodeProtocolMessage({ kind: "ping", streamSequence: 0, nonce: candidate });
+      if (candidateBytes.byteLength <= MAX_FRAME_BYTES) {
+        bestNonce = candidate;
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    } catch {
       high = mid - 1;
     }
   }
   const boundaryBytes = encodeProtocolMessage({ kind: "ping", streamSequence: 0, nonce: bestNonce });
   assert.ok(boundaryBytes.byteLength <= MAX_FRAME_BYTES);
-  const overBoundaryBytes = encodeProtocolMessage({ kind: "ping", streamSequence: 0, nonce: `${bestNonce}x` });
-  assert.ok(overBoundaryBytes.byteLength > MAX_FRAME_BYTES);
-  assert.throws(() => decodeProtocolMessage(overBoundaryBytes), /frame_too_large/);
+  assert.throws(() => encodeProtocolMessage({ kind: "ping", streamSequence: 0, nonce: `${bestNonce}x` }), /frame_too_large/);
 });
 
 test("rejects malformed JSON, unsupported versions, and unsupported schemas", () => {
@@ -290,6 +293,46 @@ test("rejects unknown fields and invalid IDs, integers, revisions, and dimension
       },
     }),
     /invalid_revision/,
+  );
+});
+
+test("rejects client identity, invalid unions, and bounded gameplay commands", () => {
+  const fixture = createProtocolFixture();
+  assert.throws(
+    () => decodeProtocolMessage({
+      kind: "join",
+      protocolVersion: PROTOCOL_VERSION,
+      worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+      worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+      roomId: fixture.roomId,
+      playerId: createPlayerId("player_join"),
+    }),
+    /unknown_field/,
+  );
+
+  assert.throws(
+    () => decodeProtocolMessage({
+      kind: "command_acknowledgement",
+      streamSequence: 1,
+      acknowledgements: [{ clientSequence: 1, issuedTick: 1, accepted: false, code: "accepted" }],
+    }),
+    /invalid_union|malformed_message/,
+  );
+
+  assert.throws(
+    () => decodeProtocolMessage({
+      kind: "command_batch",
+      streamSequence: 1,
+      commands: [{
+        clientSequence: 1,
+        issuedTick: 1,
+        command: {
+          type: "cycle_faucet",
+          objectId: `object-${"x".repeat(MAX_ID_LENGTH + 1)}`,
+        },
+      }],
+    }),
+    /invalid_id|invalid_integer|malformed_message/,
   );
 });
 

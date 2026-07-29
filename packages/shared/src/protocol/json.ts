@@ -30,11 +30,21 @@ function toUtf8Bytes(input: ProtocolFrameInput): Uint8Array {
 }
 
 export function encodeProtocolMessage(message: unknown): Uint8Array {
-  const payload = JSON.stringify(message);
+  let payload: string;
+  try {
+    payload = JSON.stringify(message);
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    throw new ProtocolCodecError("invalid_json", `Protocol message could not be serialized: ${messageText}`);
+  }
   if (payload === undefined) {
     throw new ProtocolCodecError("invalid_json", "Protocol message must be JSON-serializable");
   }
-  return textEncoder.encode(payload);
+  const encoded = textEncoder.encode(payload);
+  if (encoded.byteLength > MAX_FRAME_BYTES) {
+    throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
+  }
+  return encoded;
 }
 
 export function decodeProtocolMessageFrame(input: ProtocolFrameInput): unknown {

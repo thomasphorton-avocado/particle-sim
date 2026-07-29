@@ -7,6 +7,10 @@ export const MAX_FRAME_BYTES = 1024 * 1024;
 export const MAX_ID_LENGTH = 128;
 export const MAX_STRING_LENGTH = 4096;
 
+// Nested object and collection safety limits.
+export const MAX_OBJECT_FIELDS = 64;
+export const MAX_NESTED_COLLECTION_ITEMS = 100_000;
+
 // Batch and entity safety limits.
 export const MAX_BATCH_COMMANDS = 64;
 export const MAX_CELL_DELTAS = 4096;

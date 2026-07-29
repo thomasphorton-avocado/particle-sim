@@ -43,7 +43,7 @@ export interface ProtocolJoinMessage extends ProtocolVersionedMessage {
   worldSnapshotSchemaVersion: number;
   worldStateSchemaVersion: number;
   roomId: RoomId;
-  playerId?: PlayerId;
+  resumeToken?: string;
 }
 
 export interface ProtocolJoinAcceptedMessage extends ProtocolVersionedMessage {

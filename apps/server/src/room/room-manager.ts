@@ -123,6 +123,9 @@ export class RoomManager {
       scheduler: this.#schedulerFactory(this.#clock, 1000 / this.#config.tickHz, this.#config.maxCatchUpTicks),
       publisher: this.#publisher,
       hooks: this.#hooks,
+      onFinalized: () => {
+        this.#rooms.delete(room.roomId);
+      },
     });
     this.#rooms.set(room.roomId, room);
     return room;

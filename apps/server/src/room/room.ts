@@ -19,7 +19,7 @@ import type { WorldState } from "@particle-sim/shared";
 import { createDefaultRoomId } from "../config.js";
 import type { Clock } from "./scheduler.js";
 import type { DeadlineSchedulerState, RoomScheduler } from "./scheduler.js";
-import type { CommandRequest, JoinRequest, LeaveRequest, RoomIngress, RoomPublication, RoomPublisher, RoomTransportHooks, RoomLifecycleReason, RoomMemberState } from "./types.js";
+import type { CommandRequest, JoinRequest, LeaveRequest, RoomIngress, RoomPublication, RoomPublisher, RoomTransportHooks, RoomLifecycleReason, MembershipSummary, RoomMemberState } from "./types.js";
 
 export interface RoomStateSummary {
   readonly roomId: RoomId;
@@ -66,6 +66,7 @@ export interface RoomDependencies {
   readonly scheduler: RoomScheduler;
   readonly publisher: RoomPublisher;
   readonly hooks?: RoomTransportHooks;
+  readonly onFinalized?: (reason: RoomLifecycleReason) => void;
 }
 
 export class Room {
@@ -75,6 +76,7 @@ export class Room {
   #scheduler: RoomScheduler;
   #publisher: RoomPublisher;
   #hooks?: RoomTransportHooks;
+  #onFinalized?: (reason: RoomLifecycleReason) => void;
   #world: WorldState;
   #membershipsById: Map<string, MembershipRecord>;
   #membershipsBySession: Map<string, MembershipRecord>;
@@ -109,6 +111,7 @@ export class Room {
     this.#scheduler = dependencies.scheduler;
     this.#publisher = dependencies.publisher;
     this.#hooks = dependencies.hooks;
+    this.#onFinalized = dependencies.onFinalized;
     this.#world = createDefaultWorldState(config.roomId);
     this.#membershipsById = new Map();
     this.#membershipsBySession = new Map();
@@ -214,7 +217,15 @@ export class Room {
   get commandSequenceMapSize(): number {
     return this.#commandSequencesByMembership.size;
   }
-
+ 
+  get pendingReservationCount(): number {
+    return this.#pendingReservationsBySession.size;
+  }
+ 
+  get tombstoneCount(): number {
+    return this.#tombstonesBySession.size;
+  }
+ 
   get lastPublication(): RoomPublication | null {
     return this.#lastPublication;
   }
@@ -289,9 +300,8 @@ export class Room {
     this.#pendingReservationsBySession.set(request.sessionId, pendingReservation);
     if (reconnecting && tombstone) {
       this.#tombstonesBySession.delete(request.sessionId);
-      this.#clearMembershipResidue(tombstone.membershipId);
-    }
-    this.#ingressQueue.push(ingress);
+      this.#clearMembershipResidue(tombstone.membershipId, request.sessionId);
+    }    this.#ingressQueue.push(ingress);
     return { accepted: true, membership: this.#membershipSummaryForIngress(ingress) };
   }
 
@@ -329,6 +339,9 @@ export class Room {
     this.#lastActivityAtMs = this.#clock.nowMs();
     if (this.#closing) {
       return { accepted: false, code: "room_closed", message: "room is closed" };
+    }
+    if (this.#hasPendingLeave(request.sessionId)) {
+      return { accepted: false, code: "leave_pending", message: "session has a pending leave" };
     }
     const pendingReservation = this.#pendingReservationsBySession.get(request.sessionId);
     const membership = this.#membershipsBySession.get(request.sessionId) ?? pendingReservation;
@@ -452,8 +465,9 @@ export class Room {
       }
       this.#lastActivityAtMs = this.#clock.nowMs();
       this.publishMembership();
+      const membershipSummary = this.#membershipSummary(membership);
       this.#queueHook(async () => {
-        await this.#hooks?.onJoined?.(this.#roomId, this.#membershipSummary(membership));
+        await this.#hooks?.onJoined?.(this.#roomId, membershipSummary);
       });
       return;
     }
@@ -476,8 +490,9 @@ export class Room {
     }
     this.#lastActivityAtMs = this.#clock.nowMs();
     this.publishMembership();
+    const membershipSummary = this.#membershipSummary(membership);
     this.#queueHook(async () => {
-      await this.#hooks?.onJoined?.(this.#roomId, this.#membershipSummary(membership));
+      await this.#hooks?.onJoined?.(this.#roomId, membershipSummary);
     });
   }
 
@@ -511,8 +526,9 @@ export class Room {
     this.#pruneExpiredTombstones();
     this.#lastActivityAtMs = this.#clock.nowMs();
     this.publishMembership();
+    const membershipSummary = this.#membershipSummary(membership);
     this.#queueHook(async () => {
-      await this.#hooks?.onLeft?.(this.#roomId, this.#membershipSummary(membership));
+      await this.#hooks?.onLeft?.(this.#roomId, membershipSummary);
     });
   }
 
@@ -522,6 +538,9 @@ export class Room {
     }
     const membership = this.#membershipsBySession.get(ingress.sessionId);
     if (!membership || !membership.connected) {
+      return;
+    }
+    if (this.#hasPendingLeave(ingress.sessionId)) {
       return;
     }
     if (membership.membershipId !== ingress.membershipId || membership.connectionId !== ingress.connectionId || membership.generation !== ingress.generation) {
@@ -537,8 +556,9 @@ export class Room {
       const receipt = this.#world.commandLedger.recent[this.#world.commandLedger.recent.length - 1] as CommandReceipt | undefined;
       if (receipt) {
         this.#activeCommandReceipts = [receipt];
+        const membershipSummary = this.#membershipSummary(membership);
         void this.#queueHook(async () => {
-          await this.#hooks?.onCommandAck?.(this.#roomId, this.#membershipSummary(membership), receipt);
+          await this.#hooks?.onCommandAck?.(this.#roomId, membershipSummary, receipt);
         });
       }
     }
@@ -595,12 +615,19 @@ export class Room {
     };
   }
 
-  #clearMembershipResidue(membershipId: string): void {
+  #clearMembershipResidue(membershipId: string, sessionId?: string): void {
     const membership = this.#membershipsById.get(membershipId);
     if (membership) {
       this.#membershipsBySession.delete(membership.sessionId);
       this.#pendingReservationsBySession.delete(membership.sessionId);
       this.#tombstonesBySession.delete(membership.sessionId);
+    }
+    for (const [entrySessionId, tombstone] of Array.from(this.#tombstonesBySession.entries())) {
+      if (tombstone.membershipId === membershipId || entrySessionId === sessionId) {
+        this.#tombstonesBySession.delete(entrySessionId);
+        this.#pendingReservationsBySession.delete(entrySessionId);
+        this.#commandSequencesByMembership.delete(tombstone.membershipId);
+      }
     }
     this.#membershipsById.delete(membershipId);
     this.#commandSequencesByMembership.delete(membershipId);
@@ -642,6 +669,7 @@ export class Room {
       } catch (error) {
         this.#handleHookError(error);
       } finally {
+        this.#onFinalized?.(reason);
         this.resolveClose();
       }
     })();
@@ -804,7 +832,7 @@ export class Room {
     });
   }
 
-  #membershipSummary(membership: MembershipRecord): RoomMemberState {
+  #membershipSummary(membership: MembershipRecord): MembershipSummary {
     return {
       membershipId: membership.membershipId,
       playerId: membership.playerId,

@@ -18,7 +18,10 @@ export const MAX_ENTITY_DELTAS = 256;
 export const MAX_METADATA_ENTRIES = 32;
 
 // Decoder work budget for bounded fuzzing and resource safety.
-export const MAX_DECODER_WORK = 100_000;
+// This must cover the 320x200 starter-world grid with its full backing arrays plus
+// nested player/falling-object/metadata validation.
+export const MAX_DECODER_WORK = 1_000_000;
+export const MAX_NESTING_DEPTH = 64;
 
 // Integer range limits that match the shared replication validators.
 export const MIN_INTEGER = 0;

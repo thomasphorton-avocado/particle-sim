@@ -4,6 +4,7 @@ import {
   computeWorldChecksum,
   createDefaultWorldState,
   createPlayerId,
+  createStarterWorld,
   createWorldDelta,
   createWorldSnapshot,
   decodeProtocolMessage,
@@ -14,6 +15,7 @@ import {
   MAX_FRAME_BYTES,
   MAX_ID_LENGTH,
   MAX_METADATA_ENTRIES,
+  MAX_STRING_LENGTH,
   MaterialId,
   PROTOCOL_VERSION,
   WORLD_SNAPSHOT_SCHEMA_VERSION,
@@ -145,6 +147,107 @@ test("accepts placement provenance and optional delta grid dimensions", () => {
     worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
     streamSequence: 3,
     delta: fallingObjectDelta,
+  }));
+});
+
+test("rejects deeply nested values, oversized object keys, and strict nested metadata unions", () => {
+  const fixture = createProtocolFixture();
+
+  let deepValue = { value: 0 };
+  for (let index = 0; index < 80; index += 1) {
+    deepValue = { value: deepValue };
+  }
+  const deepSnapshot = structuredClone(fixture.snapshot);
+  deepSnapshot.worldState.paused = deepValue;
+  assert.throws(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 100,
+    snapshot: deepSnapshot,
+  }), /malformed_message/);
+
+  const oversizedKeySnapshot = structuredClone(fixture.snapshot);
+  oversizedKeySnapshot.worldState.players = {
+    [`x`.repeat(MAX_STRING_LENGTH + 1)]: structuredClone(fixture.snapshot.worldState.players[fixture.playerId]),
+  };
+  assert.throws(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 101,
+    snapshot: oversizedKeySnapshot,
+  }), /malformed_message/);
+
+  const invalidHotbarSnapshot = structuredClone(fixture.snapshot);
+  invalidHotbarSnapshot.worldState.players[fixture.playerId].hotbar = [{ kind: "bogus" }];
+  assert.throws(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 102,
+    snapshot: invalidHotbarSnapshot,
+  }), /malformed_message/);
+
+  const invalidWeatherSnapshot = structuredClone(fixture.snapshot);
+  invalidWeatherSnapshot.worldState.weather = {
+    kind: "blizzard",
+    episodeElapsed: 0,
+    episodeDuration: 1,
+    wind: 0,
+    visualTime: 0,
+    rainAccumulator: 0,
+    lightningFlash: null,
+    lightningCooldown: null,
+    boltX: null,
+    boltY: null,
+    boltSeed: 1,
+  };
+  assert.throws(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 103,
+    snapshot: invalidWeatherSnapshot,
+  }), /malformed_message/);
+
+  const invalidMetadataDelta = structuredClone(fixture.delta);
+  invalidMetadataDelta.metadata = [{ field: "time", value: { dayNightTick: 0, unexpected: true } }];
+  assert.throws(() => decodeProtocolMessage({
+    kind: "delta",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 104,
+    delta: invalidMetadataDelta,
+  }), /unknown_field/);
+
+  const presentGridDelta = structuredClone(fixture.delta);
+  presentGridDelta.gridDimensions = { width: 3, height: 4 };
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "delta",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 105,
+    delta: presentGridDelta,
+  }));
+});
+
+test("accepts large starter-world snapshots within the decoder work budget", () => {
+  const world = createStarterWorld({ roomId: "room_starter" });
+  const snapshot = createWorldSnapshot(world);
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 12,
+    snapshot,
   }));
 });
 

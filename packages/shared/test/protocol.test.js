@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   computeWorldChecksum,
+  createCommandId,
   createDefaultWorldState,
   createPlayerId,
   createStarterWorld,
@@ -22,6 +23,7 @@ import {
   WORLD_STATE_SCHEMA_VERSION,
   createDefaultPlayerState,
   createRoomId,
+  processCommand,
 } from "@particle-sim/shared";
 
 function createProtocolFixture() {
@@ -253,6 +255,121 @@ test("accepts large starter-world snapshots within the decoder work budget", () 
     streamSequence: 12,
     snapshot,
   }));
+});
+
+test("rejects oversized frame payloads and unsupported delta schema versions", () => {
+  const asciiPayload = { payload: "x".repeat(MAX_FRAME_BYTES + 1) };
+  assert.throws(() => encodeProtocolMessage(asciiPayload), (error) => {
+    assert.equal(error.code, "frame_too_large");
+    return true;
+  });
+
+  const multiBytePayload = { payload: "€".repeat(524_289) };
+  assert.throws(() => encodeProtocolMessage(multiBytePayload), (error) => {
+    assert.equal(error.code, "frame_too_large");
+    return true;
+  });
+
+  const fixture = createProtocolFixture();
+  const unsupportedDelta = structuredClone(fixture.delta);
+  unsupportedDelta.version = 2;
+  assert.throws(() => decodeProtocolMessage({
+    kind: "delta",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 200,
+    delta: unsupportedDelta,
+  }), (error) => {
+    assert.equal(error.code, "unsupported_schema_version");
+    return true;
+  });
+});
+
+test("accepts acknowledgements from real processCommand results and rejects impossible revision transitions", () => {
+  const roomId = createRoomId("room_ack");
+  const world = createDefaultWorldState(roomId);
+  const actorId = createPlayerId("player_ack");
+  world.players[actorId] = createDefaultPlayerState(actorId);
+  world.ownerPlayerId = actorId;
+  world.worldRevision = 1;
+  const acceptedEnvelope = {
+    commandId: createCommandId("command_accepted"),
+    actorId,
+    actorSequence: 1,
+    issuedTick: 0,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  };
+  const acceptedResult = processCommand(world, acceptedEnvelope);
+  assert.equal(acceptedResult.kind, "accepted");
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "command_acknowledgement",
+    streamSequence: 201,
+    acknowledgements: [{
+      clientSequence: acceptedEnvelope.actorSequence,
+      issuedTick: acceptedEnvelope.issuedTick,
+      accepted: true,
+      code: acceptedResult.code,
+      authorityOrder: acceptedResult.authorityOrder,
+      processedTick: 5,
+      beforeWorldRevision: acceptedResult.beforeWorldRevision,
+      afterWorldRevision: acceptedResult.afterWorldRevision,
+      beforeInventoryRevision: acceptedResult.beforeInventoryRevision,
+      afterInventoryRevision: acceptedResult.afterInventoryRevision,
+      beforeTargetRevision: acceptedResult.beforeTargetRevision,
+      afterTargetRevision: acceptedResult.afterTargetRevision,
+      acceptedEffect: acceptedResult.acceptedEffect,
+    }],
+  }));
+
+  const rejectedEnvelope = {
+    commandId: createCommandId("command_rejected"),
+    actorId,
+    actorSequence: 2,
+    issuedTick: 0,
+    command: { type: "pause_world", expectedWorldRevision: 999 },
+  };
+  const rejectedResult = processCommand(world, rejectedEnvelope);
+  assert.equal(rejectedResult.kind, "rejected");
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "command_acknowledgement",
+    streamSequence: 202,
+    acknowledgements: [{
+      clientSequence: rejectedEnvelope.actorSequence,
+      issuedTick: rejectedEnvelope.issuedTick,
+      accepted: false,
+      code: rejectedResult.code,
+      authorityOrder: null,
+      processedTick: 6,
+      beforeWorldRevision: rejectedResult.beforeWorldRevision,
+      afterWorldRevision: rejectedResult.afterWorldRevision,
+      beforeInventoryRevision: rejectedResult.beforeInventoryRevision,
+      afterInventoryRevision: rejectedResult.afterInventoryRevision,
+      beforeTargetRevision: rejectedResult.beforeTargetRevision,
+      afterTargetRevision: rejectedResult.afterTargetRevision,
+      acceptedEffect: null,
+    }],
+  }));
+
+  assert.throws(() => decodeProtocolMessage({
+    kind: "command_acknowledgement",
+    streamSequence: 203,
+    acknowledgements: [{
+      clientSequence: 1,
+      issuedTick: 1,
+      accepted: true,
+      code: "accepted",
+      authorityOrder: null,
+      processedTick: 1,
+      beforeWorldRevision: 2,
+      afterWorldRevision: 1,
+      beforeInventoryRevision: 0,
+      afterInventoryRevision: 0,
+      beforeTargetRevision: 0,
+      afterTargetRevision: 0,
+      acceptedEffect: null,
+    }],
+  }), /malformed_message/);
 });
 
 test("round-trips every protocol message variant", () => {

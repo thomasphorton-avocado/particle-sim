@@ -44,6 +44,9 @@ export function encodeProtocolMessage(message: unknown): Uint8Array {
   if (payload === undefined) {
     throw new ProtocolCodecError("invalid_json", "Protocol message must be JSON-serializable");
   }
+  if (payload.length > MAX_FRAME_BYTES) {
+    throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
+  }
   const encoded = textEncoder.encode(payload);
   if (encoded.byteLength > MAX_FRAME_BYTES) {
     throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);

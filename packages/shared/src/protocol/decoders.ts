@@ -202,6 +202,13 @@ function assertObjectId(value: unknown, label: string, work: DecoderWork): Retur
   }
 }
 
+function assertOptionalObjectId(value: unknown, label: string, work: DecoderWork): ReturnType<typeof parseObjectId> | null {
+  if (value === null) {
+    return null;
+  }
+  return assertObjectId(value, label, work);
+}
+
 function assertCommandId(value: unknown, label: string, work: DecoderWork): ReturnType<typeof parseCommandId> {
   const commandIdText = assertString(value, label, work, false);
   if (utf8ByteLength(commandIdText) > MAX_ID_LENGTH) {
@@ -346,7 +353,7 @@ function assertReplicaValue(value: unknown, label: string, work: DecoderWork): v
 
 function assertSnapshotShape(value: unknown, work: DecoderWork): void {
   const snapshot = assertReplicaObject(value, "snapshot", new Set(["version", "worldRevision", "checksum", "worldState"]), work);
-  assertNonNegativeInteger(snapshot["version"], "snapshot.version", work);
+  assertSchemaVersion(snapshot["version"], "snapshot.version", work, WORLD_SNAPSHOT_SCHEMA_VERSION);
   assertNonNegativeInteger(snapshot["worldRevision"], "snapshot.worldRevision", work);
   assertString(snapshot["checksum"], "snapshot.checksum", work, false);
   assertWorldStateShape(snapshot["worldState"], work);
@@ -371,7 +378,7 @@ function assertWorldStateShape(value: unknown, work: DecoderWork): void {
     "nextAuthorityOrder",
     "commandLedger",
   ]), work);
-  assertNonNegativeInteger(worldState["schemaVersion"], "worldState.schemaVersion", work);
+  assertSchemaVersion(worldState["schemaVersion"], "worldState.schemaVersion", work, WORLD_STATE_SCHEMA_VERSION);
   assertString(worldState["roomId"], "worldState.roomId", work, false);
   assertGridShape(worldState["grid"], work);
   assertRandomShape(worldState["random"], "random", work);
@@ -408,7 +415,7 @@ function assertGridShape(value: unknown, work: DecoderWork): void {
     const entry = assertReplicaObject(objectMembership[index], `grid.objectMembership[${index}]`, new Set(["x", "y", "objectId"]), work);
     assertNonNegativeInteger(entry["x"], `grid.objectMembership[${index}].x`, work);
     assertNonNegativeInteger(entry["y"], `grid.objectMembership[${index}].y`, work);
-    assertString(entry["objectId"], `grid.objectMembership[${index}].objectId`, work, false);
+    assertOptionalObjectId(entry["objectId"], `grid.objectMembership[${index}].objectId`, work);
   }
 }
 
@@ -452,7 +459,7 @@ function assertPlayerStateShape(value: unknown, label: string, work: DecoderWork
     "inventoryRevision",
     "pendingRefunds",
   ]), work);
-  assertString(player["id"], `${label}.id`, work, false);
+  assertPlayerId(player["id"], `${label}.id`, work);
   assertReplicaValue(player["x"], `${label}.x`, work);
   assertReplicaValue(player["y"], `${label}.y`, work);
   assertReplicaValue(player["vx"], `${label}.vx`, work);
@@ -537,7 +544,7 @@ function assertFallingObjectMapShape(value: unknown, work: DecoderWork): void {
 
 function assertFallingObjectShape(value: unknown, label: string, work: DecoderWork): void {
   const fallingObject = assertReplicaObject(value, label, new Set(["id", "materialId", "x", "y", "restY", "vy", "offsets", "provenance"]), work);
-  assertString(fallingObject["id"], `${label}.id`, work, false);
+  assertObjectId(fallingObject["id"], `${label}.id`, work);
   assertNonNegativeInteger(fallingObject["materialId"], `${label}.materialId`, work);
   assertReplicaValue(fallingObject["x"], `${label}.x`, work);
   assertReplicaValue(fallingObject["y"], `${label}.y`, work);
@@ -566,9 +573,9 @@ function assertFallingProvenanceShape(value: unknown, label: string, work: Decod
     assertAllowedFields(provenance, label, new Set(["kind", "actorId", "commandId", "sourceSlot", "materialId", "amount"]), work);
     assertPlayerId(provenance["actorId"], `${label}.actorId`, work);
     assertCommandId(provenance["commandId"], `${label}.commandId`, work);
-    assertNonNegativeInteger(provenance["sourceSlot"], `${label}.sourceSlot`, work);
-    assertNonNegativeInteger(provenance["materialId"], `${label}.materialId`, work);
-    assertNonNegativeInteger(provenance["amount"], `${label}.amount`, work);
+    assertInteger(provenance["sourceSlot"], `${label}.sourceSlot`, work, 0, 9);
+    assertInteger(provenance["materialId"], `${label}.materialId`, work, 0, 15);
+    assertInteger(provenance["amount"], `${label}.amount`, work, 1, 1);
     return;
   }
   throw new ProtocolCodecError("malformed_message", `${label}.kind must be 'legacy' or 'placement'`);
@@ -702,7 +709,7 @@ function assertCommandReceiptShape(value: unknown, label: string, work: DecoderW
 
 function assertDeltaShape(value: unknown, work: DecoderWork): void {
   const delta = assertReplicaObject(value, "delta", new Set(["version", "baseRevision", "targetRevision", "gridDimensions", "cells", "players", "fallingObjects", "metadata"]), work);
-  assertNonNegativeInteger(delta["version"], "delta.version", work);
+  assertSchemaVersion(delta["version"], "delta.version", work, WORLD_SNAPSHOT_SCHEMA_VERSION);
   const baseRevision = assertNonNegativeInteger(delta["baseRevision"], "delta.baseRevision", work);
   const targetRevision = assertNonNegativeInteger(delta["targetRevision"], "delta.targetRevision", work);
   if (baseRevision > targetRevision) {
@@ -741,7 +748,7 @@ function assertDeltaCellShape(value: unknown, label: string, work: DecoderWork):
   assertNonNegativeInteger(cell["materialId"], `${label}.materialId`, work);
   assertReplicaValue(cell["shade"], `${label}.shade`, work);
   assertReplicaValue(cell["auxiliary"], `${label}.auxiliary`, work);
-  assertReplicaValue(cell["objectId"], `${label}.objectId`, work);
+  assertOptionalObjectId(cell["objectId"], `${label}.objectId`, work);
   assertNonNegativeInteger(cell["revision"], `${label}.revision`, work);
 }
 
@@ -811,6 +818,7 @@ function assertCommandLedgerMetadataShape(value: unknown, label: string, work: D
   const ledger = assertReplicaRecord(value, label, work);
   if (ledger["kind"] === "incremental") {
     assertAllowedFields(ledger, label, new Set(["kind", "actorHighWater", "appendedReceipts", "trimmedCount"]), work);
+    assertLiteralString(ledger["kind"], `${label}.kind`, work, new Set(["incremental"]));
     const actorHighWater = assertReplicaMap(ledger["actorHighWater"], `${label}.actorHighWater`, work, MAX_ENTITY_DELTAS, "entity_too_large");
     for (const [actorId, entry] of Object.entries(actorHighWater)) {
       assertPlayerId(actorId, `${label}.actorHighWater.${actorId}`, work);
@@ -821,6 +829,20 @@ function assertCommandLedgerMetadataShape(value: unknown, label: string, work: D
       assertCommandReceiptShape(appendedReceipts[index], `${label}.appendedReceipts[${index}]`, work);
     }
     assertNonNegativeInteger(ledger["trimmedCount"], `${label}.trimmedCount`, work);
+    return;
+  }
+  if (ledger["kind"] === "full") {
+    assertAllowedFields(ledger, label, new Set(["kind", "actorHighWater", "recent"]), work);
+    assertLiteralString(ledger["kind"], `${label}.kind`, work, new Set(["full"]));
+    const actorHighWater = assertReplicaMap(ledger["actorHighWater"], `${label}.actorHighWater`, work, MAX_ENTITY_DELTAS, "entity_too_large");
+    for (const [actorId, entry] of Object.entries(actorHighWater)) {
+      assertPlayerId(actorId, `${label}.actorHighWater.${actorId}`, work);
+      assertNonNegativeInteger(entry, `${label}.actorHighWater.${actorId}`, work);
+    }
+    const recent = assertReplicaArray(ledger["recent"], `${label}.recent`, work, MAX_ENTITY_DELTAS, "entity_too_large");
+    for (let index = 0; index < recent.length; index += 1) {
+      assertCommandReceiptShape(recent[index], `${label}.recent[${index}]`, work);
+    }
     return;
   }
   assertAllowedFields(ledger, label, new Set(["actorHighWater", "recent"]), work);
@@ -952,6 +974,33 @@ function assertCommandAcknowledgement(value: unknown, work: DecoderWork): Protoc
   }
   if (!accepted && code === "accepted") {
     throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must not use the accepted code");
+  }
+  if (accepted) {
+    if (authorityOrder === null) {
+      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements must include a non-null authorityOrder");
+    }
+    if (afterWorldRevision < beforeWorldRevision) {
+      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements cannot decrease world revisions");
+    }
+    if (afterInventoryRevision < beforeInventoryRevision) {
+      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements cannot decrease inventory revisions");
+    }
+    if (afterTargetRevision < beforeTargetRevision) {
+      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements cannot decrease target revisions");
+    }
+  } else {
+    if (acceptedEffect !== null) {
+      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must use a null acceptedEffect");
+    }
+    if (afterWorldRevision < beforeWorldRevision) {
+      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements cannot decrease world revisions");
+    }
+    if (afterInventoryRevision < beforeInventoryRevision) {
+      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements cannot decrease inventory revisions");
+    }
+    if (afterTargetRevision < beforeTargetRevision) {
+      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements cannot decrease target revisions");
+    }
   }
   return {
     clientSequence,

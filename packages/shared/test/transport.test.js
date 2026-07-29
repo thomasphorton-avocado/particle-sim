@@ -774,7 +774,6 @@ test("LocalTransport clears the hotbar slot after one-unit object placement and 
   assert.equal(world.players[actorId].hotbar[0].kind, "material");
   const clientWorldAfterFirst = transport.getClientWorld();
   assert.equal(clientWorldAfterFirst.players[actorId].hotbar[0].kind, "empty");
-  const authorityOrderAfterFirst = clientWorldAfterFirst.tick;
   const worldRevisionAfterFirst = clientWorldAfterFirst.tick;
   const inventoryRevisionAfterFirst = clientWorldAfterFirst.players[actorId].inventoryRevision;
   const targetRevisionAfterFirst = clientWorldAfterFirst.grid.cellRevisions[clientWorldAfterFirst.grid.index(10, 10)] ?? 0;

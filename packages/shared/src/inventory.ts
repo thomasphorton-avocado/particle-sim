@@ -42,7 +42,7 @@ export function cloneHotbar(hotbar: HotbarItem[]): HotbarItem[] {
   });
 }
 
-const MAX_STACK = 1000;
+export const MAX_STACK = 1000;
 
 export function consumeHotbarMaterial(hotbar: HotbarItem[], slot: number, amount: number): boolean {
   const entry = hotbar[slot];

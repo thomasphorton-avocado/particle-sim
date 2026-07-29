@@ -412,7 +412,7 @@ function assertAllowedFields(value: Record<string, unknown>, allowedFields: Read
   }
 }
 
-function parseGameplayCommand(value: unknown): GameplayCommand | null {
+export function parseGameplayCommand(value: unknown): GameplayCommand | null {
   if (!isPlainObject(value)) return null;
   try {
     const type = value["type"];

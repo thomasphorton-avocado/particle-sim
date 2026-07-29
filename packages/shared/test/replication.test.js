@@ -58,7 +58,7 @@ function createReceiptFixture(actorId, authorityOrder, overrides = {}) {
     afterInventoryRevision: 1,
     beforeTargetRevision: 0,
     afterTargetRevision: 1,
-    acceptedEffect: null,
+    acceptedEffect: "applied",
     fingerprint: "receipt-fingerprint",
     ...overrides,
   };

@@ -8,10 +8,11 @@ import {
   createWorldSnapshot,
   enqueueCommand,
   processPendingCommands,
-  type CommandReceipt,
   type CommandEnvelope,
+  type CommandReceipt,
   type GameplayCommand,
   type PlayerId,
+  type PlayerState,
   type RoomId,
 } from "@particle-sim/shared";
 import type { WorldState } from "@particle-sim/shared";
@@ -44,6 +45,9 @@ interface MembershipRecord {
   owner: boolean;
   joinedAtTick: number;
   leftAtTick: number | null;
+  leftAtMs: number | null;
+  playerState: PlayerState | null;
+  nextCommandSequence: number;
 }
 
 export interface RoomConfig {
@@ -53,6 +57,8 @@ export interface RoomConfig {
   readonly tickHz: number;
   readonly maxCatchUpTicks: number;
   readonly idleCleanupThresholdMs: number;
+  readonly reconnectTimeoutMs?: number;
+  readonly reconnectTombstoneLimit?: number;
 }
 
 export interface RoomDependencies {
@@ -73,6 +79,7 @@ export class Room {
   #membershipsById: Map<string, MembershipRecord>;
   #membershipsBySession: Map<string, MembershipRecord>;
   #tombstonesBySession: Map<string, MembershipRecord>;
+  #pendingReservationsBySession: Map<string, MembershipRecord>;
   #ingressQueue: RoomIngress[];
   #nextJoinOrdinal: number;
   #nextReceiveOrdinal: number;
@@ -83,12 +90,15 @@ export class Room {
   #schedulerSuspended: boolean;
   #closePromise: Promise<void>;
   #resolveClosePromise: (() => void) | null = null;
+  #rejectClosePromise: ((reason?: unknown) => void) | null = null;
   #shutdownReason: RoomLifecycleReason | null;
   #lastPublication: RoomPublication | null;
   #lastActivityAtMs: number;
   #activeCommandReceipts: CommandReceipt[];
   #commandSequencesByMembership: Map<string, number>;
-  #tombstoneLifetimeTicks: number;
+  #reconnectTimeoutMs: number;
+  #reconnectTombstoneLimit: number;
+  #closeError: unknown;
 
   constructor(config: RoomConfig, dependencies: RoomDependencies) {
     this.#roomId = config.roomId;
@@ -101,6 +111,7 @@ export class Room {
     this.#membershipsById = new Map();
     this.#membershipsBySession = new Map();
     this.#tombstonesBySession = new Map();
+    this.#pendingReservationsBySession = new Map();
     this.#ingressQueue = [];
     this.#nextJoinOrdinal = 1;
     this.#nextReceiveOrdinal = 1;
@@ -114,9 +125,12 @@ export class Room {
     this.#lastActivityAtMs = this.#clock.nowMs();
     this.#activeCommandReceipts = [];
     this.#commandSequencesByMembership = new Map();
-    this.#tombstoneLifetimeTicks = Math.max(2, config.maxCapacity * 2);
-    this.#closePromise = new Promise<void>((resolve) => {
+    this.#reconnectTimeoutMs = config.reconnectTimeoutMs ?? 60_000;
+    this.#reconnectTombstoneLimit = config.reconnectTombstoneLimit ?? Math.max(4, config.maxCapacity * 2);
+    this.#closeError = null;
+    this.#closePromise = new Promise<void>((resolve, reject) => {
       this.#resolveClosePromise = resolve;
+      this.#rejectClosePromise = reject;
     });
 
     this.#scheduler.stop();
@@ -207,13 +221,19 @@ export class Room {
     this.#schedulerSuspended = true;
     this.#scheduler.stop();
     this.#ingressQueue.length = 0;
+    this.#pendingReservationsBySession.clear();
     this.#pruneExpiredTombstones();
     this.#lastActivityAtMs = this.#clock.nowMs();
     if (this.#tickInProgress) {
       return this.#closePromise;
     }
-    await this.publishClosing(reason);
-    this.resolveClose();
+    try {
+      await this.publishClosing(reason);
+    } catch (error) {
+      this.#handleHookError(error);
+    } finally {
+      this.resolveClose();
+    }
     return this.#closePromise;
   }
 
@@ -223,6 +243,9 @@ export class Room {
       return { accepted: false, code: "room_closed", message: "room is closed" };
     }
     this.#pruneExpiredTombstones();
+    if (this.#pendingReservationsBySession.has(request.sessionId)) {
+      return { accepted: false, code: "join_pending", message: "join already pending" };
+    }
     if (this.#projectedMembershipCount() >= this.#config.maxCapacity) {
       return { accepted: false, code: "room_full", message: "room is full" };
     }
@@ -238,8 +261,10 @@ export class Room {
       this.#nextJoinOrdinal += 1;
     }
     const membershipId = reconnecting ? tombstone!.membershipId : `membership_${joinOrdinal}`;
-    const generation = this.#nextMembershipGeneration;
-    this.#nextMembershipGeneration += 1;
+    const generation = reconnecting ? tombstone!.generation : this.#nextMembershipGeneration;
+    if (!reconnecting) {
+      this.#nextMembershipGeneration += 1;
+    }
     const ingress: RoomIngress = {
       kind: "join",
       membershipId,
@@ -252,6 +277,7 @@ export class Room {
       playerId: reconnecting ? tombstone!.playerId : undefined,
     };
     this.#nextReceiveOrdinal += 1;
+    this.#pendingReservationsBySession.set(request.sessionId, this.#createPendingReservation(ingress, reconnecting ? tombstone : undefined));
     this.#ingressQueue.push(ingress);
     return { accepted: true, membership: this.#membershipSummaryForIngress(ingress) };
   }
@@ -261,8 +287,9 @@ export class Room {
     if (this.#closing) {
       return { accepted: false, code: "room_closed", message: "room is closed" };
     }
-    const membership = this.#membershipsBySession.get(request.sessionId);
-    if (!membership || !membership.connected) {
+    const pendingReservation = this.#pendingReservationsBySession.get(request.sessionId);
+    const membership = this.#membershipsBySession.get(request.sessionId) ?? pendingReservation;
+    if (!membership) {
       return { accepted: false, code: "not_joined", message: "session is not joined" };
     }
     if (request.membershipId === undefined || request.connectionId === undefined || request.generation === undefined) {
@@ -290,8 +317,9 @@ export class Room {
     if (this.#closing) {
       return { accepted: false, code: "room_closed", message: "room is closed" };
     }
-    const membership = this.#membershipsBySession.get(request.sessionId);
-    if (!membership || !membership.connected) {
+    const pendingReservation = this.#pendingReservationsBySession.get(request.sessionId);
+    const membership = this.#membershipsBySession.get(request.sessionId) ?? pendingReservation;
+    if (!membership || (!membership.connected && !pendingReservation)) {
       return { accepted: false, code: "not_joined", message: "session is not joined" };
     }
     if (request.membershipId === undefined || request.connectionId === undefined || request.generation === undefined) {
@@ -375,6 +403,7 @@ export class Room {
       return;
     }
     this.#pruneExpiredTombstones();
+    this.#pendingReservationsBySession.delete(ingress.sessionId);
     const existing = this.#membershipsBySession.get(ingress.sessionId);
     if (existing && existing.connected) {
       return;
@@ -388,12 +417,13 @@ export class Room {
       membership.generation = ingress.generation;
       membership.receiveOrdinal = ingress.receiveOrdinal;
       membership.leftAtTick = null;
+      membership.leftAtMs = null;
       membership.joinedAtTick = this.#world.tick;
-      this.#commandSequencesByMembership.set(membership.membershipId, 1);
+      this.#commandSequencesByMembership.set(membership.membershipId, membership.nextCommandSequence);
       this.#tombstonesBySession.delete(membership.sessionId);
       this.#membershipsById.set(membership.membershipId, membership);
       this.#membershipsBySession.set(membership.sessionId, membership);
-      this.#world.players[membership.playerId] = createDefaultPlayerState(membership.playerId);
+      this.#world.players[membership.playerId] = this.#restorePlayerState(membership);
       this.#world.ownerPlayerId = this.#world.ownerPlayerId ?? membership.playerId;
       this.#reconcileOwner();
       this.#schedulerSuspended = false;
@@ -410,8 +440,8 @@ export class Room {
     const membership = this.#createMembershipRecord(ingress);
     this.#membershipsById.set(membership.membershipId, membership);
     this.#membershipsBySession.set(membership.sessionId, membership);
-    this.#commandSequencesByMembership.set(membership.membershipId, 1);
-    this.#world.players[membership.playerId] = createDefaultPlayerState(membership.playerId);
+    this.#commandSequencesByMembership.set(membership.membershipId, membership.nextCommandSequence);
+    this.#world.players[membership.playerId] = this.#clonePlayerState(membership.playerState ?? createDefaultPlayerState(membership.playerId));
     this.#world.nextPlayerOrdinal = this.#world.nextPlayerOrdinal + 1;
     this.#world.ownerPlayerId = this.#world.ownerPlayerId ?? membership.playerId;
     this.#reconcileOwner();
@@ -436,10 +466,15 @@ export class Room {
     }
     membership.connected = false;
     membership.leftAtTick = this.#world.tick;
+    membership.leftAtMs = this.#clock.nowMs();
+    if (this.#world.players[membership.playerId]) {
+      membership.playerState = this.#clonePlayerState(this.#world.players[membership.playerId]);
+    }
     this.#membershipsBySession.delete(ingress.sessionId);
     this.#membershipsById.delete(membership.membershipId);
     delete this.#world.players[membership.playerId];
     this.#tombstonesBySession.set(membership.sessionId, membership);
+    this.#commandSequencesByMembership.set(membership.membershipId, membership.nextCommandSequence);
     this.#reconcileOwner();
     this.#schedulerSuspended = this.#activeMembershipCount() === 0;
     if (this.#schedulerSuspended) {
@@ -471,13 +506,16 @@ export class Room {
       const receipt = this.#world.commandLedger.recent[this.#world.commandLedger.recent.length - 1] as CommandReceipt | undefined;
       if (receipt) {
         this.#activeCommandReceipts = [receipt];
-        this.#hooks?.onCommandAck?.(this.#roomId, this.#membershipSummary(membership), receipt);
+        void this.#runHook(async () => {
+          await this.#hooks?.onCommandAck?.(this.#roomId, this.#membershipSummary(membership), receipt);
+        });
       }
     }
   }
 
   #buildCommandEnvelope(membership: MembershipRecord, command: GameplayCommand): CommandEnvelope {
     const actorSequence = this.#getNextCommandSequence(membership.membershipId);
+    membership.nextCommandSequence = actorSequence + 1;
     return {
       commandId: createCommandId(`command_${actorSequence}`),
       actorId: membership.playerId,
@@ -493,9 +531,56 @@ export class Room {
     return nextSequence;
   }
 
+  #clonePlayerState(playerState: PlayerState): PlayerState {
+    return structuredClone(playerState);
+  }
+
+  #restorePlayerState(membership: MembershipRecord): PlayerState {
+    if (membership.playerState) {
+      return this.#clonePlayerState(membership.playerState);
+    }
+    return createDefaultPlayerState(membership.playerId);
+  }
+
+  #createPendingReservation(ingress: RoomIngress, fallback?: MembershipRecord): MembershipRecord {
+    const joinOrdinal = ingress.joinOrdinal ?? this.#nextJoinOrdinal;
+    const playerId = ingress.playerId ?? createPlayerId(`player_${joinOrdinal}`);
+    const playerState = fallback?.playerState ? this.#clonePlayerState(fallback.playerState) : null;
+    return {
+      membershipId: ingress.membershipId,
+      playerId,
+      sessionId: ingress.sessionId,
+      connectionId: ingress.connectionId,
+      generation: ingress.generation,
+      joinOrdinal,
+      receiveOrdinal: ingress.receiveOrdinal,
+      connected: false,
+      owner: false,
+      joinedAtTick: this.#world.tick,
+      leftAtTick: null,
+      leftAtMs: null,
+      playerState,
+      nextCommandSequence: fallback?.nextCommandSequence ?? 1,
+    };
+  }
+
+  async #runHook(callback: () => Promise<void>): Promise<void> {
+    try {
+      await callback();
+    } catch (error) {
+      this.#handleHookError(error);
+    }
+  }
+
+  #handleHookError(error: unknown): void {
+    this.#closeError = error;
+    void Promise.resolve(this.#hooks?.onError?.(this.#roomId, error)).catch(() => undefined);
+  }
+
   #createMembershipRecord(ingress: RoomIngress): MembershipRecord {
     const joinOrdinal = ingress.joinOrdinal ?? this.#nextJoinOrdinal;
     const playerId = ingress.playerId ?? createPlayerId(`player_${joinOrdinal}`);
+    const playerState = createDefaultPlayerState(playerId);
     const membership: MembershipRecord = {
       membershipId: ingress.membershipId,
       playerId,
@@ -508,6 +593,9 @@ export class Room {
       owner: false,
       joinedAtTick: this.#world.tick,
       leftAtTick: null,
+      leftAtMs: null,
+      playerState: this.#clonePlayerState(playerState),
+      nextCommandSequence: 1,
     };
     return membership;
   }
@@ -549,15 +637,33 @@ export class Room {
         continue;
       }
       this.#tombstonesBySession.delete(sessionId);
-      this.#membershipsById.delete(membership.membershipId);
+      this.#pendingReservationsBySession.delete(sessionId);
+      this.#commandSequencesByMembership.delete(membership.membershipId);
+    }
+
+    while (this.#tombstonesBySession.size > this.#reconnectTombstoneLimit) {
+      const oldestEntry = Array.from(this.#tombstonesBySession.entries()).sort((left, right) => {
+        const leftTime = left[1].leftAtMs ?? left[1].joinedAtTick;
+        const rightTime = right[1].leftAtMs ?? right[1].joinedAtTick;
+        return leftTime - rightTime;
+      })[0];
+      if (!oldestEntry) {
+        break;
+      }
+      this.#tombstonesBySession.delete(oldestEntry[0]);
+      this.#pendingReservationsBySession.delete(oldestEntry[0]);
+      this.#commandSequencesByMembership.delete(oldestEntry[1].membershipId);
     }
   }
 
   #tombstoneExpired(membership: MembershipRecord): boolean {
-    if (membership.leftAtTick === null) {
-      return false;
+    if (membership.leftAtMs === null) {
+      if (membership.leftAtTick === null) {
+        return false;
+      }
+      return this.#world.tick - membership.leftAtTick > Math.max(2, this.#config.maxCapacity * 2);
     }
-    return this.#world.tick - membership.leftAtTick > this.#tombstoneLifetimeTicks;
+    return this.#clock.nowMs() - membership.leftAtMs > this.#reconnectTimeoutMs;
   }
 
   #applyAuthoritativeTick(): void {
@@ -572,7 +678,6 @@ export class Room {
   }
 
   private publishSnapshot(reason: RoomPublication["reason"]): void {
-    const snapshot = createWorldSnapshot(this.#world);
     const publication: RoomPublication = {
       roomId: this.#roomId,
       tick: this.#world.tick,
@@ -590,14 +695,13 @@ export class Room {
         owner: membership.owner,
       })),
       reason,
-      snapshot,
+      ...(reason === "tick" ? {} : { snapshot: createWorldSnapshot(this.#world) }),
     };
     this.#lastPublication = publication;
     this.#publisher.publish(publication);
   }
 
   private async publishClosing(reason: RoomLifecycleReason): Promise<void> {
-    const snapshot = createWorldSnapshot(this.#world);
     const publication: RoomPublication = {
       roomId: this.#roomId,
       tick: this.#world.tick,
@@ -615,11 +719,13 @@ export class Room {
         owner: membership.owner,
       })),
       reason: "closing",
-      snapshot,
+      snapshot: createWorldSnapshot(this.#world),
     };
     this.#lastPublication = publication;
     this.#publisher.publish(publication);
-    await Promise.resolve(this.#hooks?.onClosed?.(this.#roomId, reason));
+    await this.#runHook(async () => {
+      await this.#hooks?.onClosed?.(this.#roomId, reason);
+    });
   }
 
   #membershipSummary(membership: MembershipRecord): RoomMemberState {
@@ -652,6 +758,12 @@ export class Room {
   }
 
   private resolveClose(): void {
+    if (this.#closeError !== null && this.#rejectClosePromise) {
+      this.#rejectClosePromise(this.#closeError);
+      this.#rejectClosePromise = null;
+      this.#resolveClosePromise = null;
+      return;
+    }
     if (this.#resolveClosePromise) {
       this.#resolveClosePromise();
       this.#resolveClosePromise = null;

@@ -3,7 +3,7 @@ import test from "node:test";
 import { createGameplayRandomState, type RoomId } from "@particle-sim/shared";
 import { Room, type RoomConfig, type RoomDependencies } from "../src/room/room.js";
 import { DeadlineScheduler, ManualDeadlineTimerDriver, type Clock } from "../src/room/scheduler.js";
-import { RoomManager, type RoomTimerAdapter } from "../src/room/room-manager.js";
+import { MemoryPublisher, RoomManager, type RoomTimerAdapter } from "../src/room/room-manager.js";
 import type { RoomPublication } from "../src/room/types.js";
 
 let nextTestRoomOrdinal = 1;
@@ -315,4 +315,216 @@ test("room manager shutdown times out on a never-resolving hook", async () => {
   timing.advanceBy(5);
   await assert.rejects(shutdownPromise, /timed out/i);
   assert.equal(manager.roomCount, 0);
+});
+
+test("tick publications stay bounded and omit full snapshots", async () => {
+  const publisher = new MemoryPublisher();
+  const manualDriver = new ManualDeadlineTimerDriver();
+  const clock = new FakeClock(0, manualDriver);
+  const scheduler = new DeadlineScheduler(clock, 100, 2, manualDriver);
+  const roomId = `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId;
+  const room = new Room(
+    {
+      roomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+    },
+    { clock, scheduler, publisher },
+  );
+
+  assert.equal(room.enqueueJoin({ sessionId: "publisher", connectionId: "conn-p", connectionOrdinal: 1 }).accepted, true);
+  await room.flushPendingIngresses();
+
+  for (let index = 0; index < 80; index += 1) {
+    room.handleTick();
+  }
+
+  assert.ok(publisher.publications.length <= 64);
+  const tickPublications = publisher.publications.filter((publication) => publication.reason === "tick");
+  assert.ok(tickPublications.length > 0);
+  assert.equal(tickPublications[0]?.snapshot, undefined);
+});
+
+test("reconnect restores player state and advances command sequence", async () => {
+  const room = createTestRoom({ maxCapacity: 2 });
+
+  assert.equal(room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const membership = room.room.memberships[0];
+  const playerId = membership?.playerId;
+  assert.ok(playerId);
+  room.room.world.players[playerId].x = 99;
+  room.room.world.players[playerId].input.jumpHeld = true;
+  room.room.world.players[playerId].pendingRefunds = { stone: 3 };
+
+  const firstCommand = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: membership!.generation,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(firstCommand.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const leave = room.room.enqueueLeave({
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 3,
+    generation: membership!.generation,
+    membershipId: membership!.membershipId,
+  });
+  assert.equal(leave.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const rejoin = room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1b", connectionOrdinal: 4 });
+  assert.equal(rejoin.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const rejoinedMembership = room.room.memberships.find((entry) => entry.sessionId === "one");
+  assert.ok(rejoinedMembership);
+  const restoredPlayer = room.room.world.players[rejoinedMembership!.playerId];
+  assert.equal(restoredPlayer?.x, 99);
+  assert.equal(restoredPlayer?.input.jumpHeld, true);
+  assert.deepEqual(restoredPlayer?.pendingRefunds, { stone: 3 });
+
+  const secondCommand = room.room.enqueueCommand({
+    membershipId: rejoinedMembership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1b",
+    connectionOrdinal: 5,
+    generation: rejoinedMembership!.generation,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(secondCommand.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const receipts = room.room.world.commandLedger.recent as Array<{ actorSequence: number }>;
+  assert.equal(receipts.at(-1)?.actorSequence, 2);
+});
+
+test("pending reservations keep an identity and reject duplicate joins", async () => {
+  const room = createTestRoom({ maxCapacity: 2 });
+
+  const firstJoin = room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 });
+  assert.equal(firstJoin.accepted, true);
+  const duplicateJoin = room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-2", connectionOrdinal: 2 });
+  assert.equal(duplicateJoin.accepted, false);
+
+  const command = room.room.enqueueCommand({
+    membershipId: firstJoin.membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 3,
+    generation: firstJoin.membership!.generation,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(command.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  assert.equal(room.room.memberships[0]?.membershipId, firstJoin.membership!.membershipId);
+  assert.equal(room.room.world.commandLedger.recent.length, 1);
+});
+
+test("oldest tombstones are evicted when reconnect state exceeds the bound", async () => {
+  const room = createTestRoom({ maxCapacity: 2, reconnectTombstoneLimit: 2 });
+
+  for (const sessionId of ["one", "two", "three"]) {
+    assert.equal(room.room.enqueueJoin({ sessionId, connectionId: `${sessionId}-conn`, connectionOrdinal: 1 }).accepted, true);
+    await room.room.flushPendingIngresses();
+    const membership = room.room.memberships.find((entry) => entry.sessionId === sessionId);
+    assert.ok(membership);
+    const leave = room.room.enqueueLeave({
+      sessionId,
+      connectionId: `${sessionId}-conn`,
+      connectionOrdinal: 2,
+      generation: membership!.generation,
+      membershipId: membership!.membershipId,
+    });
+    assert.equal(leave.accepted, true);
+    await room.room.flushPendingIngresses();
+  }
+
+  const rejoin = room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1b", connectionOrdinal: 3 });
+  assert.equal(rejoin.accepted, true);
+  assert.notEqual(rejoin.membership?.membershipId, "membership_1");
+});
+
+test("close-hook failures settle the room close promise", async () => {
+  const manualDriver = new ManualDeadlineTimerDriver();
+  const clock = new FakeClock(0, manualDriver);
+  const scheduler = new DeadlineScheduler(clock, 100, 2, manualDriver);
+  const publisher = new TestPublisher();
+  const room = new Room(
+    {
+      roomId: `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+    },
+    {
+      clock,
+      scheduler,
+      publisher,
+      hooks: {
+        onClosed: async () => {
+          throw new Error("boom");
+        },
+      },
+    },
+  );
+
+  await assert.rejects(room.beginShutdown("server_shutdown"), /boom/);
+  await assert.rejects(room.beginShutdown("server_shutdown"), /boom/);
+});
+
+test("command-ack hook failures stay contained", async () => {
+  const manualDriver = new ManualDeadlineTimerDriver();
+  const clock = new FakeClock(0, manualDriver);
+  const scheduler = new DeadlineScheduler(clock, 100, 2, manualDriver);
+  const publisher = new TestPublisher();
+  const room = new Room(
+    {
+      roomId: `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+    },
+    {
+      clock,
+      scheduler,
+      publisher,
+      hooks: {
+        onCommandAck: () => {
+          throw new Error("ack boom");
+        },
+      },
+    },
+  );
+
+  assert.equal(room.enqueueJoin({ sessionId: "ack", connectionId: "conn-ack", connectionOrdinal: 1 }).accepted, true);
+  await room.flushPendingIngresses();
+
+  const command = room.enqueueCommand({
+    membershipId: room.memberships[0]!.membershipId,
+    sessionId: "ack",
+    connectionId: "conn-ack",
+    connectionOrdinal: 2,
+    generation: room.memberships[0]!.generation,
+    command: { type: "pause_world", expectedWorldRevision: room.state.worldRevision },
+  });
+  assert.equal(command.accepted, true);
+  await room.flushPendingIngresses();
+
+  assert.equal(room.activeCommandReceipts.length, 1);
+  assert.equal(room.state.tick, 0);
 });

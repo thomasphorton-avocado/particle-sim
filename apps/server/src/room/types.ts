@@ -22,7 +22,7 @@ export interface RoomPublication {
   readonly checksum: string;
   readonly memberships: MembershipSummary[];
   readonly reason: "tick" | "membership" | "closing";
-  readonly snapshot: WorldSnapshot;
+  readonly snapshot?: WorldSnapshot;
 }
 
 export interface RoomPublisher {
@@ -34,6 +34,7 @@ export interface RoomTransportHooks {
   onLeft?(roomId: RoomId, membership: MembershipSummary): void | Promise<void>;
   onClosed?(roomId: RoomId, reason: RoomLifecycleReason): void | Promise<void>;
   onCommandAck?(roomId: RoomId, membership: MembershipSummary, receipt: CommandReceipt): void | Promise<void>;
+  onError?(roomId: RoomId, error: unknown): void | Promise<void>;
 }
 
 export interface RoomIngress {

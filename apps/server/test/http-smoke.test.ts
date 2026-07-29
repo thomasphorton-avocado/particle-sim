@@ -123,3 +123,25 @@ test("http boundary rejects unsupported methods and malformed bodies", async () 
     await roomManager.shutdown(0);
   }
 });
+
+test("http boundary rejects jsonp and allows a charset parameter", async () => {
+  const { server, config, roomManager } = await createTestServer();
+  try {
+    const jsonp = await request(server, config.roomsPath, {
+      method: "POST",
+      headers: { "content-type": "application/jsonp" },
+      body: "{}",
+    });
+    assert.equal(jsonp.statusCode, 415);
+
+    const charset = await request(server, config.roomsPath, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: "{}",
+    });
+    assert.equal(charset.statusCode, 201);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    await roomManager.shutdown(0);
+  }
+});

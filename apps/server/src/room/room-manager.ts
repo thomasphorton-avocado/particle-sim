@@ -29,13 +29,28 @@ export interface RoomManagerConfig {
   readonly tickHz: number;
   readonly maxCatchUpTicks: number;
   readonly idleCleanupThresholdMs: number;
+  readonly reconnectTimeoutMs?: number;
+  readonly reconnectTombstoneLimit?: number;
 }
 
-class MemoryPublisher implements RoomPublisher {
+export class MemoryPublisher implements RoomPublisher {
   readonly publications: RoomPublication[] = [];
+  #sizeBytes = 0;
+  #maxPublications = 64;
+  #maxBytes = 1_048_576;
 
   publish(publication: RoomPublication): void {
+    const payload = JSON.stringify(publication);
+    const payloadBytes = payload.length;
     this.publications.push(publication);
+    this.#sizeBytes += payloadBytes;
+    while (this.publications.length > this.#maxPublications || this.#sizeBytes > this.#maxBytes) {
+      const removed = this.publications.shift();
+      if (!removed) {
+        break;
+      }
+      this.#sizeBytes -= JSON.stringify(removed).length;
+    }
   }
 }
 
@@ -97,6 +112,8 @@ export class RoomManager {
       tickHz: this.#config.tickHz,
       maxCatchUpTicks: this.#config.maxCatchUpTicks,
       idleCleanupThresholdMs: this.#config.idleCleanupThresholdMs,
+      reconnectTimeoutMs: this.#config.reconnectTimeoutMs,
+      reconnectTombstoneLimit: this.#config.reconnectTombstoneLimit,
     };
 
     const room = new Room(roomConfig, {

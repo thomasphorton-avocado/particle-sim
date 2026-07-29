@@ -25,8 +25,14 @@ function parseRequestUrl(request: IncomingMessage): URL {
   if (!request.url) {
     throw new HttpRouteError(400, "invalid_request", "request URL is missing");
   }
+
+  const rawUrl = request.url.trim();
   try {
-    return new URL(request.url, "http://127.0.0.1");
+    const parsed = rawUrl.startsWith("http://") || rawUrl.startsWith("https://") ? new URL(rawUrl) : new URL(rawUrl, "http://127.0.0.1");
+    if (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") {
+      throw new Error("unexpected host");
+    }
+    return new URL(parsed.pathname + parsed.search + parsed.hash, "http://127.0.0.1");
   } catch {
     throw new HttpRouteError(400, "invalid_request", "request URL is invalid");
   }
@@ -46,9 +52,39 @@ async function readBody(request: IncomingMessage, maxBytes = MAX_REQUEST_BODY_BY
   return Buffer.concat(chunks);
 }
 
+function isValidJsonContentType(contentType: string | undefined): boolean {
+  if (!contentType) {
+    return false;
+  }
+
+  const parts = contentType.split(";").map((part) => part.trim());
+  if (parts.length === 0 || parts[0].toLowerCase() !== "application/json") {
+    return false;
+  }
+
+  for (const parameter of parts.slice(1)) {
+    if (!parameter) {
+      return false;
+    }
+    const equalsIndex = parameter.indexOf("=");
+    if (equalsIndex <= 0) {
+      return false;
+    }
+    const name = parameter.slice(0, equalsIndex).trim().toLowerCase();
+    const value = parameter.slice(equalsIndex + 1).trim();
+    if (name !== "charset") {
+      return false;
+    }
+    if (!value || !/^[A-Za-z0-9!#$%&'*+.^_`|~/-]+$/.test(value)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 async function parseRoomCreateBody(request: IncomingMessage): Promise<Record<string, unknown>> {
-  const contentType = request.headers["content-type"];
-  if (!contentType || !contentType.toLowerCase().startsWith("application/json")) {
+  if (!isValidJsonContentType(request.headers["content-type"])) {
     throw new HttpRouteError(415, "unsupported_media_type", "Content-Type must be application/json");
   }
 

@@ -1,8 +1,8 @@
 import { parseGameplayCommand } from "../commands.js";
-import { parsePlayerId, parseRoomId } from "../ids.js";
+import { parseObjectId, parsePlayerId, parseRoomId } from "../ids.js";
 import { decodeWorldDelta, decodeWorldSnapshot, WORLD_SNAPSHOT_SCHEMA_VERSION } from "../replication.js";
 import { WORLD_STATE_SCHEMA_VERSION } from "../serialization.js";
-import { MAX_BATCH_COMMANDS, MAX_CELL_DELTAS, MAX_DECODER_WORK, MAX_ENTITY_DELTAS, MAX_ID_LENGTH, MAX_INTEGER, MAX_METADATA_ENTRIES, MAX_NESTED_COLLECTION_ITEMS, MAX_OBJECT_FIELDS, MAX_STRING_LENGTH, MIN_INTEGER, PROTOCOL_VERSION } from "./limits.js";
+import { MAX_BATCH_COMMANDS, MAX_CELL_DELTAS, MAX_DECODER_WORK, MAX_ENTITY_DELTAS, MAX_ID_LENGTH, MAX_INTEGER, MAX_METADATA_ENTRIES, MAX_NESTED_COLLECTION_ITEMS, MAX_OBJECT_FIELDS, MAX_STRING_LENGTH, MIN_INTEGER, MAX_NESTING_DEPTH, PROTOCOL_VERSION } from "./limits.js";
 import { ProtocolCodecError, decodeProtocolMessageFrame as decodeProtocolJsonFrame, encodeProtocolMessage as encodeProtocolJsonMessage } from "./json.js";
 import type {
   ProtocolClientCommand,
@@ -31,6 +31,7 @@ import type {
 
 interface DecoderWork {
   used: number;
+  depth: number;
 }
 
 function consumeWork(work: DecoderWork, amount = 1): void {
@@ -40,9 +41,26 @@ function consumeWork(work: DecoderWork, amount = 1): void {
   }
 }
 
+function enterDepth(work: DecoderWork): void {
+  work.depth += 1;
+  if (work.depth > MAX_NESTING_DEPTH) {
+    work.depth -= 1;
+    throw new ProtocolCodecError("malformed_message", `Nested values exceed the ${MAX_NESTING_DEPTH} level limit`);
+  }
+}
+
+function leaveDepth(work: DecoderWork): void {
+  work.depth -= 1;
+}
+
 function assertPlainObject(value: unknown, label: string, work: DecoderWork): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ProtocolCodecError("malformed_message", `${label} must be an object`);
+  }
+  for (const key of Object.keys(value)) {
+    if (key.length > MAX_STRING_LENGTH) {
+      throw new ProtocolCodecError("malformed_message", `${label} contains an oversized key (${key.length})`);
+    }
   }
   consumeWork(work, 1 + Object.keys(value).length);
   return value as Record<string, unknown>;
@@ -87,6 +105,29 @@ function assertInteger(value: unknown, label: string, work: DecoderWork, min = M
   }
   consumeWork(work, 1);
   return value;
+}
+
+function assertBoolean(value: unknown, label: string, work: DecoderWork): boolean {
+  if (typeof value !== "boolean") {
+    throw new ProtocolCodecError("malformed_message", `${label} must be a boolean`);
+  }
+  consumeWork(work, 1);
+  return value;
+}
+
+function assertFiniteNumber(value: unknown, label: string, work: DecoderWork): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new ProtocolCodecError("invalid_integer", `${label} must be a finite number`);
+  }
+  consumeWork(work, 1);
+  return value;
+}
+
+function assertOptionalFiniteNumber(value: unknown, label: string, work: DecoderWork): number | null {
+  if (value === null) {
+    return null;
+  }
+  return assertFiniteNumber(value, label, work);
 }
 
 function assertNonNegativeInteger(value: unknown, label: string, work: DecoderWork): number {
@@ -138,6 +179,18 @@ function assertPlayerId(value: unknown, label: string, work: DecoderWork): Retur
     return parsePlayerId(playerIdText);
   } catch {
     throw new ProtocolCodecError("invalid_id", `${label} must be a valid player id`);
+  }
+}
+
+function assertObjectId(value: unknown, label: string, work: DecoderWork): ReturnType<typeof parseObjectId> {
+  const objectIdText = assertString(value, label, work, false);
+  if (objectIdText.length > MAX_ID_LENGTH) {
+    throw new ProtocolCodecError("invalid_id", `${label} exceeds the ${MAX_ID_LENGTH} byte limit`);
+  }
+  try {
+    return parseObjectId(objectIdText);
+  } catch {
+    throw new ProtocolCodecError("invalid_id", `${label} must be a valid object id`);
   }
 }
 
@@ -243,16 +296,26 @@ function assertReplicaValue(value: unknown, label: string, work: DecoderWork): v
     return;
   }
   if (Array.isArray(value)) {
-    const arrayValue = assertReplicaArray(value, label, work);
-    for (let index = 0; index < arrayValue.length; index += 1) {
-      assertReplicaValue(arrayValue[index], `${label}[${index}]`, work);
+    enterDepth(work);
+    try {
+      const arrayValue = assertReplicaArray(value, label, work);
+      for (let index = 0; index < arrayValue.length; index += 1) {
+        assertReplicaValue(arrayValue[index], `${label}[${index}]`, work);
+      }
+    } finally {
+      leaveDepth(work);
     }
     return;
   }
   if (typeof value === "object") {
-    const objectValue = assertReplicaRecord(value, label, work);
-    for (const [key, entry] of Object.entries(objectValue)) {
-      assertReplicaValue(entry, `${label}.${key}`, work);
+    enterDepth(work);
+    try {
+      const objectValue = assertReplicaRecord(value, label, work);
+      for (const [key, entry] of Object.entries(objectValue)) {
+        assertReplicaValue(entry, `${label}.${key}`, work);
+      }
+    } finally {
+      leaveDepth(work);
     }
     return;
   }
@@ -289,16 +352,18 @@ function assertWorldStateShape(value: unknown, work: DecoderWork): void {
   assertNonNegativeInteger(worldState["schemaVersion"], "worldState.schemaVersion", work);
   assertString(worldState["roomId"], "worldState.roomId", work, false);
   assertGridShape(worldState["grid"], work);
-  assertRandomShape(worldState["random"], work);
+  assertRandomShape(worldState["random"], "random", work);
   assertPlayerMapShape(worldState["players"], work);
   assertFallingObjectMapShape(worldState["fallingObjects"], work);
   assertReplicaValue(worldState["paused"], "worldState.paused", work);
   assertNonNegativeInteger(worldState["tick"], "worldState.tick", work);
-  assertTimeShape(worldState["time"], work);
-  assertWeatherShape(worldState["weather"], work);
+  assertTimeShape(worldState["time"], "time", work);
+  assertWeatherShape(worldState["weather"], "weather", work);
   assertNonNegativeInteger(worldState["nextPlayerOrdinal"], "worldState.nextPlayerOrdinal", work);
   assertNonNegativeInteger(worldState["nextObjectOrdinal"], "worldState.nextObjectOrdinal", work);
-  assertReplicaValue(worldState["ownerPlayerId"], "worldState.ownerPlayerId", work);
+  if (worldState["ownerPlayerId"] !== null) {
+    assertPlayerId(worldState["ownerPlayerId"], "worldState.ownerPlayerId", work);
+  }
   assertNonNegativeInteger(worldState["worldRevision"], "worldState.worldRevision", work);
   assertNonNegativeInteger(worldState["nextAuthorityOrder"], "worldState.nextAuthorityOrder", work);
   assertCommandLedgerShape(worldState["commandLedger"], work);
@@ -325,16 +390,17 @@ function assertGridShape(value: unknown, work: DecoderWork): void {
   }
 }
 
-function assertRandomShape(value: unknown, work: DecoderWork): void {
-  const random = assertReplicaObject(value, "random", new Set(["algorithm", "seed", "state"]), work);
-  assertString(random["algorithm"], "random.algorithm", work, false);
-  assertNonNegativeInteger(random["seed"], "random.seed", work);
-  assertNonNegativeInteger(random["state"], "random.state", work);
+function assertRandomShape(value: unknown, label: string, work: DecoderWork): void {
+  const random = assertReplicaObject(value, label, new Set(["algorithm", "seed", "state"]), work);
+  assertString(random["algorithm"], `${label}.algorithm`, work, false);
+  assertNonNegativeInteger(random["seed"], `${label}.seed`, work);
+  assertNonNegativeInteger(random["state"], `${label}.state`, work);
 }
 
 function assertPlayerMapShape(value: unknown, work: DecoderWork): void {
   const players = assertReplicaMap(value, "players", work, MAX_ENTITY_DELTAS, "entity_too_large");
   for (const [playerId, playerState] of Object.entries(players)) {
+    assertPlayerId(playerId, `players.${playerId}`, work);
     assertPlayerStateShape(playerState, `players.${playerId}`, work);
   }
 }
@@ -401,6 +467,7 @@ function assertInputShape(value: unknown, label: string, work: DecoderWork): voi
 function assertInventoryShape(value: unknown, label: string, work: DecoderWork): void {
   const inventory = assertReplicaMap(value, label, work, MAX_NESTED_COLLECTION_ITEMS);
   for (const [key, entry] of Object.entries(inventory)) {
+    assertString(key, `${label}.${key}`, work, false);
     assertNonNegativeInteger(entry, `${label}.${key}`, work);
   }
 }
@@ -415,9 +482,11 @@ function assertHotbarShape(value: unknown, label: string, work: DecoderWork): vo
     if (entry === null) {
       continue;
     }
-    const item = assertReplicaObject(entry, `${label}[${index}]`, new Set(["kind", "materialId", "count"]), work);
-    assertString(item["kind"], `${label}[${index}].kind`, work, false);
-    if (item["kind"] === "material") {
+    const kind = assertLiteralString(entry && typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>)["kind"] : undefined, `${label}[${index}].kind`, work, new Set(["empty", "pickaxe", "material"]));
+    const item = kind === "material"
+      ? assertReplicaObject(entry, `${label}[${index}]`, new Set(["kind", "materialId", "count"]), work)
+      : assertReplicaObject(entry, `${label}[${index}]`, new Set(["kind"]), work);
+    if (kind === "material") {
       assertNonNegativeInteger(item["materialId"], `${label}[${index}].materialId`, work);
       assertNonNegativeInteger(item["count"], `${label}[${index}].count`, work);
     }
@@ -427,6 +496,7 @@ function assertHotbarShape(value: unknown, label: string, work: DecoderWork): vo
 function assertPendingRefundsShape(value: unknown, label: string, work: DecoderWork): void {
   const refunds = assertReplicaMap(value, label, work, MAX_NESTED_COLLECTION_ITEMS);
   for (const [key, entry] of Object.entries(refunds)) {
+    assertString(key, `${label}.${key}`, work, false);
     assertNonNegativeInteger(entry, `${label}.${key}`, work);
   }
 }
@@ -434,6 +504,7 @@ function assertPendingRefundsShape(value: unknown, label: string, work: DecoderW
 function assertFallingObjectMapShape(value: unknown, work: DecoderWork): void {
   const fallingObjects = assertReplicaMap(value, "fallingObjects", work, MAX_ENTITY_DELTAS, "entity_too_large");
   for (const [objectId, state] of Object.entries(fallingObjects)) {
+    assertObjectId(objectId, `fallingObjects.${objectId}`, work);
     assertFallingObjectShape(state, `fallingObjects.${objectId}`, work);
   }
 }
@@ -477,13 +548,13 @@ function assertFallingProvenanceShape(value: unknown, label: string, work: Decod
   throw new ProtocolCodecError("malformed_message", `${label}.kind must be 'legacy' or 'placement'`);
 }
 
-function assertTimeShape(value: unknown, work: DecoderWork): void {
-  const time = assertReplicaObject(value, "time", new Set(["dayNightTick"]), work);
-  assertReplicaValue(time["dayNightTick"], "time.dayNightTick", work);
+function assertTimeShape(value: unknown, label: string, work: DecoderWork): void {
+  const time = assertReplicaObject(value, label, new Set(["dayNightTick"]), work);
+  assertNonNegativeInteger(time["dayNightTick"], `${label}.dayNightTick`, work);
 }
 
-function assertWeatherShape(value: unknown, work: DecoderWork): void {
-  const weather = assertReplicaObject(value, "weather", new Set([
+function assertWeatherShape(value: unknown, label: string, work: DecoderWork): void {
+  const weather = assertReplicaObject(value, label, new Set([
     "kind",
     "episodeElapsed",
     "episodeDuration",
@@ -496,23 +567,24 @@ function assertWeatherShape(value: unknown, work: DecoderWork): void {
     "boltY",
     "boltSeed",
   ]), work);
-  assertString(weather["kind"], "weather.kind", work, false);
-  assertReplicaValue(weather["episodeElapsed"], "weather.episodeElapsed", work);
-  assertReplicaValue(weather["episodeDuration"], "weather.episodeDuration", work);
-  assertReplicaValue(weather["wind"], "weather.wind", work);
-  assertReplicaValue(weather["visualTime"], "weather.visualTime", work);
-  assertReplicaValue(weather["rainAccumulator"], "weather.rainAccumulator", work);
-  assertReplicaValue(weather["lightningFlash"], "weather.lightningFlash", work);
-  assertReplicaValue(weather["lightningCooldown"], "weather.lightningCooldown", work);
-  assertReplicaValue(weather["boltX"], "weather.boltX", work);
-  assertReplicaValue(weather["boltY"], "weather.boltY", work);
-  assertReplicaValue(weather["boltSeed"], "weather.boltSeed", work);
+  assertLiteralString(weather["kind"], `${label}.kind`, work, new Set(["clear", "rain", "storm"]));
+  assertFiniteNumber(weather["episodeElapsed"], `${label}.episodeElapsed`, work);
+  assertFiniteNumber(weather["episodeDuration"], `${label}.episodeDuration`, work);
+  assertFiniteNumber(weather["wind"], `${label}.wind`, work);
+  assertFiniteNumber(weather["visualTime"], `${label}.visualTime`, work);
+  assertFiniteNumber(weather["rainAccumulator"], `${label}.rainAccumulator`, work);
+  assertOptionalFiniteNumber(weather["lightningFlash"], `${label}.lightningFlash`, work);
+  assertOptionalFiniteNumber(weather["lightningCooldown"], `${label}.lightningCooldown`, work);
+  assertOptionalFiniteNumber(weather["boltX"], `${label}.boltX`, work);
+  assertOptionalFiniteNumber(weather["boltY"], `${label}.boltY`, work);
+  assertFiniteNumber(weather["boltSeed"], `${label}.boltSeed`, work);
 }
 
 function assertCommandLedgerShape(value: unknown, work: DecoderWork): void {
   const ledger = assertReplicaObject(value, "commandLedger", new Set(["actorHighWater", "recent"]), work);
   const actorHighWater = assertReplicaMap(ledger["actorHighWater"], "commandLedger.actorHighWater", work, MAX_ENTITY_DELTAS, "entity_too_large");
   for (const [key, entry] of Object.entries(actorHighWater)) {
+    assertPlayerId(key, `commandLedger.actorHighWater.${key}`, work);
     assertNonNegativeInteger(entry, `commandLedger.actorHighWater.${key}`, work);
   }
   const recent = assertReplicaArray(ledger["recent"], "commandLedger.recent", work, MAX_ENTITY_DELTAS, "entity_too_large");
@@ -544,19 +616,61 @@ function assertCommandReceiptShape(value: unknown, label: string, work: DecoderW
   assertString(receipt["commandId"], `${label}.commandId`, work, false);
   assertString(receipt["actorId"], `${label}.actorId`, work, false);
   assertNonNegativeInteger(receipt["actorSequence"], `${label}.actorSequence`, work);
-  assertReplicaValue(receipt["authorityOrder"], `${label}.authorityOrder`, work);
+  const authorityOrderValue = receipt["authorityOrder"];
+  if (authorityOrderValue !== null) {
+    assertNonNegativeInteger(authorityOrderValue, `${label}.authorityOrder`, work);
+  }
   assertNonNegativeInteger(receipt["issuedTick"], `${label}.issuedTick`, work);
   assertNonNegativeInteger(receipt["processedTick"], `${label}.processedTick`, work);
-  assertString(receipt["commandType"], `${label}.commandType`, work, false);
-  assertString(receipt["code"], `${label}.code`, work, false);
-  assertReplicaValue(receipt["accepted"], `${label}.accepted`, work);
+  assertLiteralString(receipt["commandType"], `${label}.commandType`, work, new Set([
+    "set_input_state",
+    "mine_start",
+    "mine_stop",
+    "select_slot",
+    "place",
+    "harvest",
+    "cycle_faucet",
+    "pause_world",
+    "resume_world",
+    "set_time_preset",
+  ]));
+  const code = assertLiteralString(receipt["code"], `${label}.code`, work, new Set<ProtocolCommandAcknowledgement["code"]>([
+    "accepted",
+    "unknown_actor",
+    "paused",
+    "not_owner",
+    "already_state",
+    "future_tick",
+    "stale",
+    "conflict",
+    "slot",
+    "tool",
+    "revision",
+    "inventory",
+    "target",
+    "bounds",
+    "range",
+    "collision",
+    "footprint",
+    "work_limit",
+    "invalid_command",
+  ]));
+  const accepted = assertBoolean(receipt["accepted"], `${label}.accepted`, work);
+  if (accepted && code !== "accepted") {
+    throw new ProtocolCodecError("malformed_message", `${label}.code must be accepted when accepted=true`);
+  }
+  if (!accepted && code === "accepted") {
+    throw new ProtocolCodecError("malformed_message", `${label}.code must not be accepted when accepted=false`);
+  }
   assertNonNegativeInteger(receipt["beforeWorldRevision"], `${label}.beforeWorldRevision`, work);
   assertNonNegativeInteger(receipt["afterWorldRevision"], `${label}.afterWorldRevision`, work);
   assertNonNegativeInteger(receipt["beforeInventoryRevision"], `${label}.beforeInventoryRevision`, work);
   assertNonNegativeInteger(receipt["afterInventoryRevision"], `${label}.afterInventoryRevision`, work);
   assertNonNegativeInteger(receipt["beforeTargetRevision"], `${label}.beforeTargetRevision`, work);
   assertNonNegativeInteger(receipt["afterTargetRevision"], `${label}.afterTargetRevision`, work);
-  assertReplicaValue(receipt["acceptedEffect"], `${label}.acceptedEffect`, work);
+  if (receipt["acceptedEffect"] !== null) {
+    assertString(receipt["acceptedEffect"], `${label}.acceptedEffect`, work, true);
+  }
   assertString(receipt["fingerprint"], `${label}.fingerprint`, work, false);
 }
 
@@ -574,11 +688,11 @@ function assertDeltaShape(value: unknown, work: DecoderWork): void {
   }
   const players = assertReplicaArray(delta["players"], "delta.players", work, MAX_ENTITY_DELTAS, "entity_too_large");
   for (let index = 0; index < players.length; index += 1) {
-    assertDeltaEntityShape(players[index], `delta.players[${index}]`, "playerId", assertPlayerStateShape, work);
+    assertDeltaEntityShape(players[index], `delta.players[${index}]`, "playerId", assertPlayerStateShape, assertPlayerId, work);
   }
   const fallingObjects = assertReplicaArray(delta["fallingObjects"], "delta.fallingObjects", work, MAX_ENTITY_DELTAS, "entity_too_large");
   for (let index = 0; index < fallingObjects.length; index += 1) {
-    assertDeltaEntityShape(fallingObjects[index], `delta.fallingObjects[${index}]`, "objectId", assertFallingObjectShape, work);
+    assertDeltaEntityShape(fallingObjects[index], `delta.fallingObjects[${index}]`, "objectId", assertFallingObjectShape, assertObjectId, work);
   }
   const metadata = assertReplicaArray(delta["metadata"], "delta.metadata", work, MAX_METADATA_ENTRIES, "entity_too_large");
   for (let index = 0; index < metadata.length; index += 1) {
@@ -605,9 +719,9 @@ function assertDeltaCellShape(value: unknown, label: string, work: DecoderWork):
   assertNonNegativeInteger(cell["revision"], `${label}.revision`, work);
 }
 
-function assertDeltaEntityShape(value: unknown, label: string, entityIdField: string, stateValidator: (value: unknown, label: string, work: DecoderWork) => void, work: DecoderWork): void {
+function assertDeltaEntityShape(value: unknown, label: string, entityIdField: string, stateValidator: (value: unknown, label: string, work: DecoderWork) => void, idValidator: (value: unknown, label: string, work: DecoderWork) => void, work: DecoderWork): void {
   const entity = assertReplicaObject(value, label, new Set([entityIdField, "state"]), work);
-  assertString(entity[entityIdField], `${label}.${entityIdField}`, work, false);
+  idValidator(entity[entityIdField], `${label}.${entityIdField}`, work);
   if (entity["state"] !== null) {
     stateValidator(entity["state"], `${label}.state`, work);
   }
@@ -615,7 +729,7 @@ function assertDeltaEntityShape(value: unknown, label: string, entityIdField: st
 
 function assertDeltaMetadataShape(value: unknown, label: string, work: DecoderWork): void {
   const metadata = assertReplicaObject(value, label, new Set(["field", "value"]), work);
-  assertLiteralString(metadata["field"], `${label}.field`, work, new Set([
+  const field = assertLiteralString(metadata["field"], `${label}.field`, work, new Set([
     "roomId",
     "tick",
     "paused",
@@ -629,7 +743,70 @@ function assertDeltaMetadataShape(value: unknown, label: string, work: DecoderWo
     "nextObjectOrdinal",
     "commandLedger",
   ]));
-  assertReplicaValue(metadata["value"], `${label}.value`, work);
+  switch (field) {
+    case "roomId":
+      assertRoomId(metadata["value"], `${label}.value`, work);
+      return;
+    case "tick":
+    case "worldRevision":
+      assertNonNegativeInteger(metadata["value"], `${label}.value`, work);
+      return;
+    case "paused":
+      assertBoolean(metadata["value"], `${label}.value`, work);
+      return;
+    case "time":
+      assertTimeShape(metadata["value"], `${label}.value`, work);
+      return;
+    case "weather":
+      assertWeatherShape(metadata["value"], `${label}.value`, work);
+      return;
+    case "random":
+      assertRandomShape(metadata["value"], `${label}.value`, work);
+      return;
+    case "ownerPlayerId":
+      if (metadata["value"] !== null) {
+        assertPlayerId(metadata["value"], `${label}.value`, work);
+      }
+      return;
+    case "nextAuthorityOrder":
+    case "nextPlayerOrdinal":
+    case "nextObjectOrdinal":
+      assertInteger(metadata["value"], `${label}.value`, work, 1, MAX_INTEGER);
+      return;
+    case "commandLedger":
+      assertCommandLedgerMetadataShape(metadata["value"], `${label}.value`, work);
+      return;
+    default:
+      throw new ProtocolCodecError("malformed_message", `${label}.field has an unsupported value`);
+  }
+}
+
+function assertCommandLedgerMetadataShape(value: unknown, label: string, work: DecoderWork): void {
+  const ledger = assertReplicaRecord(value, label, work);
+  if (ledger["kind"] === "incremental") {
+    assertAllowedFields(ledger, label, new Set(["kind", "actorHighWater", "appendedReceipts", "trimmedCount"]), work);
+    const actorHighWater = assertReplicaMap(ledger["actorHighWater"], `${label}.actorHighWater`, work, MAX_ENTITY_DELTAS, "entity_too_large");
+    for (const [actorId, entry] of Object.entries(actorHighWater)) {
+      assertPlayerId(actorId, `${label}.actorHighWater.${actorId}`, work);
+      assertNonNegativeInteger(entry, `${label}.actorHighWater.${actorId}`, work);
+    }
+    const appendedReceipts = assertReplicaArray(ledger["appendedReceipts"], `${label}.appendedReceipts`, work, MAX_ENTITY_DELTAS, "entity_too_large");
+    for (let index = 0; index < appendedReceipts.length; index += 1) {
+      assertCommandReceiptShape(appendedReceipts[index], `${label}.appendedReceipts[${index}]`, work);
+    }
+    assertNonNegativeInteger(ledger["trimmedCount"], `${label}.trimmedCount`, work);
+    return;
+  }
+  assertAllowedFields(ledger, label, new Set(["actorHighWater", "recent"]), work);
+  const actorHighWater = assertReplicaMap(ledger["actorHighWater"], `${label}.actorHighWater`, work, MAX_ENTITY_DELTAS, "entity_too_large");
+  for (const [actorId, entry] of Object.entries(actorHighWater)) {
+    assertPlayerId(actorId, `${label}.actorHighWater.${actorId}`, work);
+    assertNonNegativeInteger(entry, `${label}.actorHighWater.${actorId}`, work);
+  }
+  const recent = assertReplicaArray(ledger["recent"], `${label}.recent`, work, MAX_ENTITY_DELTAS, "entity_too_large");
+  for (let index = 0; index < recent.length; index += 1) {
+    assertCommandReceiptShape(recent[index], `${label}.recent[${index}]`, work);
+  }
 }
 
 function assertCommandValueBounds(command: ProtocolClientCommand, work: DecoderWork): void {
@@ -983,7 +1160,7 @@ function assertJoinRejected(value: Record<string, unknown>, work: DecoderWork): 
 }
 
 function assertProtocolMessageObject(value: unknown): ProtocolMessage {
-  const work: DecoderWork = { used: 0 };
+  const work: DecoderWork = { used: 0, depth: 0 };
   const object = assertPlainObject(value, "protocol message", work);
   const kindValue = assertString(object["kind"], "kind", work, false);
   switch (kindValue) {

@@ -171,6 +171,9 @@ function wrapReplicaValidation<T>(label: string, fn: () => T): T {
     }
     const message = error instanceof Error ? error.message : String(error);
     const lowered = message.toLowerCase();
+    if (lowered.includes("unsupported") && (lowered.includes("schema") || lowered.includes("version"))) {
+      throw new ProtocolCodecError("unsupported_schema_version", `${label}: ${message}`);
+    }
     if (lowered.includes("revision")) {
       throw new ProtocolCodecError("invalid_revision", `${label}: ${message}`);
     }
@@ -956,7 +959,13 @@ function assertJoinRejected(value: Record<string, unknown>, work: DecoderWork): 
   const versioned = assertVersionedMessageFields(value, work) as ProtocolVersionedMessage;
   const streamSequence = assertNonNegativeInteger(value["streamSequence"], "streamSequence", work);
   const roomId = assertRoomId(value["roomId"], "roomId", work);
-  const code = assertString(value["code"], "code", work, false) as ProtocolJoinRejectCode;
+  const code = assertLiteralString(value["code"], "code", work, new Set<ProtocolJoinRejectCode>([
+    "room_not_found",
+    "room_full",
+    "already_joined",
+    "unauthorized",
+    "protocol_error",
+  ]));
   const message = assertOptionalString(value["message"], "message", work);
   return {
     kind: "join_rejected",

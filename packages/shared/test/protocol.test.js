@@ -18,7 +18,6 @@ import {
   WORLD_SNAPSHOT_SCHEMA_VERSION,
   WORLD_STATE_SCHEMA_VERSION,
   createDefaultPlayerState,
-  createObjectId,
   createRoomId,
 } from "@particle-sim/shared";
 
@@ -54,6 +53,42 @@ function createCommandBatch() {
     ],
   };
 }
+
+test("wraps serialization failures and validates literal unions with stable protocol errors", () => {
+  assert.throws(() => encodeProtocolMessage({ value: 1n }), (error) => {
+    assert.equal(error.code, "invalid_json");
+    return true;
+  });
+
+  const fixture = createProtocolFixture();
+  const unsupportedSnapshot = structuredClone(fixture.snapshot);
+  unsupportedSnapshot.worldState.schemaVersion = 999999;
+  assert.throws(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 1,
+    snapshot: unsupportedSnapshot,
+  }), (error) => {
+    assert.equal(error.code, "unsupported_schema_version");
+    return true;
+  });
+
+  assert.throws(() => decodeProtocolMessage({
+    kind: "join_rejected",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 1,
+    roomId: fixture.roomId,
+    code: "bad_reason",
+    message: "invalid",
+  }), (error) => {
+    assert.equal(error.code, "malformed_message");
+    return true;
+  });
+});
 
 test("round-trips every protocol message variant", () => {
   const fixture = createProtocolFixture();

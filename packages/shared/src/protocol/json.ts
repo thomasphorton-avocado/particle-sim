@@ -24,7 +24,8 @@ function toUtf8Bytes(input: ProtocolFrameInput): Uint8Array {
     return new Uint8Array(input);
   }
   if (ArrayBuffer.isView(input)) {
-    return new Uint8Array(input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength));
+    const view = input as ArrayBufferView;
+    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
   }
   return input;
 }

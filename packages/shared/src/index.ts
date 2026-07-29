@@ -14,3 +14,4 @@ export * from "./dirty-journal.js";
 export * from "./replication.js";
 export * from "./transport.js";
 export * from "./publication-cadence.js";
+export * from "./protocol/index.js";

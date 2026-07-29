@@ -1385,14 +1385,22 @@ function applyMetadataDelta(worldState: WorldStateDto, delta: WorldMetadataDelta
   }
 }
 
-function validateWorldStateSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
+export function decodeWorldSnapshot(value: unknown): WorldSnapshot {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("snapshot must be an object");
+  }
+  const snapshot = value as Partial<WorldSnapshot>;
   if (snapshot.version !== WORLD_SNAPSHOT_SCHEMA_VERSION) {
     throw new TypeError("snapshot.version is unsupported");
   }
-  if (snapshot.worldState.schemaVersion !== WORLD_STATE_SCHEMA_VERSION) {
+  const worldState = snapshot.worldState;
+  if (typeof worldState !== "object" || worldState === null || Array.isArray(worldState)) {
+    throw new TypeError("snapshot.worldState must be an object");
+  }
+  if (worldState.schemaVersion !== WORLD_STATE_SCHEMA_VERSION) {
     throw new TypeError("snapshot.worldState.schemaVersion is unsupported");
   }
-  const normalizedWorldState = canonicalizeWorldStateDto(snapshot.worldState);
+  const normalizedWorldState = canonicalizeWorldStateDto(worldState);
   const expectedChecksum = computeWorldChecksum(normalizedWorldState);
   if (snapshot.checksum !== expectedChecksum) {
     throw new TypeError("snapshot.checksum does not match the canonical world state");
@@ -1406,6 +1414,10 @@ function validateWorldStateSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
     checksum: expectedChecksum,
     worldState: normalizedWorldState,
   };
+}
+
+function validateWorldStateSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
+  return decodeWorldSnapshot(snapshot);
 }
 
 export function computeWorldChecksum(candidate: WorldState | WorldSnapshot | WorldStateDto): string {

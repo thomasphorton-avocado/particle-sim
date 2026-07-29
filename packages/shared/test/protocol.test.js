@@ -9,7 +9,9 @@ import {
   createWorldDelta,
   createWorldSnapshot,
   decodeProtocolMessage,
+  decodeWorldDelta,
   encodeProtocolMessage,
+  serializeWorldState,
   MAX_BATCH_COMMANDS,
   MAX_CELL_DELTAS,
   MAX_ENTITY_DELTAS,
@@ -651,6 +653,209 @@ test("enforces ack invariants and canonical command-ledger metadata shapes", () 
     streamSequence: 310,
     delta: wrapperLedgerDelta,
   }), /malformed_message/);
+});
+
+test("decodeWorldDelta rejects kind-full command-ledger metadata and preserves canonical ledger shapes", () => {
+  const fixture = createProtocolFixture();
+  const receipt = {
+    commandId: createCommandId("command_receipt_shared"),
+    actorId: fixture.playerId,
+    actorSequence: 1,
+    authorityOrder: 1,
+    issuedTick: 0,
+    processedTick: 0,
+    commandType: "pause_world",
+    code: "accepted",
+    accepted: true,
+    beforeWorldRevision: 0,
+    afterWorldRevision: 1,
+    beforeInventoryRevision: 0,
+    afterInventoryRevision: 0,
+    beforeTargetRevision: 0,
+    afterTargetRevision: 0,
+    acceptedEffect: "effect",
+    fingerprint: "shared-fp",
+  };
+
+  assert.throws(() => decodeWorldDelta({
+    version: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    baseRevision: 0,
+    targetRevision: 1,
+    cells: [],
+    players: [],
+    fallingObjects: [],
+    metadata: [{ field: "commandLedger", value: { kind: "full", actorHighWater: {}, recent: [] } }],
+  }), /commandLedger metadata value/);
+
+  const canonicalFull = decodeWorldDelta({
+    version: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    baseRevision: 0,
+    targetRevision: 1,
+    cells: [],
+    players: [],
+    fallingObjects: [],
+    metadata: [{ field: "commandLedger", value: { actorHighWater: { [fixture.playerId]: 1 }, recent: [receipt] } }],
+  });
+  assert.deepEqual(canonicalFull.metadata[0].value, {
+    actorHighWater: { [fixture.playerId]: 1 },
+    recent: [receipt],
+  });
+
+  const canonicalIncremental = decodeWorldDelta({
+    version: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    baseRevision: 0,
+    targetRevision: 1,
+    cells: [],
+    players: [],
+    fallingObjects: [],
+    metadata: [{ field: "commandLedger", value: { kind: "incremental", actorHighWater: { [fixture.playerId]: 2 }, appendedReceipts: [receipt], trimmedCount: 1 } }],
+  });
+  assert.deepEqual(canonicalIncremental.metadata[0].value, {
+    kind: "incremental",
+    actorHighWater: { [fixture.playerId]: 2 },
+    appendedReceipts: [receipt],
+    trimmedCount: 1,
+  });
+});
+
+test("serializeWorldState and protocol ledger metadata reject impossible command receipts", () => {
+  const roomId = createRoomId("room_receipt");
+  const world = createDefaultWorldState(roomId);
+  const actorId = createPlayerId("player_receipt");
+  world.players[actorId] = createDefaultPlayerState(actorId);
+  world.ownerPlayerId = actorId;
+  world.worldRevision = 1;
+
+  const acceptedEnvelope = {
+    commandId: createCommandId("command_receipt_accepted"),
+    actorId,
+    actorSequence: 1,
+    issuedTick: 0,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  };
+  const acceptedResult = processCommand(world, acceptedEnvelope);
+  assert.equal(acceptedResult.kind, "accepted");
+  const acceptedReceipt = {
+    commandId: acceptedEnvelope.commandId,
+    actorId,
+    actorSequence: acceptedEnvelope.actorSequence,
+    authorityOrder: acceptedResult.authorityOrder,
+    issuedTick: acceptedEnvelope.issuedTick,
+    processedTick: 5,
+    commandType: acceptedEnvelope.command.type,
+    code: acceptedResult.code,
+    accepted: true,
+    beforeWorldRevision: acceptedResult.beforeWorldRevision,
+    afterWorldRevision: acceptedResult.afterWorldRevision,
+    beforeInventoryRevision: acceptedResult.beforeInventoryRevision,
+    afterInventoryRevision: acceptedResult.afterInventoryRevision,
+    beforeTargetRevision: acceptedResult.beforeTargetRevision,
+    afterTargetRevision: acceptedResult.afterTargetRevision,
+    acceptedEffect: acceptedResult.acceptedEffect,
+    fingerprint: "accepted-fp",
+  };
+
+  const rejectedWorld = createDefaultWorldState(createRoomId("room_receipt_rejected"));
+  rejectedWorld.players[actorId] = createDefaultPlayerState(actorId);
+  rejectedWorld.ownerPlayerId = actorId;
+  rejectedWorld.worldRevision = 1;
+  const rejectedEnvelope = {
+    commandId: createCommandId("command_receipt_rejected"),
+    actorId,
+    actorSequence: 2,
+    issuedTick: 0,
+    command: { type: "pause_world", expectedWorldRevision: 999 },
+  };
+  const rejectedResult = processCommand(rejectedWorld, rejectedEnvelope);
+  assert.equal(rejectedResult.kind, "rejected");
+  const rejectedReceipt = {
+    commandId: rejectedEnvelope.commandId,
+    actorId,
+    actorSequence: rejectedEnvelope.actorSequence,
+    authorityOrder: null,
+    issuedTick: rejectedEnvelope.issuedTick,
+    processedTick: 6,
+    commandType: rejectedEnvelope.command.type,
+    code: rejectedResult.code,
+    accepted: false,
+    beforeWorldRevision: rejectedResult.beforeWorldRevision,
+    afterWorldRevision: rejectedResult.afterWorldRevision,
+    beforeInventoryRevision: rejectedResult.beforeInventoryRevision,
+    afterInventoryRevision: rejectedResult.afterInventoryRevision,
+    beforeTargetRevision: rejectedResult.beforeTargetRevision,
+    afterTargetRevision: rejectedResult.afterTargetRevision,
+    acceptedEffect: null,
+    fingerprint: "rejected-fp",
+  };
+
+  const invalidReceipts = [
+    {
+      description: "accepted receipt with zero authority order",
+      receipt: { ...acceptedReceipt, authorityOrder: 0 },
+      expectation: /authorityOrder/,
+    },
+    {
+      description: "accepted receipt with decreasing revisions",
+      receipt: { ...acceptedReceipt, afterWorldRevision: acceptedReceipt.beforeWorldRevision - 1 },
+      expectation: /revision/i,
+    },
+    {
+      description: "rejected receipt with non-null acceptedEffect",
+      receipt: { ...rejectedReceipt, acceptedEffect: "effect" },
+      expectation: /acceptedEffect/,
+    },
+    {
+      description: "rejected receipt with changed revisions",
+      receipt: { ...rejectedReceipt, afterWorldRevision: rejectedReceipt.afterWorldRevision + 1 },
+      expectation: /revision/i,
+    },
+  ];
+
+  for (const [index, invalidCase] of invalidReceipts.entries()) {
+    const worldState = createDefaultWorldState(createRoomId(`${roomId}_${index}`));
+    worldState.players[actorId] = createDefaultPlayerState(actorId);
+    worldState.ownerPlayerId = actorId;
+    worldState.worldRevision = 1;
+    worldState.commandLedger.actorHighWater[actorId] = invalidCase.receipt.authorityOrder ?? 0;
+    worldState.commandLedger.recent = [invalidCase.receipt];
+    assert.throws(() => serializeWorldState(worldState), invalidCase.expectation);
+
+    const fullLedgerDelta = {
+      version: WORLD_SNAPSHOT_SCHEMA_VERSION,
+      baseRevision: 0,
+      targetRevision: 1,
+      cells: [],
+      players: [],
+      fallingObjects: [],
+      metadata: [{ field: "commandLedger", value: { actorHighWater: { [actorId]: invalidCase.receipt.authorityOrder ?? 0 }, recent: [invalidCase.receipt] } }],
+    };
+    assert.throws(() => decodeProtocolMessage({
+      kind: "delta",
+      protocolVersion: PROTOCOL_VERSION,
+      worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+      worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+      streamSequence: 311,
+      delta: fullLedgerDelta,
+    }), invalidCase.expectation);
+
+    const incrementalLedgerDelta = {
+      version: WORLD_SNAPSHOT_SCHEMA_VERSION,
+      baseRevision: 0,
+      targetRevision: 1,
+      cells: [],
+      players: [],
+      fallingObjects: [],
+      metadata: [{ field: "commandLedger", value: { kind: "incremental", actorHighWater: { [actorId]: invalidCase.receipt.authorityOrder ?? 0 }, appendedReceipts: [invalidCase.receipt], trimmedCount: 0 } }],
+    };
+    assert.throws(() => decodeProtocolMessage({
+      kind: "delta",
+      protocolVersion: PROTOCOL_VERSION,
+      worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+      worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+      streamSequence: 312,
+      delta: incrementalLedgerDelta,
+    }), invalidCase.expectation);
+  }
 });
 
 test("round-trips every protocol message variant", () => {

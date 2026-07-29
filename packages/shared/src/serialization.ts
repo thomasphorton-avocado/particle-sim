@@ -323,6 +323,18 @@ export function validateCommandReceipt(value: unknown, label = "commandReceipt")
   receipt.code = code as CommandReceipt["code"];
   receipt.acceptedEffect = acceptedEffect;
   receipt.fingerprint = fingerprint;
+  assertCommandResultInvariants({
+    accepted: receipt.accepted,
+    code: receipt.code,
+    authorityOrder: receipt.authorityOrder,
+    acceptedEffect: receipt.acceptedEffect,
+    beforeWorldRevision: receipt.beforeWorldRevision,
+    afterWorldRevision: receipt.afterWorldRevision,
+    beforeInventoryRevision: receipt.beforeInventoryRevision,
+    afterInventoryRevision: receipt.afterInventoryRevision,
+    beforeTargetRevision: receipt.beforeTargetRevision,
+    afterTargetRevision: receipt.afterTargetRevision,
+  }, label);
   return receipt;
 }
 
@@ -332,6 +344,62 @@ function validateAcceptedEffect(value: unknown, label: string): string | null {
     throw new TypeError(`${label} must be at most 64 characters`);
   }
   return effect;
+}
+
+export function assertCommandResultInvariants(
+  value: {
+    accepted: boolean;
+    code: string;
+    authorityOrder: number | null;
+    acceptedEffect: string | null;
+    beforeWorldRevision: number;
+    afterWorldRevision: number;
+    beforeInventoryRevision: number;
+    afterInventoryRevision: number;
+    beforeTargetRevision: number;
+    afterTargetRevision: number;
+  },
+  label = "commandReceipt",
+): void {
+  if (value.accepted && value.code !== "accepted") {
+    throw new TypeError(`${label}.accepted must be false when code is not accepted`);
+  }
+  if (!value.accepted && value.code === "accepted") {
+    throw new TypeError(`${label}.accepted must be true when code is accepted`);
+  }
+  if (value.accepted) {
+    if (value.authorityOrder === null || value.authorityOrder < 1) {
+      throw new TypeError(`${label}.authorityOrder must be a positive integer for accepted results`);
+    }
+    if (value.acceptedEffect === null) {
+      throw new TypeError(`${label}.acceptedEffect is required for accepted results`);
+    }
+    if (value.afterWorldRevision < value.beforeWorldRevision) {
+      throw new TypeError(`${label}.afterWorldRevision cannot be less than beforeWorldRevision for accepted results`);
+    }
+    if (value.afterInventoryRevision < value.beforeInventoryRevision) {
+      throw new TypeError(`${label}.afterInventoryRevision cannot be less than beforeInventoryRevision for accepted results`);
+    }
+    if (value.afterTargetRevision < value.beforeTargetRevision) {
+      throw new TypeError(`${label}.afterTargetRevision cannot be less than beforeTargetRevision for accepted results`);
+    }
+    return;
+  }
+  if (value.authorityOrder !== null) {
+    throw new TypeError(`${label}.authorityOrder must be null for rejected results`);
+  }
+  if (value.acceptedEffect !== null) {
+    throw new TypeError(`${label}.acceptedEffect must be null for rejected results`);
+  }
+  if (value.afterWorldRevision !== value.beforeWorldRevision) {
+    throw new TypeError(`${label}.afterWorldRevision must match beforeWorldRevision for rejected results`);
+  }
+  if (value.afterInventoryRevision !== value.beforeInventoryRevision) {
+    throw new TypeError(`${label}.afterInventoryRevision must match beforeInventoryRevision for rejected results`);
+  }
+  if (value.afterTargetRevision !== value.beforeTargetRevision) {
+    throw new TypeError(`${label}.afterTargetRevision must match beforeTargetRevision for rejected results`);
+  }
 }
 
 function validatePlayerState(value: unknown, version: number): PlayerState {

@@ -757,8 +757,15 @@ function validateCommandLedgerDeltaValue(value: unknown): CommandLedgerDeltaValu
 }
 
 function validateCommandLedgerMetadataValue(value: unknown): CommandLedgerDto | CommandLedgerDeltaValue {
-  if (typeof value === "object" && value !== null && !Array.isArray(value) && (value as Record<string, unknown>)["kind"] === "incremental") {
-    return validateCommandLedgerDeltaValue(value);
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const objectValue = value as Record<string, unknown>;
+    const kindValue = objectValue["kind"];
+    if (Object.prototype.hasOwnProperty.call(objectValue, "kind")) {
+      if (kindValue !== "incremental") {
+        throw new TypeError("commandLedger metadata value must omit kind for full ledger state or use kind=incremental");
+      }
+      return validateCommandLedgerDeltaValue(value);
+    }
   }
   return validateCommandLedgerDto(value);
 }

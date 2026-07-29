@@ -3,7 +3,7 @@ import { MAX_STACK } from "../inventory.js";
 import { parseCommandId, parseObjectId, parsePlayerId, parseRoomId } from "../ids.js";
 import { MATERIALS, MaterialId } from "../materials.js";
 import { decodeWorldDelta, decodeWorldSnapshot, WORLD_SNAPSHOT_SCHEMA_VERSION } from "../replication.js";
-import { WORLD_STATE_SCHEMA_VERSION } from "../serialization.js";
+import { WORLD_STATE_SCHEMA_VERSION, assertCommandResultInvariants } from "../serialization.js";
 import { MAX_BATCH_COMMANDS, MAX_CELL_DELTAS, MAX_DECODER_WORK, MAX_ENTITY_DELTAS, MAX_ID_LENGTH, MAX_INTEGER, MAX_METADATA_ENTRIES, MAX_NESTED_COLLECTION_ITEMS, MAX_OBJECT_FIELDS, MAX_STRING_LENGTH, MIN_INTEGER, MAX_NESTING_DEPTH, PROTOCOL_VERSION } from "./limits.js";
 import { ProtocolCodecError, decodeProtocolMessageFrame as decodeProtocolJsonFrame, encodeProtocolMessage as encodeProtocolJsonMessage } from "./json.js";
 import type {
@@ -650,6 +650,20 @@ function assertCommandLedgerShape(value: unknown, work: DecoderWork): void {
   }
 }
 
+function assertProtocolCommandResultInvariants(value: Parameters<typeof assertCommandResultInvariants>[0], label: string): void {
+  try {
+    assertCommandResultInvariants(value, label);
+  } catch (error) {
+    if (error instanceof ProtocolCodecError) {
+      throw error;
+    }
+    if (error instanceof TypeError) {
+      throw new ProtocolCodecError("malformed_message", error.message);
+    }
+    throw error;
+  }
+}
+
 function assertCommandReceiptShape(value: unknown, label: string, work: DecoderWork): void {
   const receipt = assertReplicaObject(value, label, new Set([
     "commandId",
@@ -713,22 +727,26 @@ function assertCommandReceiptShape(value: unknown, label: string, work: DecoderW
     "invalid_command",
   ]));
   const accepted = assertBoolean(receipt["accepted"], `${label}.accepted`, work);
-  if (accepted && code !== "accepted") {
-    throw new ProtocolCodecError("malformed_message", `${label}.code must be accepted when accepted=true`);
-  }
-  if (!accepted && code === "accepted") {
-    throw new ProtocolCodecError("malformed_message", `${label}.code must not be accepted when accepted=false`);
-  }
   assertNonNegativeInteger(receipt["beforeWorldRevision"], `${label}.beforeWorldRevision`, work);
   assertNonNegativeInteger(receipt["afterWorldRevision"], `${label}.afterWorldRevision`, work);
   assertNonNegativeInteger(receipt["beforeInventoryRevision"], `${label}.beforeInventoryRevision`, work);
   assertNonNegativeInteger(receipt["afterInventoryRevision"], `${label}.afterInventoryRevision`, work);
   assertNonNegativeInteger(receipt["beforeTargetRevision"], `${label}.beforeTargetRevision`, work);
   assertNonNegativeInteger(receipt["afterTargetRevision"], `${label}.afterTargetRevision`, work);
-  if (receipt["acceptedEffect"] !== null) {
-    assertString(receipt["acceptedEffect"], `${label}.acceptedEffect`, work, true);
-  }
+  const acceptedEffect = receipt["acceptedEffect"] === null ? null : assertString(receipt["acceptedEffect"], `${label}.acceptedEffect`, work, true);
   assertString(receipt["fingerprint"], `${label}.fingerprint`, work, false);
+  assertProtocolCommandResultInvariants({
+    accepted,
+    code,
+    authorityOrder: authorityOrderValue === null ? null : authorityOrderValue as number,
+    acceptedEffect,
+    beforeWorldRevision: receipt["beforeWorldRevision"] as number,
+    afterWorldRevision: receipt["afterWorldRevision"] as number,
+    beforeInventoryRevision: receipt["beforeInventoryRevision"] as number,
+    afterInventoryRevision: receipt["afterInventoryRevision"] as number,
+    beforeTargetRevision: receipt["beforeTargetRevision"] as number,
+    afterTargetRevision: receipt["afterTargetRevision"] as number,
+  }, label);
 }
 
 function assertDeltaShape(value: unknown, work: DecoderWork): void {
@@ -979,45 +997,18 @@ function assertCommandAcknowledgement(value: unknown, work: DecoderWork): Protoc
   const afterTargetRevision = assertNonNegativeInteger(assertRequiredField(ackObject, "afterTargetRevision", "afterTargetRevision"), "afterTargetRevision", work);
   const acceptedEffectValue = assertRequiredField(ackObject, "acceptedEffect", "acceptedEffect");
   const acceptedEffect = acceptedEffectValue === null ? null : assertString(acceptedEffectValue, "acceptedEffect", work, true);
-  if (accepted && code !== "accepted") {
-    throw new ProtocolCodecError("malformed_message", "accepted acknowledgements must use the accepted code");
-  }
-  if (!accepted && code === "accepted") {
-    throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must not use the accepted code");
-  }
-  if (accepted) {
-    if (authorityOrder === null || authorityOrder < 1) {
-      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements must include a positive authorityOrder");
-    }
-    if (acceptedEffect === null) {
-      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements must include a non-null acceptedEffect");
-    }
-    if (afterWorldRevision < beforeWorldRevision) {
-      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements cannot decrease world revisions");
-    }
-    if (afterInventoryRevision < beforeInventoryRevision) {
-      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements cannot decrease inventory revisions");
-    }
-    if (afterTargetRevision < beforeTargetRevision) {
-      throw new ProtocolCodecError("malformed_message", "accepted acknowledgements cannot decrease target revisions");
-    }
-  } else {
-    if (authorityOrder !== null) {
-      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must use a null authorityOrder");
-    }
-    if (acceptedEffect !== null) {
-      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must use a null acceptedEffect");
-    }
-    if (afterWorldRevision !== beforeWorldRevision) {
-      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must preserve world revisions");
-    }
-    if (afterInventoryRevision !== beforeInventoryRevision) {
-      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must preserve inventory revisions");
-    }
-    if (afterTargetRevision !== beforeTargetRevision) {
-      throw new ProtocolCodecError("malformed_message", "rejected acknowledgements must preserve target revisions");
-    }
-  }
+  assertProtocolCommandResultInvariants({
+    accepted,
+    code,
+    authorityOrder,
+    acceptedEffect,
+    beforeWorldRevision,
+    afterWorldRevision,
+    beforeInventoryRevision,
+    afterInventoryRevision,
+    beforeTargetRevision,
+    afterTargetRevision,
+  }, "command acknowledgement");
   return {
     clientSequence,
     issuedTick,

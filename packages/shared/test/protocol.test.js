@@ -166,7 +166,11 @@ test("rejects deeply nested values, oversized object keys, and strict nested met
     worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
     streamSequence: 100,
     snapshot: deepSnapshot,
-  }), /malformed_message/);
+  }), (error) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.code, "malformed_message");
+    return true;
+  });
 
   const oversizedKeySnapshot = structuredClone(fixture.snapshot);
   oversizedKeySnapshot.worldState.players = {

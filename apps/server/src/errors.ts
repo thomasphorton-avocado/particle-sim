@@ -27,9 +27,9 @@ export class RoomNotFoundError extends HttpRouteError {
   }
 }
 
-export class ConfigError extends Error {
-  constructor(message: string) {
+export class RoomShutdownTimeoutError extends Error {
+  constructor(message = "room shutdown timed out") {
     super(message);
-    this.name = "ConfigError";
+    this.name = "RoomShutdownTimeoutError";
   }
 }

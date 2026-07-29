@@ -1,4 +1,3 @@
-import { once } from "node:events";
 import { pathToFileURL } from "node:url";
 import { parseServerConfig } from "./config.js";
 import { createHttpServer } from "./http/router.js";
@@ -44,5 +43,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   process.on("SIGINT", () => {
     void shutdown();
   });
-  await once(server, "listening");
 }

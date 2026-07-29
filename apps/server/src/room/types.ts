@@ -30,10 +30,10 @@ export interface RoomPublisher {
 }
 
 export interface RoomTransportHooks {
-  onJoined?(roomId: RoomId, membership: MembershipSummary): void;
-  onLeft?(roomId: RoomId, membership: MembershipSummary): void;
-  onClosed?(roomId: RoomId, reason: RoomLifecycleReason): void;
-  onCommandAck?(roomId: RoomId, membership: MembershipSummary, receipt: CommandReceipt): void;
+  onJoined?(roomId: RoomId, membership: MembershipSummary): void | Promise<void>;
+  onLeft?(roomId: RoomId, membership: MembershipSummary): void | Promise<void>;
+  onClosed?(roomId: RoomId, reason: RoomLifecycleReason): void | Promise<void>;
+  onCommandAck?(roomId: RoomId, membership: MembershipSummary, receipt: CommandReceipt): void | Promise<void>;
 }
 
 export interface RoomIngress {
@@ -45,6 +45,7 @@ export interface RoomIngress {
   readonly receiveOrdinal: number;
   readonly generation: number;
   readonly joinOrdinal?: number;
+  readonly playerId?: PlayerId;
   readonly command?: CommandEnvelope;
 }
 

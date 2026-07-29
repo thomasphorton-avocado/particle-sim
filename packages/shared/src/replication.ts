@@ -3,7 +3,8 @@ import { parseObjectId, parsePlayerId, parseRoomId } from "./ids.js";
 import { MaterialId, MATERIALS } from "./materials.js";
 import { DAY_NIGHT_CYCLE_TICKS } from "./gameplay.js";
 import { deserializeWorldState, serializeWorldState, WORLD_STATE_SCHEMA_VERSION, validateCommandReceipt, type WorldStateDto, type PlayerStateDto, type FallingObjectStateDto, type WeatherStateDto, type CommandLedgerDto, type GameplayRandomStateDto } from "./serialization.js";
-import { type WorldState, type WeatherState } from "./world-state.js";
+import { createDefaultWorldState, type WorldState, type WeatherState } from "./world-state.js";
+import type { CommandEnvelope } from "./commands.js";
 import { type DirtyCellEntry } from "./dirty-journal.js";
 import { createGameplayRandomState, type GameplayRandomState } from "./random.js";
 import type { CommandReceipt } from "./commands.js";
@@ -469,24 +470,28 @@ function cloneGridState(grid: Grid): Grid {
 }
 
 export function cloneWorldState(world: WorldState): WorldState {
-  return {
-    roomId: world.roomId,
-    grid: cloneGridState(world.grid),
-    random: clonePlainObject(world.random),
-    players: Object.fromEntries(Object.entries(world.players).map(([playerId, player]) => [playerId, clonePlainObject(player)])),
-    fallingObjects: Object.fromEntries(Object.entries(world.fallingObjects).map(([objectId, object]) => [objectId, clonePlainObject(object)])),
-    paused: world.paused,
-    tick: world.tick,
-    time: clonePlainObject(world.time),
-    weather: clonePlainObject(world.weather),
-    nextPlayerOrdinal: world.nextPlayerOrdinal,
-    nextObjectOrdinal: world.nextObjectOrdinal,
-    ownerPlayerId: world.ownerPlayerId,
-    worldRevision: world.worldRevision,
-    nextAuthorityOrder: world.nextAuthorityOrder,
-    commandLedger: clonePlainObject(world.commandLedger),
-    commandInbox: clonePlainObject(world.commandInbox),
+  const grid = cloneGridState(world.grid);
+  const clone = createDefaultWorldState(world.roomId, grid);
+  clone.roomId = world.roomId;
+  clone.grid = grid;
+  clone.random = clonePlainObject(world.random);
+  clone.players = Object.fromEntries(Object.entries(world.players).map(([playerId, player]) => [playerId, clonePlainObject(player)]));
+  clone.fallingObjects = Object.fromEntries(Object.entries(world.fallingObjects).map(([objectId, fallingObject]) => [objectId, clonePlainObject(fallingObject)]));
+  clone.paused = world.paused;
+  clone.tick = world.tick;
+  clone.time = clonePlainObject(world.time);
+  clone.weather = clonePlainObject(world.weather);
+  clone.nextPlayerOrdinal = world.nextPlayerOrdinal;
+  clone.nextObjectOrdinal = world.nextObjectOrdinal;
+  clone.ownerPlayerId = world.ownerPlayerId;
+  clone.worldRevision = world.worldRevision;
+  clone.nextAuthorityOrder = world.nextAuthorityOrder;
+  clone.commandLedger = {
+    actorHighWater: { ...world.commandLedger.actorHighWater },
+    recent: world.commandLedger.recent.map((receipt) => clonePlainObject(receipt)),
   };
+  clone.commandInbox = (world.commandInbox ?? []).map((envelope) => clonePlainObject(envelope as CommandEnvelope));
+  return clone;
 }
 
 export function cloneWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {

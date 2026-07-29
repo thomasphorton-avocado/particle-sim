@@ -3,7 +3,7 @@ import { createCommandEnvelope, processPendingCommands, type CommandResult, type
 import { type PlayerId } from "./ids.js";
 import { type WorldState, createDefaultCommandLedger, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
 import { createPlayerId } from "./ids.js";
-import { applyWorldDeltaToSnapshotStateFast, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, createCommandLedgerDelta, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
+import { applyWorldDeltaToSnapshotStateFast, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, cloneWorldState as cloneWorldStateFromReplication, createCommandLedgerDelta, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
 import type { DirtyCellEntry } from "./dirty-journal.js";
 import { DEFAULT_PUBLICATION_HZ, PublicationCadence, type PublicationCadenceConfig } from "./publication-cadence.js";
 
@@ -613,7 +613,7 @@ function normalizeInputState(input?: PlayerInputState): PlayerInputState {
 }
 
 function cloneWorldState(world: WorldState): WorldState {
-  return restoreWorldState(createWorldSnapshot(world));
+  return cloneWorldStateFromReplication(world);
 }
 
 function cloneCommandResult(result: CommandResult): CommandResult {

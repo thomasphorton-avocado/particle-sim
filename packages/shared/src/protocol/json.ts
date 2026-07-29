@@ -21,16 +21,33 @@ function toUtf8Bytes(input: ProtocolFrameInput): Uint8Array {
     if (input.length > MAX_FRAME_BYTES) {
       throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
     }
-    return textEncoder.encode(input);
+    const destination = new Uint8Array(MAX_FRAME_BYTES);
+    const { read, written } = textEncoder.encodeInto(input, destination);
+    if (read !== input.length) {
+      throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
+    }
+    return destination.subarray(0, written);
+  }
+  if (input instanceof Uint8Array) {
+    if (input.byteLength > MAX_FRAME_BYTES) {
+      throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
+    }
+    return input;
   }
   if (input instanceof ArrayBuffer) {
+    if (input.byteLength > MAX_FRAME_BYTES) {
+      throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
+    }
     return new Uint8Array(input);
   }
   if (ArrayBuffer.isView(input)) {
     const view = input as ArrayBufferView;
+    if (view.byteLength > MAX_FRAME_BYTES) {
+      throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
+    }
     return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
   }
-  return input;
+  return new Uint8Array();
 }
 
 export function encodeProtocolMessage(message: unknown): Uint8Array {
@@ -44,14 +61,7 @@ export function encodeProtocolMessage(message: unknown): Uint8Array {
   if (payload === undefined) {
     throw new ProtocolCodecError("invalid_json", "Protocol message must be JSON-serializable");
   }
-  if (payload.length > MAX_FRAME_BYTES) {
-    throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
-  }
-  const encoded = textEncoder.encode(payload);
-  if (encoded.byteLength > MAX_FRAME_BYTES) {
-    throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
-  }
-  return encoded;
+  return toUtf8Bytes(payload);
 }
 
 export function decodeProtocolMessageFrame(input: ProtocolFrameInput): unknown {

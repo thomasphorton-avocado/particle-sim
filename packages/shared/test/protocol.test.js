@@ -258,6 +258,16 @@ test("accepts large starter-world snapshots within the decoder work budget", () 
 });
 
 test("rejects oversized frame payloads and unsupported delta schema versions", () => {
+  assert.throws(() => decodeProtocolMessage("x".repeat(MAX_FRAME_BYTES + 1)), (error) => {
+    assert.equal(error.code, "frame_too_large");
+    return true;
+  });
+
+  assert.throws(() => decodeProtocolMessage("€".repeat(524_289)), (error) => {
+    assert.equal(error.code, "frame_too_large");
+    return true;
+  });
+
   const asciiPayload = { payload: "x".repeat(MAX_FRAME_BYTES + 1) };
   assert.throws(() => encodeProtocolMessage(asciiPayload), (error) => {
     assert.equal(error.code, "frame_too_large");

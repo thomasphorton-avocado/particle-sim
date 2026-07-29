@@ -181,9 +181,16 @@ export class LocalTransport {
   }
 
   flushPublication(options: { materializeSnapshot?: boolean } = {}): void {
+    this.#publishAndDrain(
+      { force: true, materializeSnapshot: options.materializeSnapshot ?? true },
+      "LocalTransport flush failed",
+    );
+  }
+
+  #publishAndDrain(options: PublicationOptions, aggregateMessage: string): void {
     let publicationError: unknown;
     try {
-      this.#publish({ force: true, materializeSnapshot: options.materializeSnapshot ?? true });
+      this.#publish(options);
     } catch (error) {
       publicationError = error;
     }
@@ -194,7 +201,7 @@ export class LocalTransport {
       advanceError = error;
     }
     if (publicationError !== undefined && advanceError !== undefined) {
-      throw new AggregateError([publicationError, advanceError], "LocalTransport flush failed");
+      throw new AggregateError([publicationError, advanceError], aggregateMessage);
     }
     if (publicationError !== undefined) {
       throw publicationError;
@@ -354,7 +361,10 @@ export class LocalTransport {
     this.#nextActorSequenceByPlayer = new Map<PlayerId, number>();
     this.#nextActorSequenceByPlayer.set(this.#ownerPlayerId, (this.#world.commandLedger.actorHighWater[this.#ownerPlayerId] ?? 0) + 1);
     this.#publicationCadence.reset(this.#getAuthorityRevision(this.#world));
-    this.#publish({ force: true, materializeSnapshot: true });
+    this.#publishAndDrain(
+      { force: true, materializeSnapshot: true },
+      "LocalTransport editor replacement failed",
+    );
   }
 
   #createEditorCapability(): LocalTransportEditorCapability {

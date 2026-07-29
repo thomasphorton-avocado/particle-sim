@@ -82,6 +82,19 @@ export interface WorldDelta {
   metadata: WorldMetadataDelta[];
 }
 
+function isLedgerOnlyWorldDelta(
+  cells: ReadonlyArray<WorldCellDelta>,
+  players: ReadonlyArray<WorldPlayerDelta>,
+  fallingObjects: ReadonlyArray<WorldFallingObjectDelta>,
+  metadata: ReadonlyArray<WorldMetadataDelta>,
+): boolean {
+  return cells.length === 0
+    && players.length === 0
+    && fallingObjects.length === 0
+    && metadata.length === 1
+    && metadata[0]?.field === "commandLedger";
+}
+
 function assertFiniteNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new TypeError(`${label} must be a finite number`);
@@ -952,7 +965,9 @@ export function createWorldDelta(previousSnapshot: WorldSnapshot, world: WorldSt
   if (filteredCells.length === 0 && players.length === 0 && fallingObjects.length === 0 && metadata.length === 0) {
     return null;
   }
-  const targetRevision = Math.max(previousSnapshot.worldRevision + 1, world.worldRevision);
+  const targetRevision = isLedgerOnlyWorldDelta(filteredCells, players, fallingObjects, metadata)
+    ? previousSnapshot.worldRevision
+    : Math.max(previousSnapshot.worldRevision + 1, world.worldRevision);
   return {
     version: WORLD_SNAPSHOT_SCHEMA_VERSION,
     baseRevision: previousSnapshot.worldRevision,
@@ -978,8 +993,8 @@ function validateWorldDelta(value: unknown): WorldDelta {
   const version = assertInteger(requireField(obj, "version", "worldDelta.version"), "worldDelta.version", 1, 1) as typeof WORLD_SNAPSHOT_SCHEMA_VERSION;
   const baseRevision = assertInteger(requireField(obj, "baseRevision", "worldDelta.baseRevision"), "worldDelta.baseRevision", 0, MAX_SAFE_INTEGER);
   const targetRevision = assertInteger(requireField(obj, "targetRevision", "worldDelta.targetRevision"), "worldDelta.targetRevision", 0, MAX_SAFE_INTEGER);
-  if (targetRevision <= baseRevision) {
-    throw new TypeError("worldDelta.targetRevision must be greater than baseRevision");
+  if (targetRevision < baseRevision) {
+    throw new TypeError("worldDelta.targetRevision must be greater than or equal to baseRevision");
   }
   const gridDimensions = Object.prototype.hasOwnProperty.call(obj, "gridDimensions")
     ? validateGridDimensions(obj["gridDimensions"], "worldDelta.gridDimensions")
@@ -1029,6 +1044,9 @@ function validateWorldDelta(value: unknown): WorldDelta {
   }
   if (metadata.length > MAX_DELTA_METADATA) {
     throw new TypeError("worldDelta.metadata exceeds the maximum allowed size");
+  }
+  if (targetRevision === baseRevision && !isLedgerOnlyWorldDelta(cells, players, fallingObjects, metadata)) {
+    throw new TypeError("non-advancing world deltas may only update commandLedger metadata");
   }
   const seenCells = new Set<number>();
   for (const cell of cells) {

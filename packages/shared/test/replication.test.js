@@ -139,6 +139,26 @@ test("applyWorldDeltaToSnapshotState rejects malformed deltas without mutating t
   assert.deepEqual(serializeWorldState(world), beforeState);
 });
 
+test("non-advancing deltas reject state changes outside command-ledger metadata", () => {
+  const world = createDefaultWorldState("room_non_advancing_delta");
+  const snapshot = createWorldSnapshot(world);
+  const invalidDelta = {
+    version: 1,
+    baseRevision: snapshot.worldRevision,
+    targetRevision: snapshot.worldRevision,
+    gridDimensions: { width: world.grid.width, height: world.grid.height },
+    cells: [{ index: 0, materialId: MaterialId.Water, shade: 0, auxiliary: 0, objectId: null, revision: 1 }],
+    players: [],
+    fallingObjects: [],
+    metadata: [],
+  };
+
+  assert.throws(
+    () => applyWorldDeltaToSnapshot(snapshot, invalidDelta),
+    /non-advancing world deltas may only update commandLedger metadata/,
+  );
+});
+
 test("dirty tracking is independent from simulation updated flags", () => {
   const world = createDefaultWorldState("room_dirty");
   assert.equal(world.grid.dirtyCells.size, 0);

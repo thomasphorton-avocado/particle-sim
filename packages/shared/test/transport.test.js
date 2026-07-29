@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MaterialId, PublicationCadence, advanceWorldTick, computeWorldChecksum, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createObjectId, createPlayerId, processCommand } from "@particle-sim/shared";
+import { MaterialId, PublicationCadence, advanceWorldTick, applyWorldDeltaToSnapshot, computeWorldChecksum, createCommandEnvelope, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createObjectId, createPlayerId, processCommand } from "@particle-sim/shared";
 
 function createWorldWithPlayer() {
   const world = createDefaultWorldState("room_transport");
@@ -252,6 +252,57 @@ test("LocalTransport publishes ledger-only paused receipts exactly once with det
   assert.equal(clientWorld.commandLedger.recent.at(-1).actorSequence, 301);
   assert.equal(computeWorldChecksum(clientWorld), computeWorldChecksum(referenceWorld));
   assert.equal(transport.getClientSnapshot().checksum, computeWorldChecksum(referenceWorld));
+});
+
+test("LocalTransport exposes an applicable public delta stream across ledger-only and normal updates", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
+  const exposedDeltas = [];
+  const resultSequences = [];
+  let publicSnapshot = null;
+
+  transport.subscribe((state) => {
+    if (publicSnapshot === null && state.snapshot) {
+      publicSnapshot = state.snapshot;
+    }
+    if (state.delta) {
+      exposedDeltas.push(state.delta);
+      publicSnapshot = applyWorldDeltaToSnapshot(publicSnapshot, state.delta);
+    }
+    resultSequences.push(...state.lastCommandResults.map((result) => result.actorSequence));
+  });
+  await Promise.resolve();
+
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: 0 });
+  transport.advanceTick();
+  assert.equal(publicSnapshot.worldRevision, 1);
+
+  transport.enqueueCommand({
+    type: "set_input_state",
+    left: true,
+    right: false,
+    jumpHeld: false,
+    crouchHeld: false,
+    lookUpHeld: false,
+  });
+  transport.advanceTick();
+
+  const ledgerOnlyDelta = exposedDeltas[1];
+  assert.equal(ledgerOnlyDelta.baseRevision, 1);
+  assert.equal(ledgerOnlyDelta.targetRevision, 1);
+  assert.deepEqual(ledgerOnlyDelta.metadata.map((entry) => entry.field), ["commandLedger"]);
+  assert.equal(publicSnapshot.worldRevision, transport.getClientWorld().worldRevision);
+
+  transport.enqueueCommand({ type: "resume_world", expectedWorldRevision: 1 });
+  transport.advanceTick();
+
+  const normalDelta = exposedDeltas[2];
+  assert.equal(normalDelta.baseRevision, ledgerOnlyDelta.targetRevision);
+  assert.ok(normalDelta.targetRevision > normalDelta.baseRevision);
+  assert.deepEqual(resultSequences, [1, 2, 3]);
+  assert.equal(publicSnapshot.worldRevision, transport.getClientWorld().worldRevision);
+  assert.equal(publicSnapshot.checksum, computeWorldChecksum(transport.getClientWorld()));
+  assert.equal(publicSnapshot.checksum, transport.getClientSnapshot().checksum);
 });
 
 test("LocalTransport rejects stale revision control commands but accepts them after a fresh published boundary", () => {
@@ -1016,6 +1067,47 @@ test("LocalTransport preserves forced editor resync options across reentrant pub
   assert.equal(clientWorld.grid.get(4, 4), MaterialId.Sand);
   assert.equal(snapshot.worldState.roomId, replacementWorld.roomId);
   assert.equal(snapshot.worldState.grid.ids[replacementWorld.grid.index(4, 4)], MaterialId.Sand);
+});
+
+test("LocalTransport immediately drains a reentrant advance from an editor replacement publication", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport, editor } = createLocalTransportSession(world, actorId);
+  const replacementWorld = createDefaultWorldState("room_reentrant_editor_advance");
+  replacementWorld.ownerPlayerId = actorId;
+  replacementWorld.players[actorId] = createDefaultPlayerState(actorId);
+  const resultSequences = [];
+  const command = {
+    type: "set_input_state",
+    left: true,
+    right: false,
+    jumpHeld: false,
+    crouchHeld: false,
+    lookUpHeld: false,
+  };
+  let advanceQueued = false;
+
+  transport.subscribe((state) => {
+    resultSequences.push(...state.lastCommandResults.map((result) => result.actorSequence));
+    if (!advanceQueued && state.clientWorld.roomId === replacementWorld.roomId) {
+      advanceQueued = true;
+      transport.enqueueCommand(command);
+      transport.advanceTick();
+    }
+  });
+  await Promise.resolve();
+
+  editor.replaceWorld(replacementWorld);
+
+  processCommand(replacementWorld, createCommandEnvelope(actorId, 1, 0, command));
+  advanceWorldTick(replacementWorld, { [actorId]: replacementWorld.players[actorId].input });
+
+  const clientWorld = transport.getClientWorld();
+  assert.equal(advanceQueued, true);
+  assert.deepEqual(resultSequences, [1]);
+  assert.equal(clientWorld.tick, 1);
+  assert.equal(clientWorld.players[actorId].input.left, true);
+  assert.equal(computeWorldChecksum(clientWorld), computeWorldChecksum(replacementWorld));
+  assert.equal(transport.getClientSnapshot().checksum, computeWorldChecksum(replacementWorld));
 });
 
 test("LocalTransport isolates initial-sync failures per subscriber", async () => {

@@ -21,11 +21,12 @@ function toUtf8Bytes(input: ProtocolFrameInput): Uint8Array {
     if (input.length > MAX_FRAME_BYTES) {
       throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
     }
-    const encoded = textEncoder.encode(input);
-    if (encoded.byteLength > MAX_FRAME_BYTES) {
+    const destination = new Uint8Array(Math.min(MAX_FRAME_BYTES, input.length * 4));
+    const { read, written } = textEncoder.encodeInto(input, destination);
+    if (read !== input.length || written > MAX_FRAME_BYTES) {
       throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
     }
-    return encoded;
+    return destination.subarray(0, written);
   }
   if (input instanceof Uint8Array) {
     if (input.byteLength > MAX_FRAME_BYTES) {

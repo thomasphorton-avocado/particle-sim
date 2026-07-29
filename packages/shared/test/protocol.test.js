@@ -783,6 +783,18 @@ test("rejects frame size overshoots and accepts the boundary when within the lim
   const oversized = new Uint8Array(MAX_FRAME_BYTES + 1);
   assert.throws(() => decodeProtocolMessage(oversized), /frame_too_large/);
 
+  const oversizedAscii = "x".repeat(MAX_FRAME_BYTES + 1);
+  assert.throws(() => encodeProtocolMessage({ kind: "ping", streamSequence: 0, nonce: oversizedAscii }), (error) => {
+    assert.equal(error.code, "frame_too_large");
+    return true;
+  });
+
+  const oversizedMultibyte = "é".repeat(Math.floor(MAX_FRAME_BYTES / 2) + 1);
+  assert.throws(() => encodeProtocolMessage({ kind: "ping", streamSequence: 0, nonce: oversizedMultibyte }), (error) => {
+    assert.equal(error.code, "frame_too_large");
+    return true;
+  });
+
   let low = 0;
   let high = MAX_FRAME_BYTES;
   let bestNonce = "";

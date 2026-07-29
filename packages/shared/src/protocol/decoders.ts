@@ -459,18 +459,19 @@ function assertFallingObjectShape(value: unknown, label: string, work: DecoderWo
 }
 
 function assertFallingProvenanceShape(value: unknown, label: string, work: DecoderWork): void {
-  const provenance = assertReplicaObject(value, label, new Set(["kind"]), work);
+  const provenance = assertReplicaRecord(value, label, work);
   const kind = assertString(provenance["kind"], `${label}.kind`, work, false);
   if (kind === "legacy") {
+    assertAllowedFields(provenance, label, new Set(["kind"]), work);
     return;
   }
   if (kind === "placement") {
-    const placement = assertReplicaObject(value, label, new Set(["kind", "actorId", "commandId", "sourceSlot", "materialId", "amount"]), work);
-    assertString(placement["actorId"], `${label}.actorId`, work, false);
-    assertString(placement["commandId"], `${label}.commandId`, work, false);
-    assertNonNegativeInteger(placement["sourceSlot"], `${label}.sourceSlot`, work);
-    assertNonNegativeInteger(placement["materialId"], `${label}.materialId`, work);
-    assertNonNegativeInteger(placement["amount"], `${label}.amount`, work);
+    assertAllowedFields(provenance, label, new Set(["kind", "actorId", "commandId", "sourceSlot", "materialId", "amount"]), work);
+    assertString(provenance["actorId"], `${label}.actorId`, work, false);
+    assertString(provenance["commandId"], `${label}.commandId`, work, false);
+    assertNonNegativeInteger(provenance["sourceSlot"], `${label}.sourceSlot`, work);
+    assertNonNegativeInteger(provenance["materialId"], `${label}.materialId`, work);
+    assertNonNegativeInteger(provenance["amount"], `${label}.amount`, work);
     return;
   }
   throw new ProtocolCodecError("malformed_message", `${label}.kind must be 'legacy' or 'placement'`);
@@ -573,17 +574,19 @@ function assertDeltaShape(value: unknown, work: DecoderWork): void {
   }
   const players = assertReplicaArray(delta["players"], "delta.players", work, MAX_ENTITY_DELTAS, "entity_too_large");
   for (let index = 0; index < players.length; index += 1) {
-    assertDeltaEntityShape(players[index], `delta.players[${index}]`, "playerId", work);
+    assertDeltaEntityShape(players[index], `delta.players[${index}]`, "playerId", assertPlayerStateShape, work);
   }
   const fallingObjects = assertReplicaArray(delta["fallingObjects"], "delta.fallingObjects", work, MAX_ENTITY_DELTAS, "entity_too_large");
   for (let index = 0; index < fallingObjects.length; index += 1) {
-    assertDeltaEntityShape(fallingObjects[index], `delta.fallingObjects[${index}]`, "objectId", work);
+    assertDeltaEntityShape(fallingObjects[index], `delta.fallingObjects[${index}]`, "objectId", assertFallingObjectShape, work);
   }
   const metadata = assertReplicaArray(delta["metadata"], "delta.metadata", work, MAX_METADATA_ENTRIES, "entity_too_large");
   for (let index = 0; index < metadata.length; index += 1) {
     assertDeltaMetadataShape(metadata[index], `delta.metadata[${index}]`, work);
   }
-  assertGridDimensionsShape(delta["gridDimensions"], work);
+  if (Object.prototype.hasOwnProperty.call(delta, "gridDimensions")) {
+    assertGridDimensionsShape(delta["gridDimensions"], work);
+  }
 }
 
 function assertGridDimensionsShape(value: unknown, work: DecoderWork): void {
@@ -602,11 +605,11 @@ function assertDeltaCellShape(value: unknown, label: string, work: DecoderWork):
   assertNonNegativeInteger(cell["revision"], `${label}.revision`, work);
 }
 
-function assertDeltaEntityShape(value: unknown, label: string, entityIdField: string, work: DecoderWork): void {
+function assertDeltaEntityShape(value: unknown, label: string, entityIdField: string, stateValidator: (value: unknown, label: string, work: DecoderWork) => void, work: DecoderWork): void {
   const entity = assertReplicaObject(value, label, new Set([entityIdField, "state"]), work);
   assertString(entity[entityIdField], `${label}.${entityIdField}`, work, false);
   if (entity["state"] !== null) {
-    assertPlayerStateShape(entity["state"], `${label}.state`, work);
+    stateValidator(entity["state"], `${label}.state`, work);
   }
 }
 

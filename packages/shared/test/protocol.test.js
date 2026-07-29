@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  computeWorldChecksum,
   createDefaultWorldState,
   createPlayerId,
   createWorldDelta,
@@ -88,6 +89,63 @@ test("wraps serialization failures and validates literal unions with stable prot
     assert.equal(error.code, "malformed_message");
     return true;
   });
+});
+
+test("accepts placement provenance and optional delta grid dimensions", () => {
+  const fixture = createProtocolFixture();
+  const placementSnapshot = structuredClone(fixture.snapshot);
+  placementSnapshot.worldState.fallingObjects = {
+    object_falling_one: {
+      id: "object_falling_one",
+      materialId: MaterialId.Clock,
+      x: 0,
+      y: 0,
+      restY: 0,
+      vy: 0,
+      offsets: [[0, 0]],
+      provenance: {
+        kind: "placement",
+        actorId: fixture.playerId,
+        commandId: "command_1",
+        sourceSlot: 0,
+        materialId: MaterialId.Clock,
+        amount: 1,
+      },
+    },
+  };
+  placementSnapshot.checksum = computeWorldChecksum(placementSnapshot);
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "snapshot",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 2,
+    snapshot: placementSnapshot,
+  }));
+
+  const fallingObjectDelta = structuredClone(fixture.delta);
+  fallingObjectDelta.fallingObjects = [{
+    objectId: "object_falling_one",
+    state: {
+      id: "object_falling_one",
+      materialId: MaterialId.Clock,
+      x: 0,
+      y: 0,
+      restY: 0,
+      vy: 0,
+      offsets: [[0, 0]],
+      provenance: { kind: "legacy" },
+    },
+  }];
+  delete fallingObjectDelta.gridDimensions;
+  assert.doesNotThrow(() => decodeProtocolMessage({
+    kind: "delta",
+    protocolVersion: PROTOCOL_VERSION,
+    worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+    worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+    streamSequence: 3,
+    delta: fallingObjectDelta,
+  }));
 });
 
 test("round-trips every protocol message variant", () => {

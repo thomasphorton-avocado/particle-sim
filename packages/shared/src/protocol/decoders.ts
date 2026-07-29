@@ -478,11 +478,15 @@ function assertHotbarShape(value: unknown, label: string, work: DecoderWork): vo
     throw new ProtocolCodecError("malformed_message", `${label} must have exactly 10 entries`);
   }
   for (let index = 0; index < hotbar.length; index += 1) {
-    const entry = hotbar[index];
-    if (entry === null) {
+    const entryValue = hotbar[index];
+    if (entryValue === null) {
       continue;
     }
-    const kind = assertLiteralString(entry && typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>)["kind"] : undefined, `${label}[${index}].kind`, work, new Set(["empty", "pickaxe", "material"]));
+    if (typeof entryValue !== "object") {
+      throw new ProtocolCodecError("malformed_message", `${label}[${index}] must be an object or null`);
+    }
+    const entry = entryValue as Record<string, unknown>;
+    const kind = assertLiteralString(entry["kind"], `${label}[${index}].kind`, work, new Set(["empty", "pickaxe", "material"]));
     const item = kind === "material"
       ? assertReplicaObject(entry, `${label}[${index}]`, new Set(["kind", "materialId", "count"]), work)
       : assertReplicaObject(entry, `${label}[${index}]`, new Set(["kind"]), work);

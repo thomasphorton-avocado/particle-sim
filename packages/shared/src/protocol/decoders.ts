@@ -1,5 +1,5 @@
 import { parseGameplayCommand } from "../commands.js";
-import { parseObjectId, parsePlayerId, parseRoomId } from "../ids.js";
+import { parseCommandId, parseObjectId, parsePlayerId, parseRoomId } from "../ids.js";
 import { decodeWorldDelta, decodeWorldSnapshot, WORLD_SNAPSHOT_SCHEMA_VERSION } from "../replication.js";
 import { WORLD_STATE_SCHEMA_VERSION } from "../serialization.js";
 import { MAX_BATCH_COMMANDS, MAX_CELL_DELTAS, MAX_DECODER_WORK, MAX_ENTITY_DELTAS, MAX_ID_LENGTH, MAX_INTEGER, MAX_METADATA_ENTRIES, MAX_NESTED_COLLECTION_ITEMS, MAX_OBJECT_FIELDS, MAX_STRING_LENGTH, MIN_INTEGER, MAX_NESTING_DEPTH, PROTOCOL_VERSION } from "./limits.js";
@@ -28,10 +28,16 @@ import type {
   ProtocolJoinRejectCode,
   ProtocolVersionedMessage,
 } from "./types.js";
-
+ 
+const utf8Encoder = new TextEncoder();
+ 
 interface DecoderWork {
   used: number;
   depth: number;
+}
+
+function utf8ByteLength(value: string): number {
+  return utf8Encoder.encode(value).byteLength;
 }
 
 function consumeWork(work: DecoderWork, amount = 1): void {
@@ -57,12 +63,13 @@ function assertPlainObject(value: unknown, label: string, work: DecoderWork): Re
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ProtocolCodecError("malformed_message", `${label} must be an object`);
   }
-  for (const key of Object.keys(value)) {
-    if (key.length > MAX_STRING_LENGTH) {
-      throw new ProtocolCodecError("malformed_message", `${label} contains an oversized key (${key.length})`);
+  const keys = Object.keys(value);
+  for (const key of keys) {
+    if (utf8ByteLength(key) > MAX_STRING_LENGTH) {
+      throw new ProtocolCodecError("malformed_message", `${label} contains an oversized key (${utf8ByteLength(key)} bytes)`);
     }
   }
-  consumeWork(work, 1 + Object.keys(value).length);
+  consumeWork(work, 1 + keys.length);
   return value as Record<string, unknown>;
 }
 
@@ -90,8 +97,9 @@ function assertString(value: unknown, label: string, work: DecoderWork, allowEmp
   if (!allowEmpty && value.length === 0) {
     throw new ProtocolCodecError("malformed_message", `${label} must not be empty`);
   }
-  if (value.length > MAX_STRING_LENGTH) {
-    throw new ProtocolCodecError("malformed_message", `${label} exceeds the ${MAX_STRING_LENGTH} character limit`);
+  const byteLength = utf8ByteLength(value);
+  if (byteLength > MAX_STRING_LENGTH) {
+    throw new ProtocolCodecError("malformed_message", `${label} exceeds the ${MAX_STRING_LENGTH} byte limit`);
   }
   return value;
 }
@@ -160,7 +168,7 @@ function assertSchemaVersion(value: unknown, label: string, work: DecoderWork, e
 
 function assertRoomId(value: unknown, label: string, work: DecoderWork): ReturnType<typeof parseRoomId> {
   const roomIdText = assertString(value, label, work, false);
-  if (roomIdText.length > MAX_ID_LENGTH) {
+  if (utf8ByteLength(roomIdText) > MAX_ID_LENGTH) {
     throw new ProtocolCodecError("invalid_id", `${label} exceeds the ${MAX_ID_LENGTH} byte limit`);
   }
   try {
@@ -172,7 +180,7 @@ function assertRoomId(value: unknown, label: string, work: DecoderWork): ReturnT
 
 function assertPlayerId(value: unknown, label: string, work: DecoderWork): ReturnType<typeof parsePlayerId> {
   const playerIdText = assertString(value, label, work, false);
-  if (playerIdText.length > MAX_ID_LENGTH) {
+  if (utf8ByteLength(playerIdText) > MAX_ID_LENGTH) {
     throw new ProtocolCodecError("invalid_id", `${label} exceeds the ${MAX_ID_LENGTH} byte limit`);
   }
   try {
@@ -184,13 +192,25 @@ function assertPlayerId(value: unknown, label: string, work: DecoderWork): Retur
 
 function assertObjectId(value: unknown, label: string, work: DecoderWork): ReturnType<typeof parseObjectId> {
   const objectIdText = assertString(value, label, work, false);
-  if (objectIdText.length > MAX_ID_LENGTH) {
+  if (utf8ByteLength(objectIdText) > MAX_ID_LENGTH) {
     throw new ProtocolCodecError("invalid_id", `${label} exceeds the ${MAX_ID_LENGTH} byte limit`);
   }
   try {
     return parseObjectId(objectIdText);
   } catch {
     throw new ProtocolCodecError("invalid_id", `${label} must be a valid object id`);
+  }
+}
+
+function assertCommandId(value: unknown, label: string, work: DecoderWork): ReturnType<typeof parseCommandId> {
+  const commandIdText = assertString(value, label, work, false);
+  if (utf8ByteLength(commandIdText) > MAX_ID_LENGTH) {
+    throw new ProtocolCodecError("invalid_id", `${label} exceeds the ${MAX_ID_LENGTH} byte limit`);
+  }
+  try {
+    return parseCommandId(commandIdText);
+  } catch {
+    throw new ProtocolCodecError("invalid_id", `${label} must be a valid command id`);
   }
 }
 
@@ -239,7 +259,8 @@ function wrapReplicaValidation<T>(label: string, fn: () => T): T {
 
 function assertReplicaRecord(value: unknown, label: string, work: DecoderWork): Record<string, unknown> {
   const object = assertPlainObject(value, label, work);
-  if (Object.keys(object).length > MAX_OBJECT_FIELDS) {
+  const keys = Object.keys(object);
+  if (keys.length > MAX_OBJECT_FIELDS) {
     throw new ProtocolCodecError("malformed_message", `${label} exceeds the ${MAX_OBJECT_FIELDS} field limit`);
   }
   return object;
@@ -275,10 +296,11 @@ function assertReplicaArray(value: unknown, label: string, work: DecoderWork, ma
 
 function assertReplicaMap(value: unknown, label: string, work: DecoderWork, maxEntries = MAX_NESTED_COLLECTION_ITEMS, errorCode: ProtocolErrorCode = "malformed_message"): Record<string, unknown> {
   const object = assertReplicaRecord(value, label, work);
-  if (Object.keys(object).length > maxEntries) {
+  const keys = Object.keys(object);
+  if (keys.length > maxEntries) {
     throw new ProtocolCodecError(errorCode, `${label} exceeds the ${maxEntries} entry limit`);
   }
-  consumeWork(work, 1 + Object.keys(object).length);
+  consumeWork(work, 1 + keys.length);
   return object;
 }
 
@@ -542,8 +564,8 @@ function assertFallingProvenanceShape(value: unknown, label: string, work: Decod
   }
   if (kind === "placement") {
     assertAllowedFields(provenance, label, new Set(["kind", "actorId", "commandId", "sourceSlot", "materialId", "amount"]), work);
-    assertString(provenance["actorId"], `${label}.actorId`, work, false);
-    assertString(provenance["commandId"], `${label}.commandId`, work, false);
+    assertPlayerId(provenance["actorId"], `${label}.actorId`, work);
+    assertCommandId(provenance["commandId"], `${label}.commandId`, work);
     assertNonNegativeInteger(provenance["sourceSlot"], `${label}.sourceSlot`, work);
     assertNonNegativeInteger(provenance["materialId"], `${label}.materialId`, work);
     assertNonNegativeInteger(provenance["amount"], `${label}.amount`, work);
@@ -843,10 +865,7 @@ function assertCommandValueBounds(command: ProtocolClientCommand, work: DecoderW
     case "cycle_faucet": {
       assertNonNegativeInteger(gameplayCommand.x, "command.x", work);
       assertNonNegativeInteger(gameplayCommand.y, "command.y", work);
-      assertString(gameplayCommand.objectId, "command.objectId", work, false);
-      if (gameplayCommand.objectId.length > MAX_ID_LENGTH) {
-        throw new ProtocolCodecError("invalid_id", "command.objectId exceeds the maximum supported length");
-      }
+      assertObjectId(gameplayCommand.objectId, "command.objectId", work);
       assertNonNegativeInteger(gameplayCommand.expectedTargetRevision, "command.expectedTargetRevision", work);
       return;
     }

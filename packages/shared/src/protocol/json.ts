@@ -18,6 +18,9 @@ type ProtocolFrameInput = Uint8Array | ArrayBuffer | ArrayBufferView | string;
 
 function toUtf8Bytes(input: ProtocolFrameInput): Uint8Array {
   if (typeof input === "string") {
+    if (input.length > MAX_FRAME_BYTES) {
+      throw new ProtocolCodecError("frame_too_large", `Protocol frame exceeds the ${MAX_FRAME_BYTES} byte limit`);
+    }
     return textEncoder.encode(input);
   }
   if (input instanceof ArrayBuffer) {

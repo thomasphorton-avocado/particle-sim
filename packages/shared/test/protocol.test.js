@@ -553,6 +553,9 @@ test("deterministic fuzz input is rejected or round-tripped safely", () => {
     try {
       const decoded = decodeProtocolMessage(candidate);
       assert.ok(decoded);
+      const reEncoded = encodeProtocolMessage(decoded);
+      const roundTripped = decodeProtocolMessage(reEncoded);
+      assert.deepEqual(roundTripped, decoded);
     } catch (error) {
       assert.ok(error instanceof Error);
     }

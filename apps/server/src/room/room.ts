@@ -211,6 +211,10 @@ export class Room {
     return this.#reconnectTombstoneLimit;
   }
 
+  get commandSequenceMapSize(): number {
+    return this.#commandSequencesByMembership.size;
+  }
+
   get lastPublication(): RoomPublication | null {
     return this.#lastPublication;
   }
@@ -281,7 +285,12 @@ export class Room {
       playerId: reconnecting ? tombstone!.playerId : undefined,
     };
     this.#nextReceiveOrdinal += 1;
-    this.#pendingReservationsBySession.set(request.sessionId, this.#createPendingReservation(ingress, reconnecting ? tombstone : undefined));
+    const pendingReservation = this.#createPendingReservation(ingress, reconnecting ? tombstone : undefined);
+    this.#pendingReservationsBySession.set(request.sessionId, pendingReservation);
+    if (reconnecting && tombstone) {
+      this.#tombstonesBySession.delete(request.sessionId);
+      this.#clearMembershipResidue(tombstone.membershipId);
+    }
     this.#ingressQueue.push(ingress);
     return { accepted: true, membership: this.#membershipSummaryForIngress(ingress) };
   }
@@ -443,6 +452,9 @@ export class Room {
       }
       this.#lastActivityAtMs = this.#clock.nowMs();
       this.publishMembership();
+      this.#queueHook(async () => {
+        await this.#hooks?.onJoined?.(this.#roomId, this.#membershipSummary(membership));
+      });
       return;
     }
     if (this.#activeMembershipCount() >= this.#config.maxCapacity) {
@@ -464,6 +476,9 @@ export class Room {
     }
     this.#lastActivityAtMs = this.#clock.nowMs();
     this.publishMembership();
+    this.#queueHook(async () => {
+      await this.#hooks?.onJoined?.(this.#roomId, this.#membershipSummary(membership));
+    });
   }
 
   private applyLeave(ingress: RoomIngress): void {
@@ -496,6 +511,9 @@ export class Room {
     this.#pruneExpiredTombstones();
     this.#lastActivityAtMs = this.#clock.nowMs();
     this.publishMembership();
+    this.#queueHook(async () => {
+      await this.#hooks?.onLeft?.(this.#roomId, this.#membershipSummary(membership));
+    });
   }
 
   private applyCommand(ingress: RoomIngress): void {
@@ -575,6 +593,17 @@ export class Room {
       playerState,
       nextCommandSequence: fallback?.nextCommandSequence ?? 1,
     };
+  }
+
+  #clearMembershipResidue(membershipId: string): void {
+    const membership = this.#membershipsById.get(membershipId);
+    if (membership) {
+      this.#membershipsBySession.delete(membership.sessionId);
+      this.#pendingReservationsBySession.delete(membership.sessionId);
+      this.#tombstonesBySession.delete(membership.sessionId);
+    }
+    this.#membershipsById.delete(membershipId);
+    this.#commandSequencesByMembership.delete(membershipId);
   }
 
   async #queueHook(callback: () => Promise<void>): Promise<void> {

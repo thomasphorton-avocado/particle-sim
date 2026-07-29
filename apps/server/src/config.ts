@@ -28,9 +28,18 @@ function parseInteger(value: string | undefined, fallback: number, _key: string,
   if (value === undefined || value === "") {
     return fallback;
   }
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < minimum) {
-    throw new ConfigError(`${_key} must be an integer >= ${minimum}`);
+
+  if (value !== value.trim()) {
+    throw new ConfigError(`${_key} must be a canonical integer >= ${minimum}`);
+  }
+
+  if (!/^[+-]?\d+$/.test(value)) {
+    throw new ConfigError(`${_key} must be a canonical integer >= ${minimum}`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+    throw new ConfigError(`${_key} must be a canonical integer >= ${minimum}`);
   }
   return parsed;
 }

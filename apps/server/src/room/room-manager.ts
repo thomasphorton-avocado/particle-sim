@@ -65,6 +65,7 @@ export class RoomManager {
   #timing: RoomTimerAdapter;
   #rooms: Map<string, Room>;
   #nextRoomOrdinal: number;
+  #shutdownPromise: Promise<void> | null;
 
   constructor(config: RoomManagerConfig, dependencies: RoomManagerDependencies = {}) {
     this.#config = config;
@@ -80,6 +81,7 @@ export class RoomManager {
     };
     this.#rooms = new Map();
     this.#nextRoomOrdinal = 1;
+    this.#shutdownPromise = null;
   }
 
   get lifecycle(): ProcessLifecycle {
@@ -130,36 +132,55 @@ export class RoomManager {
     return this.#rooms.get(roomId);
   }
 
-  async shutdown(deadlineMs = 1000): Promise<void> {
-    this.#lifecycle.beginShutdown(this.#clock.nowMs());
-    const closeWait = Promise.allSettled(Array.from(this.#rooms.values()).map((room) => room.beginShutdown("server_shutdown")));
-    this.#rooms.clear();
-
-    if (deadlineMs <= 0) {
-      await closeWait;
-      return;
+  shutdown(deadlineMs = 1000): Promise<void> {
+    if (this.#shutdownPromise) {
+      return this.#shutdownPromise;
     }
 
-    let timedOut = false;
-    let timeoutHandle: unknown | null = null;
-    await new Promise<void>((resolve) => {
-      timeoutHandle = this.#timing.setTimeout(() => {
-        timedOut = true;
-        this.#timing.clearTimeout(timeoutHandle);
-        resolve();
-      }, deadlineMs);
+    this.#shutdownPromise = (async () => {
+      this.#lifecycle.beginShutdown(this.#clock.nowMs());
+      const rooms = Array.from(this.#rooms.values());
+      this.#rooms.clear();
+      const closeWait = Promise.allSettled(rooms.map((room) => room.beginShutdown("server_shutdown")));
 
-      const finish = () => {
-        this.#timing.clearTimeout(timeoutHandle);
-        resolve();
-      };
+      if (deadlineMs <= 0) {
+        const results = await closeWait;
+        const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected").map((result) => result.reason);
+        if (failures.length > 0) {
+          throw new AggregateError(failures, failures.map((failure) => (failure instanceof Error ? failure.message : String(failure))).join("; "));
+        }
+        return;
+      }
 
-      void closeWait.then(finish, finish);
-    });
+      let timedOut = false;
+      let timeoutHandle: unknown | null = null;
+      await new Promise<void>((resolve) => {
+        timeoutHandle = this.#timing.setTimeout(() => {
+          timedOut = true;
+          this.#timing.clearTimeout(timeoutHandle);
+          resolve();
+        }, deadlineMs);
 
-    if (timedOut) {
-      throw new RoomShutdownTimeoutError();
-    }
+        const finish = () => {
+          this.#timing.clearTimeout(timeoutHandle);
+          resolve();
+        };
+
+        void closeWait.then(finish, finish);
+      });
+
+      if (timedOut) {
+        throw new RoomShutdownTimeoutError();
+      }
+
+      const results = await closeWait;
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected").map((result) => result.reason);
+      if (failures.length > 0) {
+        throw new AggregateError(failures, failures.map((failure) => (failure instanceof Error ? failure.message : String(failure))).join("; "));
+      }
+    })();
+
+    return this.#shutdownPromise;
   }
 
   async cleanupIdleRooms(nowMs = this.#clock.nowMs()): Promise<Room[]> {
@@ -170,8 +191,11 @@ export class RoomManager {
     for (const room of Array.from(this.#rooms.values())) {
       if (this.#idleCleanupPolicy(room, nowMs)) {
         idleRooms.push(room);
-        await room.beginShutdown("idle_cleanup");
-        this.#rooms.delete(room.roomId);
+        try {
+          await room.beginShutdown("idle_cleanup");
+        } finally {
+          this.#rooms.delete(room.roomId);
+        }
       }
     }
     return idleRooms;

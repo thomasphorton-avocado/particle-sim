@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createGameplayRandomState, type RoomId } from "@particle-sim/shared";
+import { parseServerConfig } from "../src/config.js";
 import { Room, type RoomConfig, type RoomDependencies } from "../src/room/room.js";
 import { DeadlineScheduler, ManualDeadlineTimerDriver, type Clock } from "../src/room/scheduler.js";
 import { MemoryPublisher, RoomManager, type RoomTimerAdapter } from "../src/room/room-manager.js";
@@ -527,4 +528,247 @@ test("command-ack hook failures stay contained", async () => {
 
   assert.equal(room.activeCommandReceipts.length, 1);
   assert.equal(room.state.tick, 0);
+});
+
+test("reconnect reservations stay pinned past tombstone expiry", async () => {
+  const room = createTestRoom({ maxCapacity: 2, reconnectTimeoutMs: 50 });
+
+  assert.equal(room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const membership = room.room.memberships[0];
+  assert.ok(membership);
+  const playerId = membership!.playerId;
+  room.room.world.players[playerId].x = 99;
+  room.room.world.players[playerId].input.jumpHeld = true;
+  room.room.world.players[playerId].pendingRefunds = { stone: 3 };
+
+  const firstCommand = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: membership!.generation,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(firstCommand.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const leave = room.room.enqueueLeave({
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 3,
+    generation: membership!.generation,
+    membershipId: membership!.membershipId,
+  });
+  assert.equal(leave.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const reconnect = room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1b", connectionOrdinal: 4 });
+  assert.equal(reconnect.accepted, true);
+  room.clock.advance(100);
+  await room.room.flushPendingIngresses();
+
+  const rejoinedMembership = room.room.memberships.find((entry) => entry.sessionId === "one");
+  assert.ok(rejoinedMembership);
+  const restoredPlayer = room.room.world.players[rejoinedMembership!.playerId];
+  assert.equal(restoredPlayer?.x, 99);
+  assert.equal(restoredPlayer?.input.jumpHeld, true);
+  assert.deepEqual(restoredPlayer?.pendingRefunds, { stone: 3 });
+
+  const secondCommand = room.room.enqueueCommand({
+    membershipId: rejoinedMembership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1b",
+    connectionOrdinal: 5,
+    generation: rejoinedMembership!.generation,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(secondCommand.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const receipts = room.room.world.commandLedger.recent as Array<{ actorSequence: number }>;
+  assert.equal(receipts.at(-1)?.actorSequence, 2);
+});
+
+test("room manager shutdown surfaces room close failures as aggregate errors", async () => {
+  const manager = new RoomManager(
+    { maxRooms: 4, minCapacity: 2, maxCapacity: 2, tickHz: 60, maxCatchUpTicks: 2, idleCleanupThresholdMs: 100 },
+    {
+      hooks: {
+        onClosed: async () => {
+          throw new Error("close failed");
+        },
+      },
+    },
+  );
+
+  await manager.createRoom();
+  await assert.rejects(manager.shutdown(5), /close failed/);
+  assert.equal(manager.roomCount, 0);
+});
+
+test("room manager shutdown is idempotent while room hooks are pending", async () => {
+  let resolveHook!: () => void;
+  const pendingHook = new Promise<void>((resolve) => {
+    resolveHook = resolve;
+  });
+  const manager = new RoomManager(
+    { maxRooms: 4, minCapacity: 2, maxCapacity: 2, tickHz: 60, maxCatchUpTicks: 2, idleCleanupThresholdMs: 100 },
+    {
+      hooks: {
+        onClosed: () => pendingHook,
+      },
+    },
+  );
+
+  await manager.createRoom();
+  const first = manager.shutdown(100);
+  const second = manager.shutdown(100);
+  assert.strictEqual(second, first);
+  resolveHook();
+  await first;
+  await second;
+});
+
+test("failed idle cleanup removes the room and frees capacity", async () => {
+  const clock = new FakeClock();
+  const manager = new RoomManager(
+    { maxRooms: 1, minCapacity: 2, maxCapacity: 2, tickHz: 60, maxCatchUpTicks: 2, idleCleanupThresholdMs: 100 },
+    {
+      clock,
+      idleCleanupPolicy: () => true,
+      hooks: {
+        onClosed: async () => {
+          throw new Error("cleanup failed");
+        },
+      },
+    },
+  );
+
+  const room = await manager.createRoom();
+  await assert.rejects(manager.cleanupIdleRooms(clock.nowMs()), /cleanup failed/);
+  assert.equal(manager.roomCount, 0);
+  assert.equal(manager.getRoom(room.roomId), undefined);
+  const recovered = await manager.createRoom();
+  assert.ok(recovered);
+});
+
+test("join and leave hooks run in order and drain on shutdown", async () => {
+  const events: string[] = [];
+  let resolveJoined!: () => void;
+  const joinedBlocked = new Promise<void>((resolve) => {
+    resolveJoined = resolve;
+  });
+  const manualDriver = new ManualDeadlineTimerDriver();
+  const clock = new FakeClock(0, manualDriver);
+  const scheduler = new DeadlineScheduler(clock, 100, 2, manualDriver);
+  const publisher = new TestPublisher();
+  const room = new Room(
+    {
+      roomId: `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+    },
+    {
+      clock,
+      scheduler,
+      publisher,
+      hooks: {
+        onJoined: async () => {
+          events.push("join");
+          await joinedBlocked;
+        },
+        onLeft: async () => {
+          events.push("leave");
+        },
+      },
+    },
+  );
+
+  assert.equal(room.enqueueJoin({ sessionId: "hooked", connectionId: "conn-hook", connectionOrdinal: 1 }).accepted, true);
+  await room.flushPendingIngresses();
+
+  const leave = room.enqueueLeave({
+    sessionId: "hooked",
+    connectionId: "conn-hook",
+    connectionOrdinal: 2,
+    generation: room.memberships[0]!.generation,
+    membershipId: room.memberships[0]!.membershipId,
+  });
+  assert.equal(leave.accepted, true);
+  await room.flushPendingIngresses();
+
+  let closeSettled = false;
+  const closePromise = room.beginShutdown("server_shutdown");
+  void closePromise.then(() => {
+    closeSettled = true;
+  });
+  await Promise.resolve();
+  assert.equal(closeSettled, false);
+  resolveJoined();
+  await closePromise;
+  assert.deepEqual(events, ["join", "leave"]);
+});
+
+test("reconnect churn prunes old command sequence state", async () => {
+  const room = createTestRoom({ maxCapacity: 2 });
+
+  assert.equal(room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const membership = room.room.memberships[0];
+  assert.ok(membership);
+  const leave = room.room.enqueueLeave({
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: membership!.generation,
+    membershipId: membership!.membershipId,
+  });
+  assert.equal(leave.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const rejoin = room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1b", connectionOrdinal: 3 });
+  assert.equal(rejoin.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  assert.equal((room.room as unknown as { commandSequenceMapSize: number }).commandSequenceMapSize, 1);
+});
+
+test("parseServerConfig requires canonical integers and accepts valid boundaries", () => {
+  const baseEnv = { NODE_ENV: "test", HOST: "127.0.0.1", PORT: "3000", MAX_ROOMS: "4", MIN_CAPACITY: "2", MAX_CAPACITY: "4", TICK_HZ: "60", MAX_CATCH_UP_TICKS: "3", SHUTDOWN_GRACE_MS: "2000", IDLE_CLEANUP_THRESHOLD_MS: "30000", RECONNECT_TIMEOUT_MS: "10000", RECONNECT_TOMBSTONE_LIMIT: "8" };
+  const invalidCases = [
+    ["PORT", "1.5"],
+    ["MAX_ROOMS", "2e3"],
+    ["TICK_HZ", "10ms"],
+    ["SHUTDOWN_GRACE_MS", " 2000"],
+    ["MIN_CAPACITY", "-2"],
+  ] as const;
+
+  for (const [key, value] of invalidCases) {
+    assert.throws(() => parseServerConfig({ ...baseEnv, [key]: value }), /canonical integer|must be an integer/i);
+  }
+
+  const config = parseServerConfig({
+    ...baseEnv,
+    PORT: "3001",
+    MAX_ROOMS: "1",
+    MIN_CAPACITY: "2",
+    MAX_CAPACITY: "4",
+    TICK_HZ: "60",
+    MAX_CATCH_UP_TICKS: "0",
+    SHUTDOWN_GRACE_MS: "1",
+    IDLE_CLEANUP_THRESHOLD_MS: "1",
+    RECONNECT_TIMEOUT_MS: "1",
+    RECONNECT_TOMBSTONE_LIMIT: "1",
+  });
+
+  assert.equal(config.port, 3001);
+  assert.equal(config.maxRooms, 1);
+  assert.equal(config.reconnectTimeoutMs, 1);
+  assert.equal(config.reconnectTombstoneLimit, 1);
 });

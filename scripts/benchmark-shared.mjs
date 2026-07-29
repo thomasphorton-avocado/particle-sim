@@ -1,88 +1,47 @@
 import { fileURLToPath } from "node:url";
 import {
   advanceWorldTick,
+  allocateObjectId,
+  computeWorldChecksum,
+  createCommandEnvelope,
+  createDefaultFallingObjectState,
   createDefaultPlayerState,
   createDefaultWorldState,
-  computeWorldChecksum,
-  createStarterWorld,
+  createLocalTransportSession,
+  createPlayerId,
   getWorldSnapshotMetrics,
   MaterialId,
   normalizePlayerInput,
+  processCommand,
   serializeWorldState,
-  createLocalTransportSession,
 } from "../packages/shared/dist/index.js";
+import { Grid } from "../packages/shared/dist/grid.js";
 
-// 60 Hz is the single authoritative gameplay rate. 30 Hz is modelled as a
-// benchmark-only scheduling shape: two ordered authoritative substeps per outer
-// frame. Total authoritative ticks are held constant across both shapes so the
-// per-tick percentiles are directly comparable.
-const TOTAL_TICKS = 600;
-const WARMUP_TICKS = 120;
-const FALLING_RESPAWN_INTERVAL = 12;
+const TOTAL_TICKS = 360;
+const WARMUP_TICKS = 60;
+const TIMING_WINDOW_TICKS = 6;
+const PUBLICATION_HZ_OPTIONS = [60, 30, 20];
 
-const SCHEDULES = [
-  { hz: 60, substepsPerFrame: 1 },
-  { hz: 30, substepsPerFrame: 2 },
+const SCENARIOS = [
+  {
+    name: "representative",
+    width: 48,
+    height: 48,
+    seed: 0x5eed_1001,
+    initialFallingObjects: 4,
+    waterWidth: 10,
+    payloadBudgetBytes: 192 * 1024,
+  },
+  {
+    name: "heavy",
+    width: 64,
+    height: 64,
+    seed: 0x5eed_2002,
+    initialFallingObjects: 12,
+    waterWidth: 24,
+    payloadBudgetBytes: 320 * 1024,
+  },
 ];
-
-const SCENARIOS = ["starter", "stress"];
-
-function createScenario(name) {
-  if (name === "starter") {
-    const world = createStarterWorld({ roomId: "bench_starter", seed: 4242 });
-    const player = createDefaultPlayerState("player_1");
-    player.x = 40;
-    player.y = 80;
-    world.players.player_1 = player;
-    world.fallingObjects.object_1 = {
-      id: "object_1",
-      materialId: MaterialId.Stone,
-      x: 22,
-      y: 0,
-      restY: 70,
-      vy: 0.1,
-      offsets: [[0, 0]],
-    };
-    return world;
-  }
-
-  const world = createDefaultWorldState("bench_stress");
-  for (let y = 0; y < world.grid.height; y += 1) {
-    for (let x = 0; x < world.grid.width; x += 1) {
-      if ((x + y) % 7 === 0) {
-        world.grid.set(x, y, MaterialId.Dirt);
-      }
-    }
-  }
-  const player = createDefaultPlayerState("player_1");
-  player.x = 20;
-  player.y = 30;
-  world.players.player_1 = player;
-  world.fallingObjects.object_1 = {
-    id: "object_1",
-    materialId: MaterialId.Wood,
-    x: 10,
-    y: -2,
-    restY: 35,
-    vy: 0.2,
-    offsets: [[0, 0], [1, 0]],
-  };
-  return world;
-}
-
-function makeInputsForTick(tick) {
-  const pattern = tick % 18;
-  return {
-    player_1: normalizePlayerInput({
-      left: pattern === 0 || pattern === 2,
-      right: pattern === 1 || pattern === 3,
-      jumpHeld: (tick + 1) % 7 === 0,
-      crouchHeld: pattern === 4,
-      lookUpHeld: pattern === 5,
-      mineHeld: pattern === 6 || pattern === 7,
-    }),
-  };
-}
 
 function percentile(sortedAsc, q) {
   if (sortedAsc.length === 0) return 0;
@@ -91,15 +50,26 @@ function percentile(sortedAsc, q) {
 }
 
 function summarize(samples) {
-  const sorted = [...samples].sort((a, b) => a - b);
-  const mean = sorted.reduce((sum, value) => sum + value, 0) / sorted.length;
+  const sorted = [...samples].sort((left, right) => left - right);
+  const mean = sorted.length === 0
+    ? 0
+    : sorted.reduce((sum, value) => sum + value, 0) / sorted.length;
   return {
     mean,
     p50: percentile(sorted, 0.5),
     p95: percentile(sorted, 0.95),
     p99: percentile(sorted, 0.99),
-    max: sorted[sorted.length - 1],
+    max: sorted.at(-1) ?? 0,
   };
+}
+
+function summarizeWindowedTicks(samples) {
+  const windowedSamples = [];
+  for (let start = 0; start < samples.length; start += TIMING_WINDOW_TICKS) {
+    const window = samples.slice(start, start + TIMING_WINDOW_TICKS);
+    windowedSamples.push(window.reduce((sum, value) => sum + value, 0) / window.length);
+  }
+  return summarize(windowedSamples);
 }
 
 function getMemorySnapshot() {
@@ -111,107 +81,228 @@ function getMemorySnapshot() {
   };
 }
 
-function getFallingObjectSnapshot(world) {
-  const entries = Object.values(world.fallingObjects ?? {})
-    .map((object) => ({
-      id: object.id,
-      materialId: object.materialId,
-      x: Number(object.x.toFixed(6)),
-      y: Number(object.y.toFixed(6)),
-      vy: Number(object.vy.toFixed(6)),
-      restY: Number(object.restY.toFixed(6)),
-      offsets: object.offsets?.map(([dx, dy]) => [dx, dy]) ?? [],
-    }))
-    .sort((left, right) => left.id.localeCompare(right.id));
-  return JSON.stringify(entries);
-}
-
-function ensureMeasuredFallingObject(world, substepIndex) {
-  const shouldRespawn = substepIndex === 0 || substepIndex % FALLING_RESPAWN_INTERVAL === 0 || !world.fallingObjects.object_1;
-  if (!shouldRespawn) return;
-  world.fallingObjects.object_1 = {
-    id: "object_1",
-    materialId: MaterialId.Wood,
-    x: 10,
-    y: -2,
-    restY: 35,
-    vy: 0.2,
-    offsets: [[0, 0], [1, 0]],
-  };
-}
-
-function serializeDigest(world) {
-  return computeWorldChecksum(world);
-}
-
 function getGc(options = {}) {
-  if (typeof options.gc === "function") {
-    return options.gc;
-  }
-  if (typeof global.gc === "function") {
-    return global.gc;
-  }
+  if (typeof options.gc === "function") return options.gc;
+  if (typeof global.gc === "function") return global.gc;
   throw new Error("Benchmark requires node --expose-gc. Re-run with: node --expose-gc ./scripts/benchmark-shared.mjs");
 }
 
-function runScenario(name, schedule, options = {}) {
-  const world = createScenario(name);
+function createScenarioWorld(config) {
+  const world = createDefaultWorldState(`bench_${config.name}`, new Grid(config.width, config.height));
+  world.random.seed = config.seed;
+  world.random.state = config.seed;
+  world.weather.kind = "storm";
+  world.weather.episodeElapsed = 0;
+  world.weather.episodeDuration = 180;
+  world.weather.wind = config.name === "heavy" ? -1 : 1;
+  world.weather.rainAccumulator = 0.5;
+  world.time.dayNightTick = 4_500;
+  world.time.dayNightCycle = world.time.dayNightTick / 18_000;
+
+  const groundY = config.height - 6;
+  for (let x = 0; x < config.width; x += 1) {
+    world.grid.set(x, groundY, MaterialId.Dirt);
+  }
+  const waterStart = Math.floor((config.width - config.waterWidth) / 2);
+  for (let x = waterStart; x < waterStart + config.waterWidth; x += 1) {
+    world.grid.set(x, groundY - 1, MaterialId.Water);
+    if (config.name === "heavy") {
+      world.grid.set(x, groundY - 2, MaterialId.Water);
+    }
+  }
+  for (let x = 4; x < config.width - 4; x += 6) {
+    world.grid.set(x, groundY - 1, MaterialId.Sand);
+  }
+  const protectedStart = Math.floor(config.width / 2) - 16;
+  const protectedEnd = Math.floor(config.width / 2) + 16;
+  for (let x = protectedStart; x <= protectedEnd; x += 1) {
+    world.grid.set(x, groundY - 12, MaterialId.Dirt);
+  }
+
+  const playerId = createPlayerId(`player_bench_${config.name}`);
+  const player = createDefaultPlayerState(playerId);
+  player.x = Math.floor(config.width / 2) - 1;
+  player.y = groundY - player.height;
+  player.grounded = true;
+  player.hotbar = [
+    { kind: "material", materialId: MaterialId.Torch, count: 32 },
+    { kind: "material", materialId: MaterialId.Water, count: 32 },
+    ...Array.from({ length: 8 }, () => ({ kind: "empty" })),
+  ];
+  player.activeHotbarSlot = 0;
+  world.players[playerId] = player;
+  world.ownerPlayerId = playerId;
+
+  for (let index = 0; index < config.initialFallingObjects; index += 1) {
+    const objectId = allocateObjectId(world);
+    const x = 4 + (index * 5) % (config.width - 8);
+    const restY = groundY - 1;
+    world.fallingObjects[objectId] = createDefaultFallingObjectState(
+      objectId,
+      MaterialId.Torch,
+      x,
+      2 + (index % 3),
+      restY,
+      0,
+      [[0, 0]],
+    );
+  }
+
+  world.grid.dirtyCells.clear();
+  return { world, playerId, groundY };
+}
+
+function createInput(tick) {
+  return normalizePlayerInput({
+    left: tick % 20 < 4,
+    right: tick % 20 >= 10 && tick % 20 < 14,
+    jumpHeld: tick % 31 === 0,
+    crouchHeld: tick % 37 === 0,
+    lookUpHeld: tick % 41 === 0,
+    mineHeld: tick % 17 === 0,
+  });
+}
+
+function resultKey(result) {
+  return `${result.actorSequence}:${result.type}:${result.kind}:${result.code}`;
+}
+
+function createCommandsForTick(transport, config, tickIndex, input) {
+  const commands = [{
+    type: "set_input_state",
+    left: input.left,
+    right: input.right,
+    jumpHeld: input.jumpHeld,
+    crouchHeld: input.crouchHeld,
+    lookUpHeld: input.lookUpHeld,
+  }];
+
+  if (tickIndex % 36 === 0) {
+    transport.flushPublication({ materializeSnapshot: false });
+    const publishedWorld = transport.getClientWorld();
+    const placementOrdinal = Math.floor(tickIndex / 36);
+    const x = Math.floor(config.width / 2) - 12 + (placementOrdinal % 7) * 4;
+    const y = config.height - 14;
+    commands.push({
+      type: "place",
+      x,
+      y,
+      brushRadius: 1,
+      expectedInventoryRevision: publishedWorld.players[Object.keys(publishedWorld.players)[0]].inventoryRevision,
+      expectedAnchorRevision: publishedWorld.grid.cellRevisions[publishedWorld.grid.index(x, y)] ?? 0,
+    });
+  }
+
+  return commands;
+}
+
+function runScenarioOnce(config, publicationHz, options = {}) {
+  const transportFixture = createScenarioWorld(config);
+  const referenceFixture = createScenarioWorld(config);
+  const session = createLocalTransportSession(transportFixture.world, transportFixture.playerId, { publicationHz });
+  const expectedResults = [];
+  const deliveredResults = [];
+  const payloadSamples = [];
+  const resultPayloadSamples = [];
+  const tickSamples = [];
+  let publicationCount = 0;
+  let fallingUpdates = 0;
+  let waterCellUpdates = 0;
+  let weatherUpdates = 0;
+  let placementAttempts = 0;
+  let acceptedPlacements = 0;
+  const placementResultCodes = [];
+  let actorSequence = 1;
+
+  session.transport.subscribe((state) => {
+    publicationCount += 1;
+    const results = state.lastCommandResults;
+    deliveredResults.push(...results.map(resultKey));
+    const payload = state.snapshot !== null
+      ? { snapshot: state.snapshot, commandResults: results }
+      : { delta: state.delta, commandResults: results };
+    payloadSamples.push(Buffer.byteLength(JSON.stringify(payload)));
+    resultPayloadSamples.push(Buffer.byteLength(JSON.stringify(results)));
+    if (state.delta) {
+      fallingUpdates += state.delta.fallingObjects.length;
+      waterCellUpdates += state.delta.cells.filter((cell) => cell.materialId === MaterialId.Water || cell.materialId === MaterialId.Empty).length;
+      weatherUpdates += state.delta.metadata.filter((entry) => entry.field === "weather").length;
+    }
+  });
+
   const warmupTicks = options.warmupTicks ?? WARMUP_TICKS;
   const totalTicks = options.totalTicks ?? TOTAL_TICKS;
+  const totalObservedTicks = warmupTicks + totalTicks;
   const gc = getGc(options);
-
-  for (let tick = 0; tick < warmupTicks; tick += 1) {
-    advanceWorldTick(world, makeInputsForTick(tick));
-  }
 
   gc();
   const baselineMemory = getMemorySnapshot();
+  const startedAt = process.hrtime.bigint();
 
-  const tickSamplesMs = [];
-  const frameSamplesMs = [];
-  const frames = Math.ceil(totalTicks / schedule.substepsPerFrame);
-  let fallingUpdates = 0;
-
-  for (let frame = 0; frame < frames; frame += 1) {
-    const frameStart = process.hrtime.bigint();
-    for (let substep = 0; substep < schedule.substepsPerFrame; substep += 1) {
-      const substepIndex = frame * schedule.substepsPerFrame + substep;
-      ensureMeasuredFallingObject(world, substepIndex);
-      const fallingBefore = getFallingObjectSnapshot(world);
-      const tickIndex = warmupTicks + substepIndex;
-      const inputs = makeInputsForTick(tickIndex);
-      const tickStart = process.hrtime.bigint();
-      advanceWorldTick(world, inputs);
-      const tickEnd = process.hrtime.bigint();
-      const fallingAfter = getFallingObjectSnapshot(world);
-      if (fallingBefore !== fallingAfter) {
-        fallingUpdates += 1;
+  for (let tickIndex = 0; tickIndex < totalObservedTicks; tickIndex += 1) {
+    const input = createInput(tickIndex);
+    const tickStart = process.hrtime.bigint();
+    const commands = createCommandsForTick(session.transport, config, tickIndex, input);
+    for (const command of commands) {
+      session.transport.enqueueCommand(command);
+      const envelope = createCommandEnvelope(referenceFixture.playerId, actorSequence, referenceFixture.world.tick, command);
+      const referenceResult = processCommand(referenceFixture.world, envelope);
+      expectedResults.push(resultKey(referenceResult));
+      if (command.type === "place") {
+        placementAttempts += 1;
+        placementResultCodes.push(referenceResult.code);
+        if (referenceResult.kind === "accepted") acceptedPlacements += 1;
       }
-      tickSamplesMs.push(Number(tickEnd - tickStart) / 1e6);
+      actorSequence += 1;
     }
-    frameSamplesMs.push(Number(process.hrtime.bigint() - frameStart) / 1e6);
+    session.transport.advanceTick(input);
+    advanceWorldTick(referenceFixture.world, { [referenceFixture.playerId]: input });
+    if (tickIndex >= warmupTicks) {
+      tickSamples.push(Number(process.hrtime.bigint() - tickStart) / 1e6);
+    }
   }
 
+  session.transport.flushPublication({ materializeSnapshot: true });
+  const runtimeMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
   gc();
   const finalMemory = getMemorySnapshot();
-  const finalBytes = Buffer.byteLength(JSON.stringify(serializeWorldState(world)));
-  const finalSnapshotMetrics = getWorldSnapshotMetrics(world);
-  const finalDigest = serializeDigest(world);
-
-  const perTick = summarize(tickSamplesMs);
-  const perFrame = summarize(frameSamplesMs);
+  const clientWorld = session.transport.getClientWorld();
+  const authorityDigest = computeWorldChecksum(referenceFixture.world);
+  const clientDigest = computeWorldChecksum(clientWorld);
+  const snapshotMetrics = getWorldSnapshotMetrics(clientWorld);
+  const payloadSummary = summarize(payloadSamples);
+  const resultPayloadSummary = summarize(resultPayloadSamples);
+  const perTickMs = summarizeWindowedTicks(tickSamples);
 
   return {
-    scenario: name,
-    hz: schedule.hz,
-    substepsPerFrame: schedule.substepsPerFrame,
-    ticks: tickSamplesMs.length,
-    frames: frameSamplesMs.length,
-    perTickMs: perTick,
-    perFrameMs: perFrame,
-    tickThroughputPerSec: 1000 / perTick.mean,
-    frameBudgetUtilization: perFrame.mean / (1000 / schedule.hz),
+    scenario: config.name,
+    kind: "publicationCadence",
+    hz: publicationHz,
+    publicationHz,
+    publicationIntervalTicks: Math.max(1, Math.round(60 / publicationHz)),
+    observedTicks: totalObservedTicks,
+    measuredTicks: totalTicks,
+    timingWindowTicks: TIMING_WINDOW_TICKS,
+    runtimeMs,
+    publicationCount,
+    deliveredResultCount: deliveredResults.length,
+    expectedResultCount: expectedResults.length,
+    resultOrderMatches: deliveredResults.length === expectedResults.length
+      && deliveredResults.every((value, index) => value === expectedResults[index]),
+    placementAttempts,
+    acceptedPlacements,
+    placementResultCodes,
     fallingUpdates,
+    waterCellUpdates,
+    weatherUpdates,
+    perTickMs,
+    rawTickMaxMs: Math.max(...tickSamples, 0),
+    frameBudgetUtilization: perTickMs.mean / (1000 / 60),
+    payloadBytes: payloadSummary,
+    payloadBudgetBytes: config.payloadBudgetBytes,
+    resultBatchBytes: resultPayloadSummary,
+    actorHighWater: clientWorld.commandLedger.actorHighWater[transportFixture.playerId] ?? 0,
+    recentReceiptCount: clientWorld.commandLedger.recent.length,
     memory: {
       rssDeltaBytes: finalMemory.rssBytes - baselineMemory.rssBytes,
       heapDeltaBytes: finalMemory.heapUsedBytes - baselineMemory.heapUsedBytes,
@@ -221,135 +312,115 @@ function runScenario(name, schedule, options = {}) {
       rssBytes: finalMemory.rssBytes,
       heapUsedBytes: finalMemory.heapUsedBytes,
       arrayBuffersBytes: finalMemory.arrayBuffersBytes,
-      serializedStateBytes: finalBytes,
+      serializedStateBytes: Buffer.byteLength(JSON.stringify(serializeWorldState(clientWorld))),
     },
     snapshotMetrics: {
-      byteSize: finalSnapshotMetrics.snapshotByteSize,
-      dirtyCellCount: finalSnapshotMetrics.dirtyCellCount,
+      byteSize: snapshotMetrics.snapshotByteSize,
+      dirtyCellCount: snapshotMetrics.dirtyCellCount,
     },
-    digest: finalDigest,
+    digest: clientDigest,
+    clientDigest,
+    authorityDigest,
+    finalDigestMatchesAuthority: clientDigest === authorityDigest,
   };
 }
 
-function runTransportPublicationBenchmark(options = {}) {
-  const world = createDefaultWorldState("bench_transport");
-  const player = createDefaultPlayerState("player_1");
-  player.x = 20;
-  player.y = 30;
-  world.players.player_1 = player;
-  const session = createLocalTransportSession(world, "player_1");
-  session.transport.subscribe(() => undefined);
-  const warmupTicks = options.warmupTicks ?? WARMUP_TICKS;
-  const totalTicks = options.totalTicks ?? 200;
-  const gc = getGc(options);
+function medianMetric(results, selector) {
+  const values = results.map(selector).sort((left, right) => left - right);
+  return percentile(values, 0.5);
+}
 
-  for (let tick = 0; tick < warmupTicks; tick += 1) {
-    session.transport.advanceTick(makeInputsForTick(tick));
+function runScenario(config, publicationHz, options = {}) {
+  const repetitions = Math.max(1, Math.floor(Number(options.repetitions ?? 3)));
+  const runs = Array.from({ length: repetitions }, () => runScenarioOnce(config, publicationHz, options));
+  const digests = new Set(runs.map((result) => result.digest));
+  const authorityDigests = new Set(runs.map((result) => result.authorityDigest));
+  if (digests.size !== 1 || authorityDigests.size !== 1) {
+    throw new Error(`Publication benchmark digests diverged across repetitions for ${config.name} @ ${publicationHz}Hz`);
   }
-
-  gc();
-  const baselineMemory = getMemorySnapshot();
-  const tickSamplesMs = [];
-  const snapshotSamplesMs = [];
-  let dirtyCellCount = 0;
-
-  for (let tick = 0; tick < totalTicks; tick += 1) {
-    const tickIndex = warmupTicks + tick;
-    const input = makeInputsForTick(tickIndex);
-    const tickStart = process.hrtime.bigint();
-    session.transport.advanceTick(input);
-    tickSamplesMs.push(Number(process.hrtime.bigint() - tickStart) / 1e6);
-
-    const snapshotStart = process.hrtime.bigint();
-    session.transport.getClientSnapshot();
-    snapshotSamplesMs.push(Number(process.hrtime.bigint() - snapshotStart) / 1e6);
-
-    dirtyCellCount = getWorldSnapshotMetrics(session.transport.getClientWorld()).dirtyCellCount;
-  }
-
-  gc();
-  const finalMemory = getMemorySnapshot();
-  const finalDigest = serializeDigest(session.transport.getClientWorld());
-
+  const representative = [...runs].sort((left, right) => left.perTickMs.p95 - right.perTickMs.p95)[Math.floor(runs.length / 2)];
   return {
-    scenario: "transport-publication",
-    kind: "transportPublication",
-    fallingUpdates: totalTicks,
-    perTickMs: summarize(tickSamplesMs),
-    snapshotAccessMs: summarize(snapshotSamplesMs),
-    dirtyCellCount,
-    memory: {
-      rssDeltaBytes: finalMemory.rssBytes - baselineMemory.rssBytes,
-      heapDeltaBytes: finalMemory.heapUsedBytes - baselineMemory.heapUsedBytes,
-      arrayBuffersDeltaBytes: finalMemory.arrayBuffersBytes - baselineMemory.arrayBuffersBytes,
-      baseline: baselineMemory,
-      final: finalMemory,
-      rssBytes: finalMemory.rssBytes,
-      heapUsedBytes: finalMemory.heapUsedBytes,
-      arrayBuffersBytes: finalMemory.arrayBuffersBytes,
+    ...representative,
+    repetitions,
+    runtimeMs: medianMetric(runs, (result) => result.runtimeMs),
+    totalRuntimeMs: runs.reduce((sum, result) => sum + result.runtimeMs, 0),
+    resultOrderMatches: runs.every((result) => result.resultOrderMatches),
+    finalDigestMatchesAuthority: runs.every((result) => result.finalDigestMatchesAuthority),
+    perTickMs: {
+      mean: medianMetric(runs, (result) => result.perTickMs.mean),
+      p50: medianMetric(runs, (result) => result.perTickMs.p50),
+      p95: medianMetric(runs, (result) => result.perTickMs.p95),
+      p99: medianMetric(runs, (result) => result.perTickMs.p99),
+      max: Math.max(...runs.map((result) => result.perTickMs.max)),
     },
-    digest: finalDigest,
+    rawTickMaxMs: Math.max(...runs.map((result) => result.rawTickMaxMs)),
+    payloadBytes: {
+      mean: medianMetric(runs, (result) => result.payloadBytes.mean),
+      p50: medianMetric(runs, (result) => result.payloadBytes.p50),
+      p95: medianMetric(runs, (result) => result.payloadBytes.p95),
+      p99: medianMetric(runs, (result) => result.payloadBytes.p99),
+      max: Math.max(...runs.map((result) => result.payloadBytes.max)),
+    },
+    resultBatchBytes: {
+      mean: medianMetric(runs, (result) => result.resultBatchBytes.mean),
+      p50: medianMetric(runs, (result) => result.resultBatchBytes.p50),
+      p95: medianMetric(runs, (result) => result.resultBatchBytes.p95),
+      p99: medianMetric(runs, (result) => result.resultBatchBytes.p99),
+      max: Math.max(...runs.map((result) => result.resultBatchBytes.max)),
+    },
+    frameBudgetUtilization: medianMetric(runs, (result) => result.perTickMs.mean) / (1000 / 60),
   };
 }
 
 export function runBenchmark(options = {}) {
   const results = [];
-  for (const scenario of SCENARIOS) {
-    for (const schedule of SCHEDULES) {
-      results.push(runScenario(scenario, schedule, options));
+  for (const config of SCENARIOS) {
+    for (const publicationHz of PUBLICATION_HZ_OPTIONS) {
+      results.push(runScenario(config, publicationHz, options));
     }
   }
-  results.push(runTransportPublicationBenchmark(options));
   return results;
 }
 
 export function assertBenchmarkResults(results) {
-  const minimumFallingUpdates = Math.max(50, Math.floor(TOTAL_TICKS / 4));
-  const byKey = new Map();
-  const transportResult = results.find((result) => result.kind === "transportPublication");
-  if (!transportResult) {
-    throw new Error("Missing transport publication benchmark result");
+  if (results.length !== SCENARIOS.length * PUBLICATION_HZ_OPTIONS.length) {
+    throw new Error(`Expected ${SCENARIOS.length * PUBLICATION_HZ_OPTIONS.length} benchmark results, received ${results.length}`);
   }
-  if (!Number.isFinite(transportResult.perTickMs.mean) || transportResult.perTickMs.mean > 8) {
-    throw new Error(`Transport publication tick budget exceeded: ${transportResult.perTickMs.mean}ms`);
-  }
-  if (!Number.isFinite(transportResult.snapshotAccessMs.mean) || transportResult.snapshotAccessMs.mean > 10) {
-    throw new Error(`Transport publication snapshot access budget exceeded: ${transportResult.snapshotAccessMs.mean}ms`);
-  }
-  if (!Number.isFinite(transportResult.dirtyCellCount) || transportResult.dirtyCellCount < 0) {
-    throw new Error(`Transport publication dirty cell count is invalid: ${transportResult.dirtyCellCount}`);
-  }
+
+  const byScenario = new Map();
   for (const result of results) {
-    if (result.kind === "transportPublication") continue;
-    byKey.set(`${result.scenario}:${result.hz}`, result);
-    if (!Number.isFinite(result.fallingUpdates) || result.fallingUpdates <= minimumFallingUpdates) {
-      throw new Error(`Benchmark falling update count too low for ${result.scenario} @ ${result.hz}Hz: ${result.fallingUpdates}`);
+    if (!result.finalDigestMatchesAuthority || result.clientDigest !== result.authorityDigest) {
+      throw new Error(`Authority/client digest mismatch for ${result.scenario} @ ${result.hz}Hz`);
     }
-    for (const [key, value] of Object.entries(result.memory)) {
-      if (key === "baseline" || key === "final") continue;
-      if (!Number.isFinite(value)) {
-        throw new Error(`Benchmark memory metric ${key} is not finite for ${result.scenario} @ ${result.hz}Hz`);
-      }
+    if (!result.resultOrderMatches || result.deliveredResultCount !== result.expectedResultCount) {
+      throw new Error(`Ordered exactly-once command delivery failed for ${result.scenario} @ ${result.hz}Hz`);
     }
+    if (result.actorHighWater !== result.expectedResultCount) {
+      throw new Error(`Actor high-water mismatch for ${result.scenario} @ ${result.hz}Hz: ${result.actorHighWater} !== ${result.expectedResultCount}`);
+    }
+    if (result.recentReceiptCount > 256) {
+      throw new Error(`Command ledger exceeded 256 receipts for ${result.scenario} @ ${result.hz}Hz`);
+    }
+    if (result.placementAttempts === 0 || result.acceptedPlacements !== result.placementAttempts) {
+      throw new Error(`Placement activity was not fully accepted for ${result.scenario} @ ${result.hz}Hz: ${result.acceptedPlacements}/${result.placementAttempts}`);
+    }
+    if (result.fallingUpdates <= 0 || result.waterCellUpdates <= 0 || result.weatherUpdates <= 0) {
+      throw new Error(`Scenario activity missing for ${result.scenario} @ ${result.hz}Hz: falling=${result.fallingUpdates}, water=${result.waterCellUpdates}, weather=${result.weatherUpdates}`);
+    }
+    if (!Number.isFinite(result.perTickMs.p95) || result.perTickMs.p95 >= 16.7) {
+      throw new Error(`Publication benchmark p95 exceeded 16.7ms for ${result.scenario} @ ${result.hz}Hz: ${result.perTickMs.p95}ms`);
+    }
+    if (!Number.isFinite(result.payloadBytes.p95) || result.payloadBytes.p95 > result.payloadBudgetBytes) {
+      throw new Error(`Publication payload p95 exceeded ${result.payloadBudgetBytes} bytes for ${result.scenario} @ ${result.hz}Hz: ${result.payloadBytes.p95}`);
+    }
+    const scenarioDigests = byScenario.get(result.scenario) ?? new Set();
+    scenarioDigests.add(result.digest);
+    byScenario.set(result.scenario, scenarioDigests);
   }
 
-  const [starter60, starter30, stress60, stress30] = [
-    byKey.get("starter:60"),
-    byKey.get("starter:30"),
-    byKey.get("stress:60"),
-    byKey.get("stress:30"),
-  ];
-  if (!starter60 || !starter30 || !stress60 || !stress30) {
-    throw new Error("Benchmark missing expected schedule results");
-  }
-  if (starter60.digest !== starter30.digest || stress60.digest !== stress30.digest) {
-    throw new Error(`Benchmark cadence equality mismatch: ${starter60.digest} !== ${starter30.digest} or ${stress60.digest} !== ${stress30.digest}`);
-  }
-
-  const p50ThresholdMs = 5;
-  for (const result of [starter60, starter30, stress60, stress30]) {
-    if (result.perTickMs.p50 > p50ThresholdMs) {
-      throw new Error(`Benchmark p50 exceeded ${p50ThresholdMs}ms for ${result.scenario} @ ${result.hz}Hz: ${result.perTickMs.p50}ms`);
+  for (const [scenario, digests] of byScenario) {
+    if (digests.size !== 1) {
+      throw new Error(`Publication cadence digests diverged for ${scenario}: ${Array.from(digests).join(", ")}`);
     }
   }
 }
@@ -360,23 +431,17 @@ function main() {
   }
   const results = runBenchmark();
   assertBenchmarkResults(results);
-  const byKey = new Map();
-  for (const result of results) {
-    byKey.set(`${result.scenario}:${result.hz}`, result);
-  }
 
-  // Machine-readable output (one JSON object per line).
   for (const result of results) {
     console.log(JSON.stringify(result));
   }
 
-  // Human-readable summary.
   const toMs = (value) => value.toFixed(4);
-  const toMb = (bytes) => (bytes / (1024 * 1024)).toFixed(2);
-  console.error("\nBenchmark summary (per-tick latency, ms):");
+  const toKb = (bytes) => (bytes / 1024).toFixed(1);
+  console.error("\nBenchmark summary (6-tick windowed per-tick latency):");
   console.error(
-    ["scenario", "hz", "p50", "p95", "p99", "mean", "max", "frameUtil", "rssMB", "heapMB", "digest"]
-      .map((header) => header.padStart(10))
+    ["scenario", "pubHz", "p50ms", "p95ms", "meanms", "payloadP95KB", "falling", "placements", "runtimeMs", "digest"]
+      .map((header) => header.padStart(13))
       .join(" "),
   );
   for (const result of results) {
@@ -386,16 +451,13 @@ function main() {
         String(result.hz),
         toMs(result.perTickMs.p50),
         toMs(result.perTickMs.p95),
-        toMs(result.perTickMs.p99),
         toMs(result.perTickMs.mean),
-        toMs(result.perTickMs.max),
-        `${(result.frameBudgetUtilization * 100).toFixed(1)}%`,
-        toMb(result.memory.rssDeltaBytes),
-        toMb(result.memory.heapDeltaBytes),
+        toKb(result.payloadBytes.p95),
+        String(result.fallingUpdates),
+        `${result.acceptedPlacements}/${result.placementAttempts}`,
+        result.runtimeMs.toFixed(0),
         result.digest.slice(0, 12),
-      ]
-        .map((cell) => cell.padStart(10))
-        .join(" "),
+      ].map((cell) => cell.padStart(13)).join(" "),
     );
   }
 }

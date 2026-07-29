@@ -224,7 +224,7 @@ export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number,
 }
 
 /** Wires pointer events on `canvas` to paint or stamp the selected material into `grid`. */
-export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSize: number, editor?: LocalTransportEditorCapability): void {
+export function attachInput(canvas: HTMLCanvasElement, cellSize: number, editor?: LocalTransportEditorCapability): void {
   let painting = false;
   let lastGridPos: { x: number; y: number } | null = null;
 
@@ -252,7 +252,7 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
     if (!withinPlacementRange(gx, gy)) return;
     const r = state.brushSize;
     const material = state.selectedMaterial;
-    mutateWorldWithEditor(editor, world, (targetWorld) => {
+    mutateWorldWithEditor(editor, state.world, (targetWorld) => {
       const grid = targetWorld.grid;
       for (let dy = -r; dy <= r; dy++) {
         for (let dx = -r; dx <= r; dx++) {
@@ -290,7 +290,7 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
     const materialId = state.selectedMaterial;
     const material = MATERIALS[materialId];
     if (material.placement.kind !== "object") return;
-    mutateWorldWithEditor(editor, world, (targetWorld) => {
+    mutateWorldWithEditor(editor, state.world, (targetWorld) => {
       const grid = targetWorld.grid;
       const offsets = getObjectOffsets(materialId);
       if (!canPlaceObjectFootprint(targetWorld, materialId, gx, gy, offsets)) return;
@@ -309,20 +309,21 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
   /** Flood-fill all connected faucet cells and cycle their flow state. */
   const cycleFaucet = (gx: number, gy: number): boolean => {
     if (state.toolMode === "play") {
-      const objectId = world.grid.getObjectId(gx, gy);
+      const currentWorld = state.world;
+      const objectId = currentWorld.grid.getObjectId(gx, gy);
       if (!objectId) return false;
-      enqueuePlayCommand(world, {
+      enqueuePlayCommand(currentWorld, {
         type: "cycle_faucet",
         x: gx,
         y: gy,
         objectId,
-        expectedTargetRevision: world.grid.cellRevisions[world.grid.index(gx, gy)] ?? 0,
+        expectedTargetRevision: currentWorld.grid.cellRevisions[currentWorld.grid.index(gx, gy)] ?? 0,
       });
       return true;
     }
 
     let handled = false;
-    mutateWorldWithEditor(editor, world, (targetWorld) => {
+    mutateWorldWithEditor(editor, state.world, (targetWorld) => {
       const grid = targetWorld.grid;
       if (grid.get(gx, gy) !== MaterialId.Faucet) return;
       const visited = new Set<number>();
@@ -360,7 +361,7 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
     // Clicking a faucet cycles its flow state
     if (cycleFaucet(pos.x, pos.y)) return;
     // Clicking a bloomed flower harvests it instead of painting
-    if (handleHarvestInputAt(world, pos.x, pos.y, editor)) {
+    if (handleHarvestInputAt(state.world, pos.x, pos.y, editor)) {
       return;
     }
     if (state.toolMode === "play" && hasPickaxeEquipped()) {
@@ -370,7 +371,7 @@ export function attachInput(canvas: HTMLCanvasElement, world: WorldState, cellSi
     }
     // Place from hotbar material slot (works in play mode)
     if (state.toolMode === "play" && getActiveHotbarMaterial()) {
-      placeHotbarMaterialAt(world, pos.x, pos.y, editor);
+      placeHotbarMaterialAt(state.world, pos.x, pos.y, editor);
       painting = false;
       lastGridPos = null;
       return;

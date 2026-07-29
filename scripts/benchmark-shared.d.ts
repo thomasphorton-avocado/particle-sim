@@ -1,23 +1,35 @@
 export interface BenchmarkResult {
-  scenario: string;
-  hz: number;
-  substepsPerFrame: number;
-  ticks: number;
-  frames: number;
+  scenario: "representative" | "heavy";
+  kind: "publicationCadence";
+  hz: 60 | 30 | 20;
+  publicationHz: 60 | 30 | 20;
+  observedTicks: number;
+  measuredTicks: number;
+  timingWindowTicks: number;
+  repetitions: number;
+  runtimeMs: number;
+  totalRuntimeMs: number;
+  publicationCount: number;
+  deliveredResultCount: number;
+  expectedResultCount: number;
+  resultOrderMatches: boolean;
+  placementAttempts: number;
+  acceptedPlacements: number;
+  fallingUpdates: number;
+  waterCellUpdates: number;
+  weatherUpdates: number;
   perTickMs: { mean: number; p50: number; p95: number; p99: number; max: number };
-  perFrameMs: { mean: number; p50: number; p95: number; p99: number; max: number };
-  tickThroughputPerSec: number;
+  rawTickMaxMs: number;
   frameBudgetUtilization: number;
-  memory: {
-    rssDeltaBytes: number;
-    heapDeltaBytes: number;
-    arrayBuffersDeltaBytes: number;
-    rssBytes: number;
-    heapUsedBytes: number;
-    arrayBuffersBytes: number;
-    serializedStateBytes: number;
-  };
+  payloadBytes: { mean: number; p50: number; p95: number; p99: number; max: number };
+  payloadBudgetBytes: number;
+  actorHighWater: number;
+  recentReceiptCount: number;
   digest: string;
+  clientDigest: string;
+  authorityDigest: string;
+  finalDigestMatchesAuthority: boolean;
 }
 
-export function runBenchmark(options?: { warmupTicks?: number; totalTicks?: number }): BenchmarkResult[];
+export function runBenchmark(options?: { warmupTicks?: number; totalTicks?: number; repetitions?: number; gc?: () => void }): BenchmarkResult[];
+export function assertBenchmarkResults(results: BenchmarkResult[]): void;

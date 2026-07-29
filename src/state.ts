@@ -9,8 +9,11 @@ import {
   createDefaultWorldState,
   createPlayerId,
   removeFromHotbarSlot as removeFromHotbarSlotHelper,
+  type PauseWorldCommand,
   type PlayerId,
   type PlayerState,
+  type ResumeWorldCommand,
+  type SetTimePresetCommand,
   type WorldState,
 } from "@particle-sim/shared";
 import type { CharacterRuntime } from "./character";
@@ -63,7 +66,8 @@ function createInitialWorld(): WorldState {
 
 const initialLocalPlayerId = createPlayerId("player_1");
 const initialWorld = createInitialWorld();
-const initialSession = createLocalTransportSession(initialWorld, initialLocalPlayerId);
+const PRODUCTION_PUBLICATION_HZ = 20;
+const initialSession = createLocalTransportSession(initialWorld, initialLocalPlayerId, { publicationHz: PRODUCTION_PUBLICATION_HZ });
 let transport = initialSession.transport;
 let currentWorld: WorldState = transport.getClientWorld();
 let unsubscribeTransport: (() => void) | null = null;
@@ -119,11 +123,29 @@ export function getLocalPlayer(): PlayerState {
   return getLocalPlayerState();
 }
 
+function enqueueRevisionGuardedOwnerCommand(command: { type: "pause_world" | "resume_world" | "set_time_preset"; preset?: DayNightPreset }): void {
+  // Synchronize the latest published client boundary before composing a revision-guarded
+  // owner command. This keeps UI/state callers aligned with the current publication cadence
+  // without exposing any authority-only revision accessors.
+  state.transport.flushPublication({ materializeSnapshot: true });
+  const publishedRevision = state.world.worldRevision;
+  const guardedCommand = {
+   ...command,
+   expectedWorldRevision: publishedRevision,
+  } as PauseWorldCommand | ResumeWorldCommand | SetTimePresetCommand;
+  state.transport.enqueueCommand(guardedCommand);
+}
+
+export function setPauseWorld(paused: boolean): void {
+  enqueueRevisionGuardedOwnerCommand({
+   type: paused ? "pause_world" : "resume_world",
+  });
+}
+
 export function setDayNightPreset(preset: DayNightPreset): void {
-  state.transport.enqueueCommand({
+  enqueueRevisionGuardedOwnerCommand({
    type: "set_time_preset",
    preset,
-   expectedWorldRevision: state.world.worldRevision,
   });
 }
 

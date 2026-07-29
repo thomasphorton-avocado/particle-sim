@@ -64,4 +64,32 @@ describe("ui clear action", () => {
 
     expect(session.transport.getClientWorld().grid.get(1, 1)).toBe(MaterialId.Dirt);
   });
+
+  it("queues pause commands using a fresh published revision after unpublished ticks", () => {
+    const playerId = createPlayerId("player_ui_pause");
+    const world = createDefaultWorldState("ui_pause_room");
+    world.players[playerId] = createDefaultPlayerState(playerId);
+
+    const session = createLocalTransportSession(world, playerId, { publicationHz: 20 });
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "play";
+
+    session.transport.flushPublication({ materializeSnapshot: true });
+    for (let tick = 0; tick < 2; tick += 1) {
+      session.transport.advanceTick();
+    }
+
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    buildUi(root, session.editor);
+
+    const pauseButton = Array.from(root.querySelectorAll("button")).find((button) => button.textContent === "Pause");
+    expect(pauseButton).toBeTruthy();
+    pauseButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    session.transport.advanceTick();
+
+    expect(session.transport.getClientWorld().paused).toBe(true);
+    expect(session.transport.getLastCommandResults().at(-1)?.type).toBe("pause_world");
+  });
 });

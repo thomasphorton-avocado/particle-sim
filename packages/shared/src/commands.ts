@@ -331,12 +331,12 @@ function createCommandResult(planOrRejection: ValidatedCommandPlan | CommandReje
     authorityOrder: planOrRejection.authorityOrder,
     issuedTick: planOrRejection.envelope.issuedTick,
     processedTick: world.tick,
-    beforeWorldRevision: world.worldRevision,
-    afterWorldRevision: world.worldRevision,
+    beforeWorldRevision: getAuthorityRevision(world),
+    afterWorldRevision: getAuthorityRevision(world),
     beforeInventoryRevision: actor?.inventoryRevision ?? 0,
     afterInventoryRevision: actor?.inventoryRevision ?? 0,
-    beforeTargetRevision: world.worldRevision,
-    afterTargetRevision: world.worldRevision,
+    beforeTargetRevision: getAuthorityRevision(world),
+    afterTargetRevision: getAuthorityRevision(world),
     acceptedEffect: null,
   };
 }
@@ -716,7 +716,7 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
       hotbar: nextHotbar,
       inventoryRevision: actor.inventoryRevision + 1,
     };
-    return { gridWrites, fallingObjects, playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 1, acceptedEffect: "inventory", resultCode: "accepted" };
+    return { gridWrites, fallingObjects, playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 0, acceptedEffect: "inventory", resultCode: "accepted" };
   }
 
   const candidates: Array<[number, number]> = [];
@@ -745,7 +745,7 @@ function buildPlacementPlan(world: WorldState, actor: PlayerState, commandId: Co
     hotbar: nextHotbar,
     inventoryRevision: actor.inventoryRevision + 1,
   };
-  return { gridWrites, fallingObjects: [], playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 1, acceptedEffect: "inventory", resultCode: "accepted" };
+  return { gridWrites, fallingObjects: [], playerPatch, inventoryRevisionDelta: 1, worldRevisionDelta: 0, acceptedEffect: "inventory", resultCode: "accepted" };
 }
 
 function createPlan(envelope: CommandEnvelope, resultCode: CommandResultCode, accepted: boolean, beforeWorldRevision: number, afterWorldRevision: number, beforeInventoryRevision: number, afterInventoryRevision: number, beforeTargetRevision: number, afterTargetRevision: number, acceptedEffect: string | null, playerPatch?: CommandPlayerPatch, gridWrites: CommandGridWrite[] = [], fallingObjects: CommandFallingObjectCreate[] = [], paused?: boolean, timeTick?: number, worldRevisionDelta = 0, inventoryRevisionDelta = 0, targetRevisionDelta = 0): ValidatedCommandPlan {
@@ -785,6 +785,14 @@ function clonePlayerStateForPatch(player: PlayerState): CommandPlayerPatch {
   };
 }
 
+function getAuthorityRevision(world: WorldState): number {
+  return world.worldRevision;
+}
+
+function isGameplayCommandAllowedWhilePaused(type: GameplayCommandType): boolean {
+  return type === "resume_world";
+}
+
 export function validateCommand(world: WorldState, envelopeInput: unknown): ValidatedCommandPlan | CommandRejection {
   const envelope = parseEnvelope(envelopeInput);
   if (!envelope) {
@@ -817,14 +825,14 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
     return createRejection(envelope, "unknown_actor", false);
   }
 
-  if (world.paused && envelope.command.type !== "pause_world" && envelope.command.type !== "resume_world") {
-    return createRejection(envelope, "paused", true);
-  }
-
-  const beforeWorldRevision = world.worldRevision;
+  const beforeWorldRevision = getAuthorityRevision(world);
   const beforeInventoryRevision = actor.inventoryRevision;
-  const beforeTargetRevision = world.worldRevision;
+  const beforeTargetRevision = getAuthorityRevision(world);
   let playerPatch: CommandPlayerPatch | undefined;
+
+  if (world.paused && !isGameplayCommandAllowedWhilePaused(envelope.command.type)) {
+    return createRejection(envelope, "paused", false);
+  }
   let gridWrites: CommandGridWrite[] = [];
   let fallingObjects: CommandFallingObjectCreate[] = [];
   let paused: boolean | undefined;
@@ -919,7 +927,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
       gridWrites = harvestPlan.cells.map(([x, y]) => ({ x, y, id: MaterialId.Empty, shade: 0, auxiliary: 0, objectId: null }));
       acceptedEffect = "inventory";
       inventoryRevisionDelta = 1;
-      worldRevisionDelta = 1;
+      worldRevisionDelta = 0;
       break;
     }
     case "cycle_faucet": {
@@ -965,7 +973,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
       }
       gridWrites = writes;
       acceptedEffect = "target";
-      worldRevisionDelta = 1;
+      worldRevisionDelta = 0;
       break;
     }
     case "pause_world": {
@@ -977,7 +985,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
         resultCode = "already_state";
         break;
       }
-      if (envelope.command.expectedWorldRevision !== world.worldRevision) {
+      if (envelope.command.expectedWorldRevision !== getAuthorityRevision(world)) {
         resultCode = "revision";
         break;
       }
@@ -995,7 +1003,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
         resultCode = "already_state";
         break;
       }
-      if (envelope.command.expectedWorldRevision !== world.worldRevision) {
+      if (envelope.command.expectedWorldRevision !== getAuthorityRevision(world)) {
         resultCode = "revision";
         break;
       }
@@ -1009,7 +1017,7 @@ export function validateCommand(world: WorldState, envelopeInput: unknown): Vali
         resultCode = "not_owner";
         break;
       }
-      if (envelope.command.expectedWorldRevision !== world.worldRevision) {
+      if (envelope.command.expectedWorldRevision !== getAuthorityRevision(world)) {
         resultCode = "revision";
         break;
       }
@@ -1114,9 +1122,13 @@ export function processCommand(world: WorldState, envelopeInput: unknown): Comma
   const validation = validateCommand(world, envelope);
   if (validation.kind === "rejection") {
     const authorityOrder = validation.admitted ? world.nextAuthorityOrder : null;
+    const shouldAdvanceActorHighWater = validation.code !== "future_tick" && validation.code !== "stale" && validation.code !== "conflict" && validation.code !== "invalid_command";
     if (authorityOrder !== null) {
       validation.authorityOrder = authorityOrder;
       world.nextAuthorityOrder = authorityOrder + 1;
+      world.commandLedger.actorHighWater[envelope.actorId] = envelope.actorSequence;
+    } else if (shouldAdvanceActorHighWater) {
+      validation.authorityOrder = null;
       world.commandLedger.actorHighWater[envelope.actorId] = envelope.actorSequence;
     }
     const result = createCommandResult(validation, world);

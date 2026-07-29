@@ -139,6 +139,26 @@ test("applyWorldDeltaToSnapshotState rejects malformed deltas without mutating t
   assert.deepEqual(serializeWorldState(world), beforeState);
 });
 
+test("non-advancing deltas reject state changes outside command-ledger metadata", () => {
+  const world = createDefaultWorldState("room_non_advancing_delta");
+  const snapshot = createWorldSnapshot(world);
+  const invalidDelta = {
+    version: 1,
+    baseRevision: snapshot.worldRevision,
+    targetRevision: snapshot.worldRevision,
+    gridDimensions: { width: world.grid.width, height: world.grid.height },
+    cells: [{ index: 0, materialId: MaterialId.Water, shade: 0, auxiliary: 0, objectId: null, revision: 1 }],
+    players: [],
+    fallingObjects: [],
+    metadata: [],
+  };
+
+  assert.throws(
+    () => applyWorldDeltaToSnapshot(snapshot, invalidDelta),
+    /non-advancing world deltas may only update commandLedger metadata/,
+  );
+});
+
 test("dirty tracking is independent from simulation updated flags", () => {
   const world = createDefaultWorldState("room_dirty");
   assert.equal(world.grid.dirtyCells.size, 0);
@@ -192,6 +212,7 @@ test("world deltas clone nested authority values before and after application", 
   assert.notStrictEqual(timeDelta?.value, world.time);
   assert.notStrictEqual(randomDelta?.value, world.random);
   assert.notStrictEqual(commandLedgerDelta?.value, world.commandLedger);
+  assert.equal(commandLedgerDelta?.value.kind, "incremental");
 
   delta.players[0].state.hotbar[0].count = 777;
   delta.players[0].state.inventory.stone = 333;
@@ -203,7 +224,7 @@ test("world deltas clone nested authority values before and after application", 
   weatherDelta.value.wind = -2;
   timeDelta.value.dayNightTick = 123;
   randomDelta.value.state = 321;
-  commandLedgerDelta.value.recent.push(createReceiptFixture("tampered_player", 123, { commandId: createCommandId("command_tampered_receipt") }));
+  commandLedgerDelta.value.appendedReceipts.push(createReceiptFixture(createPlayerId("player_tampered"), 123, { commandId: createCommandId("command_tampered_receipt") }));
 
   assert.equal(world.players[playerId].hotbar[0].count, 8);
   assert.equal(world.players[playerId].inventory.stone, 12);
@@ -238,7 +259,7 @@ test("world deltas clone nested authority values before and after application", 
   weatherDelta.value.wind = 7;
   timeDelta.value.dayNightTick = 8;
   randomDelta.value.state = 9;
-  commandLedgerDelta.value.recent.push(createReceiptFixture("after_apply_player", 10, { commandId: createCommandId("command_after_apply_receipt") }));
+  commandLedgerDelta.value.appendedReceipts.push(createReceiptFixture(createPlayerId("player_after_apply"), 10, { commandId: createCommandId("command_after_apply_receipt") }));
 
   assert.equal(appliedSnapshot.worldState.players[playerId].hotbar[0].count, 8);
   assert.equal(appliedSnapshot.worldState.players[playerId].inventory.stone, 12);
@@ -363,6 +384,25 @@ test("applyWorldDeltaToSnapshot rejects placed-vs-falling object ID collisions",
   };
   assert.throws(() => applyWorldDeltaToSnapshot(snapshot, delta), /object/i);
   assert.deepEqual(snapshot, snapshotBeforeApply);
+});
+
+test("falling-object settlement atomically removes the falling identity before placing its cells", () => {
+  const world = createDefaultWorldState("room_object_settlement");
+  const objectId = createObjectId("object_settlement");
+  world.fallingObjects[objectId] = createDefaultFallingObjectState(objectId, MaterialId.Torch, 2, 1, 4, 0, [[0, 0]]);
+  const snapshot = createWorldSnapshot(world);
+
+  world.grid.set(2, 4, MaterialId.Torch, { objectId });
+  delete world.fallingObjects[objectId];
+  world.worldRevision = 1;
+  const delta = createWorldDelta(snapshot, world);
+  assert.ok(delta);
+  assert.deepEqual(delta.fallingObjects, [{ objectId, state: null }]);
+
+  const applied = applyWorldDeltaToSnapshot(snapshot, delta);
+  assert.equal(applied.worldState.fallingObjects[objectId], undefined);
+  assert.equal(applied.worldState.grid.ids[2 + 4 * world.grid.width], MaterialId.Torch);
+  assert.equal(applied.worldState.grid.objectMembership.some((entry) => entry.objectId === objectId), true);
 });
 
 test("delta envelope IDs must match inner state IDs and leave the snapshot unchanged", () => {
@@ -840,20 +880,20 @@ function runSubsystemReplayFixture(world, actorId) {
 }
 
 const canonicalReplayGoldenCheckpoints = {
-  movement: "c4b3ecebc3b3eb58c6b3f011c5b3ee7ec8b3f337c7b3f1a4cab3f65dc9b3f4ca",
-  mining: "e161ee4be061ecb8e361f171e261efdee561f497e461f304e761f7bde661f62a",
-  flower_harvest: "50e4d3254fe4d1924ee4cfff4de4ce6c4ce4ccd94be4cb464ae4c9b349e4c820",
-  faucet_water: "044958b10349571e0249558b014953f808495efd07495d6a06495bd705495a44",
-  night_transition: "0bb9523c0cb953cf0db955620eb956f507b94bf008b94d8309b94f160ab950a9",
-  final: "0bb9523c0cb953cf0db955620eb956f507b94bf008b94d8309b94f160ab950a9",
+  movement: "73e4007772e3fee475e4039d74e4020a6fe3fa2b6ee3f89871e3fd5170e3fbbe",
+  mining: "e0fb7dd6e1fb7f69defb7ab0dffb7c43e4fb8422e5fb85b5e2fb80fce3fb828f",
+  flower_harvest: "5de68e765ee690095be68b505ce68ce361e694c262e696555fe6919c60e6932f",
+  faucet_water: "058912c90489113603890fa302890e100989191508891782078915ef0689145c",
+  night_transition: "e118b656e218b7e9df18b330e018b4c3e518bca2e618be35e318b97ce418bb0f",
+  final: "e118b656e218b7e9df18b330e018b4c3e518bca2e618be35e318b97ce418bb0f",
 };
 
 const canonicalSubsystemGoldenCheckpoints = {
-  swimming: "7cdc249e7ddc26317adc21787bdc230b80dc2aea81dc2c7d7edc27c47fdc2957",
-  falling_object_settled: "b48d0037b38cfea4b68d035db58d01cab08cf9ebaf8cf858b28cfd11b18cfb7e",
-  mined_settled_object: "6f016b196e0169866d0167f36c0166607301716572016fd271016e3f70016cac",
-  gardening_growth: "42a4d4cd41a4d33a40a4d1a73fa4d0143ea4ce813da4ccee3ca4cb5b3ba4c9c8",
-  final: "42a4d4cd41a4d33a40a4d1a73fa4d0143ea4ce813da4ccee3ca4cb5b3ba4c9c8",
+  swimming: "a5401168a64012fba740148ea8401621a94017b4aa401947ab401adaac401c6d",
+  falling_object_settled: "fe52826cff5283ff0052859201528725fa527c20fb527db3fc527f46fd5280d9",
+  mined_settled_object: "7af4ba467bf4bbd978f4b72079f4b8b37ef4c0927ff4c2257cf4bd6c7df4beff",
+  gardening_growth: "ecf102a0edf10433eef105c6eff10759f0f108ecf1f10a7ff2f10c12f3f10da5",
+  final: "ecf102a0edf10433eef105c6eff10759f0f108ecf1f10a7ff2f10c12f3f10da5",
 };
 
 test("deterministic replay fixtures converge across replay and checkpoint restore", () => {

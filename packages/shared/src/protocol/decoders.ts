@@ -51,7 +51,7 @@ function enterDepth(work: DecoderWork): void {
   work.depth += 1;
   if (work.depth > MAX_NESTING_DEPTH) {
     work.depth -= 1;
-    throw new ProtocolCodecError("malformed_message", `Nested values exceed the ${MAX_NESTING_DEPTH} level limit`);
+    throw new ProtocolCodecError("decoder_work_limit_exceeded", `Nested values exceed the ${MAX_NESTING_DEPTH} level limit`);
   }
 }
 
@@ -379,7 +379,7 @@ function assertWorldStateShape(value: unknown, work: DecoderWork): void {
     "commandLedger",
   ]), work);
   assertSchemaVersion(worldState["schemaVersion"], "worldState.schemaVersion", work, WORLD_STATE_SCHEMA_VERSION);
-  assertString(worldState["roomId"], "worldState.roomId", work, false);
+  assertRoomId(worldState["roomId"], "worldState.roomId", work);
   assertGridShape(worldState["grid"], work);
   assertRandomShape(worldState["random"], "random", work);
   assertPlayerMapShape(worldState["players"], work);
@@ -646,8 +646,8 @@ function assertCommandReceiptShape(value: unknown, label: string, work: DecoderW
     "acceptedEffect",
     "fingerprint",
   ]), work);
-  assertString(receipt["commandId"], `${label}.commandId`, work, false);
-  assertString(receipt["actorId"], `${label}.actorId`, work, false);
+  assertCommandId(receipt["commandId"], `${label}.commandId`, work);
+  assertPlayerId(receipt["actorId"], `${label}.actorId`, work);
   assertNonNegativeInteger(receipt["actorSequence"], `${label}.actorSequence`, work);
   const authorityOrderValue = receipt["authorityOrder"];
   if (authorityOrderValue !== null) {

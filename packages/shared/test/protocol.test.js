@@ -170,7 +170,7 @@ test("rejects deeply nested values, oversized object keys, and strict nested met
     snapshot: deepSnapshot,
   }), (error) => {
     assert.ok(error instanceof Error);
-    assert.equal(error.code, "malformed_message");
+    assert.equal(error.code, "decoder_work_limit_exceeded");
     return true;
   });
 
@@ -561,6 +561,7 @@ test("rejects malformed JSON, unsupported versions, and unsupported schemas", ()
 });
 
 test("rejects unknown fields and invalid IDs, integers, revisions, and dimensions", () => {
+  const fixture = createProtocolFixture();
   assert.throws(
     () => decodeProtocolMessage({
       kind: "hello",
@@ -579,6 +580,59 @@ test("rejects unknown fields and invalid IDs, integers, revisions, and dimension
       worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
       worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
       roomId: "bad-identifier",
+    }),
+    /invalid_id/,
+  );
+
+  const malformedRoomIdSnapshot = structuredClone(fixture.snapshot);
+  malformedRoomIdSnapshot.worldState.roomId = "bad-id";
+  assert.throws(
+    () => decodeProtocolMessage({
+      kind: "snapshot",
+      protocolVersion: PROTOCOL_VERSION,
+      worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+      worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+      streamSequence: 1,
+      snapshot: malformedRoomIdSnapshot,
+    }),
+    /invalid_id/,
+  );
+
+  const malformedReceiptDelta = structuredClone(fixture.delta);
+  malformedReceiptDelta.metadata = [{
+    field: "commandLedger",
+    value: {
+      kind: "full",
+      actorHighWater: {},
+      recent: [{
+        commandId: "bad-id",
+        actorId: "bad-id",
+        actorSequence: 1,
+        authorityOrder: 1,
+        issuedTick: 0,
+        processedTick: 0,
+        commandType: "pause_world",
+        code: "accepted",
+        accepted: true,
+        beforeWorldRevision: 0,
+        afterWorldRevision: 1,
+        beforeInventoryRevision: 0,
+        afterInventoryRevision: 0,
+        beforeTargetRevision: 0,
+        afterTargetRevision: 0,
+        acceptedEffect: null,
+        fingerprint: "fp",
+      }],
+    },
+  }];
+  assert.throws(
+    () => decodeProtocolMessage({
+      kind: "delta",
+      protocolVersion: PROTOCOL_VERSION,
+      worldSnapshotSchemaVersion: WORLD_SNAPSHOT_SCHEMA_VERSION,
+      worldStateSchemaVersion: WORLD_STATE_SCHEMA_VERSION,
+      streamSequence: 1,
+      delta: malformedReceiptDelta,
     }),
     /invalid_id/,
   );

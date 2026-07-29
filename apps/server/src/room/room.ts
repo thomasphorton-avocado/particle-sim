@@ -99,6 +99,8 @@ export class Room {
   #reconnectTimeoutMs: number;
   #reconnectTombstoneLimit: number;
   #closeError: unknown;
+  #closingFinalizationPromise: Promise<void> | null;
+  #ackHookChain: Promise<void>;
 
   constructor(config: RoomConfig, dependencies: RoomDependencies) {
     this.#roomId = config.roomId;
@@ -128,6 +130,8 @@ export class Room {
     this.#reconnectTimeoutMs = config.reconnectTimeoutMs ?? 60_000;
     this.#reconnectTombstoneLimit = config.reconnectTombstoneLimit ?? Math.max(4, config.maxCapacity * 2);
     this.#closeError = null;
+    this.#closingFinalizationPromise = null;
+    this.#ackHookChain = Promise.resolve();
     this.#closePromise = new Promise<void>((resolve, reject) => {
       this.#resolveClosePromise = resolve;
       this.#rejectClosePromise = reject;
@@ -199,6 +203,14 @@ export class Room {
     return this.#closePromise;
   }
 
+  get reconnectTimeoutMs(): number {
+    return this.#reconnectTimeoutMs;
+  }
+
+  get reconnectTombstoneLimit(): number {
+    return this.#reconnectTombstoneLimit;
+  }
+
   get lastPublication(): RoomPublication | null {
     return this.#lastPublication;
   }
@@ -227,13 +239,7 @@ export class Room {
     if (this.#tickInProgress) {
       return this.#closePromise;
     }
-    try {
-      await this.publishClosing(reason);
-    } catch (error) {
-      this.#handleHookError(error);
-    } finally {
-      this.resolveClose();
-    }
+    await this.#finalizeClosing(reason);
     return this.#closePromise;
   }
 
@@ -260,11 +266,9 @@ export class Room {
     if (!reconnecting) {
       this.#nextJoinOrdinal += 1;
     }
-    const membershipId = reconnecting ? tombstone!.membershipId : `membership_${joinOrdinal}`;
-    const generation = reconnecting ? tombstone!.generation : this.#nextMembershipGeneration;
-    if (!reconnecting) {
-      this.#nextMembershipGeneration += 1;
-    }
+    const membershipId = `membership_${joinOrdinal}`;
+    const generation = this.#nextMembershipGeneration;
+    this.#nextMembershipGeneration += 1;
     const ingress: RoomIngress = {
       kind: "join",
       membershipId,
@@ -358,8 +362,7 @@ export class Room {
         this.publishSnapshot("tick");
       }
       if (this.#shutdownRequested && this.#closing) {
-        this.publishClosing(this.#shutdownReason ?? "server_shutdown");
-        this.resolveClose();
+        this.#closingFinalizationPromise = this.#finalizeClosing(this.#shutdownReason ?? "server_shutdown");
       }
     } finally {
       this.#tickInProgress = false;
@@ -403,15 +406,19 @@ export class Room {
       return;
     }
     this.#pruneExpiredTombstones();
-    this.#pendingReservationsBySession.delete(ingress.sessionId);
+    const reservation = this.#pendingReservationsBySession.get(ingress.sessionId);
+    if (reservation) {
+      this.#pendingReservationsBySession.delete(ingress.sessionId);
+    }
     const existing = this.#membershipsBySession.get(ingress.sessionId);
     if (existing && existing.connected) {
       return;
     }
     const tombstone = this.#tombstonesBySession.get(ingress.sessionId);
     const reconnecting = Boolean(tombstone && !this.#tombstoneExpired(tombstone));
-    if (reconnecting) {
-      const membership = tombstone!;
+    const membership = reservation ?? this.#createMembershipRecord(ingress);
+    const hadActiveMemberships = this.#activeMembershipCount() > 0;
+    if (reservation) {
       membership.connected = true;
       membership.connectionId = ingress.connectionId;
       membership.generation = ingress.generation;
@@ -426,10 +433,14 @@ export class Room {
       this.#world.players[membership.playerId] = this.#restorePlayerState(membership);
       this.#world.ownerPlayerId = this.#world.ownerPlayerId ?? membership.playerId;
       this.#reconcileOwner();
-      this.#schedulerSuspended = false;
-      this.#scheduler.start(() => {
-        this.handleTick();
-      });
+      if (!hadActiveMemberships) {
+        this.#schedulerSuspended = false;
+        this.#scheduler.start(() => {
+          this.handleTick();
+        });
+      } else if (reconnecting) {
+        this.#schedulerSuspended = false;
+      }
       this.#lastActivityAtMs = this.#clock.nowMs();
       this.publishMembership();
       return;
@@ -437,7 +448,7 @@ export class Room {
     if (this.#activeMembershipCount() >= this.#config.maxCapacity) {
       return;
     }
-    const membership = this.#createMembershipRecord(ingress);
+    membership.connected = true;
     this.#membershipsById.set(membership.membershipId, membership);
     this.#membershipsBySession.set(membership.sessionId, membership);
     this.#commandSequencesByMembership.set(membership.membershipId, membership.nextCommandSequence);
@@ -445,10 +456,12 @@ export class Room {
     this.#world.nextPlayerOrdinal = this.#world.nextPlayerOrdinal + 1;
     this.#world.ownerPlayerId = this.#world.ownerPlayerId ?? membership.playerId;
     this.#reconcileOwner();
-    this.#schedulerSuspended = false;
-    this.#scheduler.start(() => {
-      this.handleTick();
-    });
+    if (!hadActiveMemberships) {
+      this.#schedulerSuspended = false;
+      this.#scheduler.start(() => {
+        this.handleTick();
+      });
+    }
     this.#lastActivityAtMs = this.#clock.nowMs();
     this.publishMembership();
   }
@@ -506,7 +519,7 @@ export class Room {
       const receipt = this.#world.commandLedger.recent[this.#world.commandLedger.recent.length - 1] as CommandReceipt | undefined;
       if (receipt) {
         this.#activeCommandReceipts = [receipt];
-        void this.#runHook(async () => {
+        void this.#queueHook(async () => {
           await this.#hooks?.onCommandAck?.(this.#roomId, this.#membershipSummary(membership), receipt);
         });
       }
@@ -544,7 +557,7 @@ export class Room {
 
   #createPendingReservation(ingress: RoomIngress, fallback?: MembershipRecord): MembershipRecord {
     const joinOrdinal = ingress.joinOrdinal ?? this.#nextJoinOrdinal;
-    const playerId = ingress.playerId ?? createPlayerId(`player_${joinOrdinal}`);
+    const playerId = ingress.playerId ?? fallback?.playerId ?? createPlayerId(`player_${joinOrdinal}`);
     const playerState = fallback?.playerState ? this.#clonePlayerState(fallback.playerState) : null;
     return {
       membershipId: ingress.membershipId,
@@ -564,12 +577,46 @@ export class Room {
     };
   }
 
+  async #queueHook(callback: () => Promise<void>): Promise<void> {
+    const previous = this.#ackHookChain;
+    const current = previous.catch(() => undefined).then(async () => {
+      try {
+        await callback();
+      } catch (error) {
+        this.#handleHookError(error);
+      }
+    });
+    this.#ackHookChain = current.catch(() => undefined);
+    return current;
+  }
+
+  async #drainHookChain(): Promise<void> {
+    await this.#ackHookChain.catch(() => undefined);
+  }
+
   async #runHook(callback: () => Promise<void>): Promise<void> {
     try {
       await callback();
     } catch (error) {
       this.#handleHookError(error);
     }
+  }
+
+  async #finalizeClosing(reason: RoomLifecycleReason): Promise<void> {
+    if (this.#closingFinalizationPromise) {
+      return this.#closingFinalizationPromise;
+    }
+    this.#closingFinalizationPromise = (async () => {
+      await this.#drainHookChain();
+      try {
+        await this.publishClosing(reason);
+      } catch (error) {
+        this.#handleHookError(error);
+      } finally {
+        this.resolveClose();
+      }
+    })();
+    return this.#closingFinalizationPromise;
   }
 
   #handleHookError(error: unknown): void {

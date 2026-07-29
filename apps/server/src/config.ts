@@ -11,6 +11,8 @@ export interface ServerConfig {
   readonly maxCatchUpTicks: number;
   readonly defaultShutdownGraceMs: number;
   readonly idleCleanupThresholdMs: number;
+  readonly reconnectTimeoutMs: number;
+  readonly reconnectTombstoneLimit: number;
   readonly healthPath: string;
   readonly roomsPath: string;
 }
@@ -55,6 +57,8 @@ export function parseServerConfig(env: NodeJS.ProcessEnv = process.env): ServerC
   const maxCatchUpTicks = parseInteger(env["MAX_CATCH_UP_TICKS"], 3, "MAX_CATCH_UP_TICKS", 0);
   const defaultShutdownGraceMs = parseInteger(env["SHUTDOWN_GRACE_MS"], 2000, "SHUTDOWN_GRACE_MS", 1);
   const idleCleanupThresholdMs = parseInteger(env["IDLE_CLEANUP_THRESHOLD_MS"], 30_000, "IDLE_CLEANUP_THRESHOLD_MS", 1);
+  const reconnectTimeoutMs = parseInteger(env["RECONNECT_TIMEOUT_MS"], 10_000, "RECONNECT_TIMEOUT_MS", 1);
+  const reconnectTombstoneLimit = parseInteger(env["RECONNECT_TOMBSTONE_LIMIT"], 8, "RECONNECT_TOMBSTONE_LIMIT", 1);
 
   if (minCapacity > maxCapacity) {
     throw new ConfigError("MIN_CAPACITY cannot exceed MAX_CAPACITY");
@@ -77,6 +81,8 @@ export function parseServerConfig(env: NodeJS.ProcessEnv = process.env): ServerC
     maxCatchUpTicks,
     defaultShutdownGraceMs,
     idleCleanupThresholdMs,
+    reconnectTimeoutMs,
+    reconnectTombstoneLimit,
     healthPath: "/healthz",
     roomsPath: "/rooms",
   };

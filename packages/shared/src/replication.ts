@@ -941,7 +941,8 @@ export function createWorldDelta(previousSnapshot: WorldSnapshot, world: WorldSt
       metadata.push({ field, value: cloneDeltaValueForPublication(nextValue) });
     }
   }
-  if (filteredCells.length === 0 && players.length === 0 && fallingObjects.length === 0 && metadata.length === 0) {
+  const hasNonCommandLedgerMetadata = metadata.some((entry) => entry.field !== "commandLedger");
+  if (filteredCells.length === 0 && players.length === 0 && fallingObjects.length === 0 && !hasNonCommandLedgerMetadata) {
     return null;
   }
   const targetRevision = Math.max(previousSnapshot.worldRevision + 1, world.worldRevision);

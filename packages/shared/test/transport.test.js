@@ -139,6 +139,41 @@ test("LocalTransport coalesces ordinary input commands at cadence and flushes cr
   assert.equal(transport.getClientWorld().paused, false);
 });
 
+test("LocalTransport immediately publishes rejected paused commands without duplicating results", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
+  const batches = [];
+
+  transport.subscribe((state) => {
+    const batch = state.lastCommandResults.map((result) => result.type);
+    if (batch.length > 0) {
+      batches.push(batch);
+    }
+  });
+
+  await Promise.resolve();
+
+  transport.enqueueCommand({ type: "pause_world", expectedWorldRevision: transport.getClientWorld().worldRevision });
+  transport.advanceTick();
+  batches.length = 0;
+
+  transport.enqueueCommand({
+    type: "set_input_state",
+    left: true,
+    right: false,
+    jumpHeld: false,
+    crouchHeld: false,
+    lookUpHeld: false,
+  });
+  transport.advanceTick();
+
+  assert.equal(batches.length, 1);
+  assert.deepEqual(batches[0], ["set_input_state"]);
+  assert.equal(transport.getClientWorld().paused, true);
+  assert.equal(transport.getLastCommandResults()[0].kind, "rejected");
+  assert.equal(transport.getLastCommandResults()[0].code, "paused");
+});
+
 test("LocalTransport preserves bounded command-ledger state across incremental ledger deltas", () => {
   const { world, actorId } = createWorldWithPlayer();
   const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });

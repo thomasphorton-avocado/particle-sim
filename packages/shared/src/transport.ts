@@ -82,6 +82,7 @@ export class LocalTransport {
   #publishInProgress: boolean;
   #publishQueued: boolean;
   #initialSyncFailed: boolean;
+  #initialSyncInProgress: boolean;
   #publicationCadence: PublicationCadence;
   #publicationSubscriberSnapshot: TransportSubscriber[] | null;
   #publicationGeneration: number;
@@ -101,6 +102,7 @@ export class LocalTransport {
     this.#publishInProgress = false;
     this.#publishQueued = false;
     this.#initialSyncFailed = false;
+    this.#initialSyncInProgress = false;
     this.#publicationSubscriberSnapshot = null;
     this.#publicationGeneration = 0;
     this.#publicationCadence = new PublicationCadence(options.publicationCadence ?? {
@@ -114,6 +116,7 @@ export class LocalTransport {
       listener,
       replica: this.#createReplica(this.#getSubscriptionSnapshot()),
     };
+    const initialState = this.#buildClientState(subscriber.replica, true);
     const unsubscribe = () => {
       this.#subscribers = this.#subscribers.filter((entry) => entry.listener !== listener);
     };
@@ -125,8 +128,9 @@ export class LocalTransport {
         }
         const initialSubscriberSnapshot = this.#subscribers.filter((entry) => entry.listener !== listener);
         this.#publicationSubscriberSnapshot = initialSubscriberSnapshot;
+        this.#initialSyncInProgress = true;
         try {
-          subscriber.listener(this.#buildClientState(subscriber.replica, true));
+          subscriber.listener(initialState);
         } catch (error) {
           if (this.#isInitialSyncUnsubscribeError(error)) {
             unsubscribe();
@@ -134,6 +138,7 @@ export class LocalTransport {
           this.#initialSyncFailed = true;
         } finally {
           this.#publicationSubscriberSnapshot = null;
+          this.#initialSyncInProgress = false;
         }
       });
     }
@@ -175,25 +180,27 @@ export class LocalTransport {
     const previousPaused = this.#world.paused;
     const results = processPendingCommands(this.#world);
     if (results.length > 0) {
-      const clonedResults = results.map((result) => cloneCommandResult(result));
       this.#pendingPublicationGenerations.push({
         generation: this.#publicationGeneration + 1,
-        commandResults: clonedResults,
+        commandResults: results,
         dirtyCells: [],
       });
       this.#publicationGeneration = this.#pendingPublicationGenerations.at(-1)?.generation ?? this.#publicationGeneration;
-      this.#lastCommandResults.push(...clonedResults);
+      this.#lastCommandResults.push(...results);
       if (this.#lastCommandResults.length > 256) {
         this.#lastCommandResults = this.#lastCommandResults.slice(-256);
       }
     }
-    this.#replica.lastCommandResults = this.#lastCommandResults.map((result) => cloneCommandResult(result));
+    this.#replica.lastCommandResults = this.#lastCommandResults.slice();
     const shouldPublishImmediately = this.#shouldPublishImmediately(results, previousPaused);
-    const shouldPublishResults = shouldPublishImmediately || results.some((result) => result.kind === "accepted");
+    const shouldPublishResults = shouldPublishImmediately || results.some((result) => result.kind === "rejected");
+    if (this.#initialSyncInProgress) {
+      return;
+    }
     if (this.#world.paused) {
       clearPendingInputs(this.#world);
       const cadenceDecision = this.#publicationCadence.observe(this.#getAuthorityRevision(this.#world), { force: shouldPublishImmediately });
-      const shouldPublish = cadenceDecision.shouldPublish || shouldPublishImmediately;
+      const shouldPublish = cadenceDecision.shouldPublish || shouldPublishImmediately || shouldPublishResults;
       if (shouldPublish) {
         this.#publish({
           force: shouldPublish,
@@ -209,7 +216,7 @@ export class LocalTransport {
       advanceWorldTick(this.#world, resolvedInputs);
     }
     const cadenceDecision = this.#publicationCadence.observe(this.#getAuthorityRevision(this.#world), { force: shouldPublishImmediately });
-    const shouldPublish = cadenceDecision.shouldPublish || shouldPublishImmediately;
+    const shouldPublish = cadenceDecision.shouldPublish || shouldPublishImmediately || shouldPublishResults;
     if (shouldPublish) {
       this.#publish({
         force: shouldPublish,
@@ -243,7 +250,7 @@ export class LocalTransport {
     this.#pendingPublicationGenerations = [];
     const generation = this.#publicationGeneration + 1;
     this.#publicationGeneration = generation;
-    const pendingCommandResults = pendingGenerations.flatMap((entry) => entry.commandResults.map((result) => cloneCommandResult(result)));
+    const pendingCommandResults = pendingGenerations.flatMap((entry) => entry.commandResults);
     const pendingCellEntries = this.#world.grid.dirtyCells.capturePending();
     return {
       generation,
@@ -359,7 +366,8 @@ export class LocalTransport {
         }
         if (this.#publishQueued) {
           this.#publishQueued = false;
-          shouldRun = true;
+          const shouldQueueNextIteration = this.#publicationSubscriberSnapshot === null;
+          shouldRun = shouldQueueNextIteration;
         }
       }
     } finally {
@@ -376,10 +384,10 @@ export class LocalTransport {
     const pendingCommandResults = publicationState.commandResults;
     const pendingCellEntries = publicationState.dirtyCells;
     const nextDelta = this.#buildDelta(this.#replica.snapshot, pendingCellEntries);
-    const lastCommandResults = pendingCommandResults.map((result) => cloneCommandResult(result));
-    const shouldPublish = Boolean(options.force || nextDelta !== null || (options.publishResults && lastCommandResults.length > 0));
+    const lastCommandResults = pendingCommandResults;
+    const shouldPublish = Boolean(options.force || nextDelta !== null || lastCommandResults.length > 0);
     if (!shouldPublish) {
-      this.#replica.lastCommandResults = lastCommandResults;
+      this.#replica.lastCommandResults = lastCommandResults.slice();
       return [];
     }
     const authorityRevision = this.#getAuthorityRevision(this.#world);

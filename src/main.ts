@@ -23,7 +23,7 @@ buildUi(uiRoot, session.editor);
 
 const canvas = document.querySelector<HTMLCanvasElement>("#sim-canvas")!;
 const renderer = new Renderer(canvas, initialGrid, CELL_SIZE);
-attachInput(canvas, state.world, CELL_SIZE, session.editor);
+attachInput(canvas, CELL_SIZE, session.editor);
 
 const runtime = createCharacter(initialGrid);
 state.character = runtime;

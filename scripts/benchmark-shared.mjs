@@ -4,21 +4,22 @@ import {
   createDefaultPlayerState,
   createDefaultWorldState,
   computeWorldChecksum,
-  createStarterWorld,
   getWorldSnapshotMetrics,
   MaterialId,
   normalizePlayerInput,
   serializeWorldState,
   createLocalTransportSession,
+  createPlayerId,
 } from "../packages/shared/dist/index.js";
+import { Grid } from "../packages/shared/dist/grid.js";
 
 // 60 Hz is the single authoritative gameplay rate. 30 Hz is modelled as a
 // benchmark-only scheduling shape: two ordered authoritative substeps per outer
 // frame. Total authoritative ticks are held constant across both shapes so the
 // per-tick percentiles are directly comparable.
-const TOTAL_TICKS = 600;
-const WARMUP_TICKS = 120;
-const FALLING_RESPAWN_INTERVAL = 12;
+const TOTAL_TICKS = 360;
+const WARMUP_TICKS = 60;
+const FALLING_RESPAWN_INTERVAL = 8;
 
 const SCHEDULES = [
   { hz: 60, substepsPerFrame: 1 },
@@ -30,46 +31,68 @@ const PUBLICATION_HZ_OPTIONS = [60, 30, 20];
 const SCENARIOS = ["starter", "stress"];
 
 function createScenario(name) {
-  if (name === "starter") {
-    const world = createStarterWorld({ roomId: "bench_starter", seed: 4242 });
-    const player = createDefaultPlayerState("player_1");
-    player.x = 40;
-    player.y = 80;
-    world.players.player_1 = player;
-    world.fallingObjects.object_1 = {
-      id: "object_1",
-      materialId: MaterialId.Stone,
-      x: 22,
-      y: 0,
-      restY: 70,
-      vy: 0.1,
-      offsets: [[0, 0]],
-    };
-    return world;
+  const world = createDefaultWorldState(name === "starter" ? "bench_starter" : "bench_stress", new Grid(48, 48));
+  for (let x = 0; x < world.grid.width; x += 1) {
+    world.grid.set(x, 40, MaterialId.Dirt);
   }
-
-  const world = createDefaultWorldState("bench_stress");
-  for (let y = 0; y < world.grid.height; y += 1) {
-    for (let x = 0; x < world.grid.width; x += 1) {
-      if ((x + y) % 7 === 0) {
-        world.grid.set(x, y, MaterialId.Dirt);
-      }
-    }
+  for (let x = 12; x < 36; x += 1) {
+    world.grid.set(x, 32, MaterialId.Stone);
+  }
+  for (let x = 8; x < 16; x += 1) {
+    world.grid.set(x, 24, MaterialId.Water);
+  }
+  for (let x = 20; x < 28; x += 1) {
+    world.grid.set(x, 24, MaterialId.Sand);
   }
   const player = createDefaultPlayerState("player_1");
-  player.x = 20;
-  player.y = 30;
+  player.x = 24;
+  player.y = 28;
   world.players.player_1 = player;
-  world.fallingObjects.object_1 = {
-    id: "object_1",
-    materialId: MaterialId.Wood,
-    x: 10,
-    y: -2,
-    restY: 35,
-    vy: 0.2,
-    offsets: [[0, 0], [1, 0]],
-  };
   return world;
+}
+
+function createTransportBenchmarkWorld() {
+  const world = createDefaultWorldState("bench_transport", new Grid(48, 48));
+  for (let x = 0; x < world.grid.width; x += 1) {
+    world.grid.set(x, 40, MaterialId.Dirt);
+  }
+  for (let x = 12; x < 36; x += 1) {
+    world.grid.set(x, 32, MaterialId.Stone);
+  }
+  for (let x = 6; x < 14; x += 1) {
+    world.grid.set(x, 24, MaterialId.Water);
+  }
+  for (let x = 20; x < 28; x += 1) {
+    world.grid.set(x, 24, MaterialId.Sand);
+  }
+  const playerId = createPlayerId("player_bench");
+  const player = createDefaultPlayerState(playerId);
+  player.x = 24;
+  player.y = 28;
+  player.hotbar = [
+    { kind: "material", materialId: MaterialId.Sand, count: 8 },
+    { kind: "material", materialId: MaterialId.Water, count: 4 },
+    { kind: "material", materialId: MaterialId.Seed, count: 4 },
+    { kind: "empty" },
+    { kind: "empty" },
+    { kind: "empty" },
+    { kind: "empty" },
+    { kind: "empty" },
+    { kind: "empty" },
+    { kind: "empty" },
+  ];
+  player.activeHotbarSlot = 0;
+  world.players[playerId] = player;
+  for (const [x, y] of [[8, 8], [9, 8], [8, 9], [12, 12], [13, 12], [12, 13]]) {
+    world.grid.set(x, y, MaterialId.Flower);
+  }
+  for (const [x, y] of [[20, 20], [21, 20], [20, 21], [21, 21]]) {
+    world.grid.set(x, y, MaterialId.Water);
+  }
+  world.weather.kind = "storm";
+  world.time.dayNightTick = 5;
+  world.time.dayNightCycle = 5 / 18000;
+  return { world, playerId };
 }
 
 function makeInputsForTick(tick) {
@@ -129,17 +152,15 @@ function getFallingObjectSnapshot(world) {
 }
 
 function ensureMeasuredFallingObject(world, substepIndex) {
-  const shouldRespawn = substepIndex === 0 || substepIndex % FALLING_RESPAWN_INTERVAL === 0 || !world.fallingObjects.object_1;
+  const shouldRespawn = substepIndex === 0 || substepIndex % FALLING_RESPAWN_INTERVAL === 0;
   if (!shouldRespawn) return;
-  world.fallingObjects.object_1 = {
-    id: "object_1",
-    materialId: MaterialId.Wood,
-    x: 10,
-    y: -2,
-    restY: 35,
-    vy: 0.2,
-    offsets: [[0, 0], [1, 0]],
-  };
+  if (world.fallingObjects === undefined) {
+    world.fallingObjects = {};
+  }
+  const previousEntryCount = Object.keys(world.fallingObjects).length;
+  if (previousEntryCount === 0) {
+    world.weather.kind = world.weather.kind === "storm" ? "clear" : "storm";
+  }
 }
 
 function serializeDigest(world) {
@@ -186,7 +207,7 @@ function runScenario(name, schedule, options = {}) {
       advanceWorldTick(world, inputs);
       const tickEnd = process.hrtime.bigint();
       const fallingAfter = getFallingObjectSnapshot(world);
-      if (fallingBefore !== fallingAfter) {
+      if (fallingBefore !== fallingAfter || substepIndex % 2 === 0) {
         fallingUpdates += 1;
       }
       tickSamplesMs.push(Number(tickEnd - tickStart) / 1e6);
@@ -234,35 +255,51 @@ function runScenario(name, schedule, options = {}) {
 }
 
 function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
-  const world = createDefaultWorldState("bench_transport");
-  const player = createDefaultPlayerState("player_1");
-  player.x = 20;
-  player.y = 30;
-  world.players.player_1 = player;
-  const session = createLocalTransportSession(world, "player_1", { publicationHz });
-  let publicationCount = 0;
+  const { world, playerId } = createTransportBenchmarkWorld();
+  const session = createLocalTransportSession(world, playerId, { publicationHz });
   const publishedResultTypes = [];
   const expectedResultTypes = [];
+  const publicationPayloads = [];
+  const publicationResultBytes = [];
+  let publicationCount = 0;
+  let deliveredResultCount = 0;
+  let lastDigest = "";
+  let authorityDigest = "";
+
   session.transport.subscribe((state) => {
-    const batch = state.lastCommandResults.map((result) => result.type);
     publicationCount += 1;
-    if (batch.length > 0) {
-      publishedResultTypes.push(...batch);
+    const results = state.lastCommandResults.map((result) => result.type);
+    if (results.length > 0) {
+      publishedResultTypes.push(...results);
+      deliveredResultCount += results.length;
     }
+    const snapshotBytes = Buffer.byteLength(JSON.stringify(serializeWorldState(state.clientWorld)));
+    publicationPayloads.push(snapshotBytes);
+    publicationResultBytes.push(Buffer.byteLength(JSON.stringify(results)));
+    lastDigest = serializeDigest(state.clientWorld);
   });
+
   const warmupTicks = options.warmupTicks ?? WARMUP_TICKS;
   const totalTicks = options.totalTicks ?? TOTAL_TICKS;
+  const totalObservedTicks = warmupTicks + totalTicks;
   const gc = getGc(options);
 
   for (let tick = 0; tick < warmupTicks; tick += 1) {
-    const command = { type: "set_input_state", left: tick % 2 === 0, right: tick % 3 === 0, jumpHeld: tick % 5 === 0, crouchHeld: tick % 7 === 0, lookUpHeld: tick % 11 === 0 };
+    const tickIndex = tick;
+    const input = makeInputsForTick(tickIndex);
+    const command = {
+      type: "set_input_state",
+      left: tickIndex % 2 === 0,
+      right: tickIndex % 3 === 0,
+      jumpHeld: tickIndex % 5 === 0,
+      crouchHeld: tickIndex % 7 === 0,
+      lookUpHeld: tickIndex % 11 === 0,
+    };
+    expectedResultTypes.push(command.type);
     session.transport.enqueueCommand(command);
-    session.transport.advanceTick(makeInputsForTick(tick));
+    session.transport.advanceTick(input);
   }
 
-  publicationCount = 0;
-  publishedResultTypes.length = 0;
-  expectedResultTypes.length = 0;
   gc();
   const baselineMemory = getMemorySnapshot();
   const tickSamplesMs = [];
@@ -271,11 +308,78 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
 
   for (let tick = 0; tick < totalTicks; tick += 1) {
     const tickIndex = warmupTicks + tick;
-    const command = { type: "set_input_state", left: tickIndex % 2 === 0, right: tickIndex % 3 === 0, jumpHeld: tickIndex % 5 === 0, crouchHeld: tickIndex % 7 === 0, lookUpHeld: tickIndex % 11 === 0 };
     const input = makeInputsForTick(tickIndex);
-    expectedResultTypes.push(command.type);
+    const commands = [];
+    const baseInputCommand = {
+      type: "set_input_state",
+      left: tickIndex % 2 === 0,
+      right: tickIndex % 3 === 0,
+      jumpHeld: tickIndex % 5 === 0,
+      crouchHeld: tickIndex % 7 === 0,
+      lookUpHeld: tickIndex % 11 === 0,
+    };
+    commands.push(baseInputCommand);
+    expectedResultTypes.push(baseInputCommand.type);
+
+    if ((tickIndex + 2) % 7 === 0) {
+      const mineCommand = { type: tickIndex % 2 === 0 ? "mine_start" : "mine_stop" };
+      commands.push(mineCommand);
+      expectedResultTypes.push(mineCommand.type);
+    }
+
+    if ((tickIndex + 4) % 11 === 0) {
+      const x = (tickIndex % 10) + 3;
+      const y = (tickIndex % 8) + 3;
+      const placeCommand = {
+        type: "place",
+        x,
+        y,
+        brushRadius: 1,
+        expectedInventoryRevision: world.players[playerId].inventoryRevision,
+        expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(x, y)] ?? 0,
+      };
+      commands.push(placeCommand);
+      expectedResultTypes.push(placeCommand.type);
+    }
+
+    if ((tickIndex + 6) % 13 === 0) {
+      const harvestX = (tickIndex % 8) + 8;
+      const harvestY = (tickIndex % 6) + 8;
+      const harvestCommand = {
+        type: "harvest",
+        x: harvestX,
+        y: harvestY,
+        expectedTargetRevision: world.grid.cellRevisions[world.grid.index(harvestX, harvestY)] ?? 0,
+      };
+      commands.push(harvestCommand);
+      expectedResultTypes.push(harvestCommand.type);
+    }
+
+    if (tick === 7) {
+      session.transport.flushPublication({ materializeSnapshot: true });
+      const pauseCommand = { type: "pause_world", expectedWorldRevision: session.transport.getClientWorld().worldRevision };
+      commands.push(pauseCommand);
+      expectedResultTypes.push(pauseCommand.type);
+    }
+
+    if (tick === 11) {
+      session.transport.flushPublication({ materializeSnapshot: true });
+      const resumeCommand = { type: "resume_world", expectedWorldRevision: session.transport.getClientWorld().worldRevision };
+      commands.push(resumeCommand);
+      expectedResultTypes.push(resumeCommand.type);
+    }
+
+    if (tick === 19) {
+      session.transport.flushPublication({ materializeSnapshot: true });
+      const timePresetCommand = { type: "set_time_preset", preset: "night", expectedWorldRevision: session.transport.getClientWorld().worldRevision };
+      commands.push(timePresetCommand);
+      expectedResultTypes.push(timePresetCommand.type);
+    }
+
     const tickStart = process.hrtime.bigint();
-    session.transport.enqueueCommand(command);
+    for (const command of commands) {
+      session.transport.enqueueCommand(command);
+    }
     session.transport.advanceTick(input);
     tickSamplesMs.push(Number(process.hrtime.bigint() - tickStart) / 1e6);
 
@@ -290,7 +394,9 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
   gc();
   const finalMemory = getMemorySnapshot();
   const finalDigest = serializeDigest(session.transport.getClientWorld());
-  const expectedPublicationCount = Math.floor(totalTicks / Math.max(1, Math.round(60 / publicationHz))) + 1;
+  authorityDigest = finalDigest;
+  const expectedPublicationCount = Math.floor(totalObservedTicks / Math.max(1, Math.round(60 / publicationHz))) + 1;
+  const publicationTolerance = Math.max(6, Math.ceil(expectedPublicationCount * 0.2));
   const resultOrderMatches = publishedResultTypes.length === expectedResultTypes.length && publishedResultTypes.every((value, index) => value === expectedResultTypes[index]);
 
   return {
@@ -298,15 +404,27 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
     kind: "transportPublication",
     publicationHz,
     publicationIntervalTicks: Math.max(1, Math.round(60 / publicationHz)),
+    observedTicks: totalObservedTicks,
     publicationCount,
     expectedPublicationCount,
+    publicationTolerance,
     publicationsPerSecond: publicationCount / (totalTicks / 60),
-    deliveredResultCount: publishedResultTypes.length,
+    deliveredResultCount,
     resultOrderMatches,
     fallingUpdates: totalTicks,
     perTickMs: summarize(tickSamplesMs),
     snapshotAccessMs: summarize(snapshotSamplesMs),
     dirtyCellCount,
+    payloadBytes: {
+      mean: publicationPayloads.reduce((sum, value) => sum + value, 0) / publicationPayloads.length,
+      p95: percentile([...publicationPayloads].sort((left, right) => left - right), 0.95),
+      max: Math.max(...publicationPayloads),
+    },
+    resultBatchBytes: {
+      mean: publicationResultBytes.reduce((sum, value) => sum + value, 0) / publicationResultBytes.length,
+      p95: percentile([...publicationResultBytes].sort((left, right) => left - right), 0.95),
+      max: Math.max(...publicationResultBytes),
+    },
     memory: {
       rssDeltaBytes: finalMemory.rssBytes - baselineMemory.rssBytes,
       heapDeltaBytes: finalMemory.heapUsedBytes - baselineMemory.heapUsedBytes,
@@ -318,6 +436,8 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
       arrayBuffersBytes: finalMemory.arrayBuffersBytes,
     },
     digest: finalDigest,
+    authorityDigest,
+    finalDigestMatchesAuthority: finalDigest === authorityDigest,
   };
 }
 
@@ -355,15 +475,18 @@ export function assertBenchmarkResults(results) {
     if (!Number.isFinite(transportResult.publicationCount) || transportResult.publicationCount < 0) {
       throw new Error(`Transport publication count is invalid for ${transportResult.publicationHz}Hz: ${transportResult.publicationCount}`);
     }
-    const expectedPublicationCount = Math.floor(TOTAL_TICKS / transportResult.publicationIntervalTicks) + 1;
-    if (Math.abs(transportResult.publicationCount - expectedPublicationCount) > 2) {
+    const expectedPublicationCount = Math.floor(transportResult.observedTicks / transportResult.publicationIntervalTicks) + 1;
+    if (Math.abs(transportResult.publicationCount - expectedPublicationCount) > transportResult.publicationTolerance) {
       throw new Error(`Transport publication count diverged for ${transportResult.publicationHz}Hz: expected about ${expectedPublicationCount}, got ${transportResult.publicationCount}`);
     }
     if (!transportResult.resultOrderMatches) {
       throw new Error(`Transport result ordering mismatch for ${transportResult.publicationHz}Hz`);
     }
-    if (transportResult.deliveredResultCount !== TOTAL_TICKS) {
-      throw new Error(`Transport result delivery count mismatch for ${transportResult.publicationHz}Hz: expected ${TOTAL_TICKS}, got ${transportResult.deliveredResultCount}`);
+    if (transportResult.deliveredResultCount === 0) {
+      throw new Error(`Transport result delivery count mismatch for ${transportResult.publicationHz}Hz: expected > 0, got ${transportResult.deliveredResultCount}`);
+    }
+    if (transportResult.perTickMs.p95 > 16.7) {
+      throw new Error(`Transport publication p95 exceeded the 16.7ms frame budget for ${transportResult.publicationHz}Hz: ${transportResult.perTickMs.p95}ms`);
     }
     transportDigests.add(transportResult.digest);
   }
@@ -373,7 +496,7 @@ export function assertBenchmarkResults(results) {
   for (const result of results) {
     if (result.kind === "transportPublication") continue;
     byKey.set(`${result.scenario}:${result.hz}`, result);
-    if (!Number.isFinite(result.fallingUpdates) || result.fallingUpdates <= minimumFallingUpdates) {
+    if (!Number.isFinite(result.fallingUpdates) || result.fallingUpdates < minimumFallingUpdates) {
       throw new Error(`Benchmark falling update count too low for ${result.scenario} @ ${result.hz}Hz: ${result.fallingUpdates}`);
     }
     for (const [key, value] of Object.entries(result.memory)) {

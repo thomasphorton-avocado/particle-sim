@@ -827,13 +827,21 @@ export function createCommandLedgerDelta(previousLedger: { actorHighWater: Recor
   const nextRecent = Array.from(nextLedger.recent ?? []);
   let overlapLength = 0;
   const maxOverlap = Math.min(previousRecent.length, nextRecent.length);
-  for (let offset = 0; offset < maxOverlap; offset += 1) {
-    const previousReceipt = previousRecent[previousRecent.length - 1 - offset];
-    const nextReceipt = nextRecent[offset];
-    if (previousReceipt === undefined || nextReceipt === undefined || !areCommandReceiptsEqual(previousReceipt, nextReceipt)) {
+  for (let candidateLength = maxOverlap; candidateLength > 0; candidateLength -= 1) {
+    const previousStart = previousRecent.length - candidateLength;
+    let matches = true;
+    for (let index = 0; index < candidateLength; index += 1) {
+      const previousReceipt = previousRecent[previousStart + index];
+      const nextReceipt = nextRecent[index];
+      if (previousReceipt === undefined || nextReceipt === undefined || !areCommandReceiptsEqual(previousReceipt, nextReceipt)) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) {
+      overlapLength = candidateLength;
       break;
     }
-    overlapLength = offset + 1;
   }
   const actorHighWater: Record<string, number> = {};
   const actorIds = new Set([...Object.keys(previousLedger.actorHighWater ?? {}), ...Object.keys(nextLedger.actorHighWater ?? {})]);
@@ -941,8 +949,7 @@ export function createWorldDelta(previousSnapshot: WorldSnapshot, world: WorldSt
       metadata.push({ field, value: cloneDeltaValueForPublication(nextValue) });
     }
   }
-  const hasNonCommandLedgerMetadata = metadata.some((entry) => entry.field !== "commandLedger");
-  if (filteredCells.length === 0 && players.length === 0 && fallingObjects.length === 0 && !hasNonCommandLedgerMetadata) {
+  if (filteredCells.length === 0 && players.length === 0 && fallingObjects.length === 0 && metadata.length === 0) {
     return null;
   }
   const targetRevision = Math.max(previousSnapshot.worldRevision + 1, world.worldRevision);
@@ -1076,6 +1083,11 @@ function replaceGridMembership(grid: WorldStateDto["grid"], index: number, objec
 function applyWorldDeltaToSnapshotStateInPlace(worldState: WorldStateDto, delta: WorldDelta): void {
   const grid = worldState.grid;
   const totalCells = grid.width * grid.height;
+  const removedFallingObjectIds = new Set(
+    delta.fallingObjects
+      .filter((entry) => entry.state === null)
+      .map((entry) => entry.objectId),
+  );
   for (const cellDelta of delta.cells) {
     if (cellDelta.index < 0 || cellDelta.index >= totalCells) {
       throw new TypeError("worldDelta cell index is out of bounds");
@@ -1084,7 +1096,9 @@ function applyWorldDeltaToSnapshotStateInPlace(worldState: WorldStateDto, delta:
     if (cellDelta.revision <= currentRevision) {
       throw new TypeError("worldDelta cell revision is stale");
     }
-    if (cellDelta.objectId !== null && Object.prototype.hasOwnProperty.call(worldState.fallingObjects, cellDelta.objectId)) {
+    if (cellDelta.objectId !== null
+      && Object.prototype.hasOwnProperty.call(worldState.fallingObjects, cellDelta.objectId)
+      && !removedFallingObjectIds.has(cellDelta.objectId)) {
       throw new TypeError("worldDelta cell objectId collides with a falling object identity");
     }
   }
@@ -1150,6 +1164,11 @@ export function applyWorldDeltaToSnapshotStateFast(worldState: WorldStateDto, de
   }
   const grid = worldState.grid;
   const totalCells = grid.width * grid.height;
+  const removedFallingObjectIds = new Set(
+    delta.fallingObjects
+      .filter((entry) => entry.state === null)
+      .map((entry) => entry.objectId),
+  );
   for (const cellDelta of delta.cells) {
     if (cellDelta.index < 0 || cellDelta.index >= totalCells) {
       throw new TypeError("worldDelta cell index is out of bounds");
@@ -1158,7 +1177,9 @@ export function applyWorldDeltaToSnapshotStateFast(worldState: WorldStateDto, de
     if (cellDelta.revision <= currentRevision) {
       throw new TypeError("worldDelta cell revision is stale");
     }
-    if (cellDelta.objectId !== null && Object.prototype.hasOwnProperty.call(worldState.fallingObjects, cellDelta.objectId)) {
+    if (cellDelta.objectId !== null
+      && Object.prototype.hasOwnProperty.call(worldState.fallingObjects, cellDelta.objectId)
+      && !removedFallingObjectIds.has(cellDelta.objectId)) {
       throw new TypeError("worldDelta cell objectId collides with a falling object identity");
     }
   }

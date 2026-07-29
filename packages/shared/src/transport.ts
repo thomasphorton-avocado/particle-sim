@@ -46,6 +46,7 @@ interface TransportReplica {
 interface TransportSubscriber {
   listener: TransportListener;
   replica: TransportReplica;
+  initialSyncPending: boolean;
 }
 
 interface PublicationGenerationState {
@@ -56,9 +57,22 @@ interface PublicationGenerationState {
 
 interface PublicationIterationState {
   generation: number;
+  authorityWorld: WorldState;
   commandResults: CommandResult[];
   dirtyCells: DirtyCellEntry[];
   pendingGenerations: PublicationGenerationState[];
+}
+
+interface PublicationOptions {
+  force?: boolean;
+  materializeSnapshot?: boolean;
+  publishResults?: boolean;
+  throwOnError?: boolean;
+}
+
+interface PublicationRequest {
+  generation: number;
+  options: PublicationOptions;
 }
 
 function cloneTransportWorld(world: WorldState): WorldState {
@@ -80,11 +94,11 @@ export class LocalTransport {
   #publishedCellRevisions: Map<number, number>;
   #editorCapability: LocalTransportEditorCapability;
   #publishInProgress: boolean;
-  #publishQueued: boolean;
-  #initialSyncFailed: boolean;
-  #initialSyncInProgress: boolean;
+  #publicationRequests: PublicationRequest[];
+  #advanceInProgress: boolean;
+  #pendingAdvanceInputs: Array<PlayerInputState | undefined>;
+  #notificationDepth: number;
   #publicationCadence: PublicationCadence;
-  #publicationSubscriberSnapshot: TransportSubscriber[] | null;
   #publicationGeneration: number;
 
   constructor(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1"), options: LocalTransportOptions = {}) {
@@ -100,10 +114,10 @@ export class LocalTransport {
     this.#publishedCellRevisions = new Map<number, number>();
     this.#editorCapability = this.#createEditorCapability();
     this.#publishInProgress = false;
-    this.#publishQueued = false;
-    this.#initialSyncFailed = false;
-    this.#initialSyncInProgress = false;
-    this.#publicationSubscriberSnapshot = null;
+    this.#publicationRequests = [];
+    this.#advanceInProgress = false;
+    this.#pendingAdvanceInputs = [];
+    this.#notificationDepth = 0;
     this.#publicationGeneration = 0;
     this.#publicationCadence = new PublicationCadence(options.publicationCadence ?? {
       publicationHz: options.publicationHz ?? DEFAULT_PUBLICATION_HZ,
@@ -115,33 +129,34 @@ export class LocalTransport {
     const subscriber: TransportSubscriber = {
       listener,
       replica: this.#createReplica(this.#getSubscriptionSnapshot()),
+      initialSyncPending: true,
     };
-    const initialState = this.#buildClientState(subscriber.replica, true);
     const unsubscribe = () => {
-      this.#subscribers = this.#subscribers.filter((entry) => entry.listener !== listener);
+      subscriber.initialSyncPending = false;
+      this.#subscribers = this.#subscribers.filter((entry) => entry !== subscriber);
     };
     this.#subscribers.push(subscriber);
-    if (!this.#initialSyncFailed) {
-      queueMicrotask(() => {
-        if (this.#initialSyncFailed) {
-          return;
+    queueMicrotask(() => {
+      if (!subscriber.initialSyncPending || !this.#subscribers.includes(subscriber)) {
+        return;
+      }
+      subscriber.initialSyncPending = false;
+      try {
+        this.#notifySubscriber(subscriber, this.#buildClientState(subscriber.replica, true));
+      } catch (error) {
+        if (this.#isInitialSyncUnsubscribeError(error)) {
+          unsubscribe();
         }
-        const initialSubscriberSnapshot = this.#subscribers.filter((entry) => entry.listener !== listener);
-        this.#publicationSubscriberSnapshot = initialSubscriberSnapshot;
-        this.#initialSyncInProgress = true;
+      } finally {
         try {
-          subscriber.listener(initialState);
+          this.#drainAdvanceTicks();
         } catch (error) {
-          if (this.#isInitialSyncUnsubscribeError(error)) {
-            unsubscribe();
-          }
-          this.#initialSyncFailed = true;
-        } finally {
-          this.#publicationSubscriberSnapshot = null;
-          this.#initialSyncInProgress = false;
+          queueMicrotask(() => {
+            throw error;
+          });
         }
-      });
-    }
+      }
+    });
     return unsubscribe;
   }
 
@@ -166,7 +181,27 @@ export class LocalTransport {
   }
 
   flushPublication(options: { materializeSnapshot?: boolean } = {}): void {
-    this.#publish({ force: true, materializeSnapshot: options.materializeSnapshot ?? true });
+    let publicationError: unknown;
+    try {
+      this.#publish({ force: true, materializeSnapshot: options.materializeSnapshot ?? true });
+    } catch (error) {
+      publicationError = error;
+    }
+    let advanceError: unknown;
+    try {
+      this.#drainAdvanceTicks();
+    } catch (error) {
+      advanceError = error;
+    }
+    if (publicationError !== undefined && advanceError !== undefined) {
+      throw new AggregateError([publicationError, advanceError], "LocalTransport flush failed");
+    }
+    if (publicationError !== undefined) {
+      throw publicationError;
+    }
+    if (advanceError !== undefined) {
+      throw advanceError;
+    }
   }
 
   enqueueCommand(command: GameplayCommand): void {
@@ -177,6 +212,37 @@ export class LocalTransport {
   }
 
   advanceTick(input?: PlayerInputState): void {
+    this.#pendingAdvanceInputs.push(input);
+    this.#drainAdvanceTicks();
+  }
+
+  #drainAdvanceTicks(): void {
+    if (this.#advanceInProgress || this.#notificationDepth > 0) {
+      return;
+    }
+    this.#advanceInProgress = true;
+    const errors: unknown[] = [];
+    try {
+      while (this.#pendingAdvanceInputs.length > 0) {
+        const input = this.#pendingAdvanceInputs.shift();
+        try {
+          this.#advanceTickOnce(input);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+    } finally {
+      this.#advanceInProgress = false;
+    }
+    if (errors.length === 1) {
+      throw errors[0];
+    }
+    if (errors.length > 1) {
+      throw new AggregateError(errors, "LocalTransport queued advances failed");
+    }
+  }
+
+  #advanceTickOnce(input?: PlayerInputState): void {
     const previousPaused = this.#world.paused;
     const results = processPendingCommands(this.#world);
     if (results.length > 0) {
@@ -194,9 +260,6 @@ export class LocalTransport {
     this.#replica.lastCommandResults = this.#lastCommandResults.slice();
     const shouldPublishImmediately = this.#shouldPublishImmediately(results, previousPaused);
     const shouldPublishResults = shouldPublishImmediately || results.some((result) => result.kind === "rejected");
-    if (this.#initialSyncInProgress) {
-      return;
-    }
     if (this.#world.paused) {
       clearPendingInputs(this.#world);
       const cadenceDecision = this.#publicationCadence.observe(this.#getAuthorityRevision(this.#world), { force: shouldPublishImmediately });
@@ -254,6 +317,7 @@ export class LocalTransport {
     const pendingCellEntries = this.#world.grid.dirtyCells.capturePending();
     return {
       generation,
+      authorityWorld: this.#world,
       commandResults: pendingCommandResults,
       dirtyCells: pendingCellEntries.map((entry) => ({ ...entry })),
       pendingGenerations,
@@ -345,57 +409,78 @@ export class LocalTransport {
     return this.#materializeSnapshot(this.#replica);
   }
 
-  #publish(options: { force?: boolean; materializeSnapshot?: boolean; publishResults?: boolean; throwOnError?: boolean } = {}): void {
+  #queuePublicationRequest(options: PublicationOptions): void {
+    const generation = this.#publicationGeneration + 1;
+    const pendingRequest = this.#publicationRequests.at(-1);
+    if (pendingRequest?.generation === generation) {
+      pendingRequest.options = {
+        force: Boolean(pendingRequest.options.force || options.force),
+        materializeSnapshot: Boolean(pendingRequest.options.materializeSnapshot || options.materializeSnapshot),
+        publishResults: Boolean(pendingRequest.options.publishResults || options.publishResults),
+        throwOnError: pendingRequest.options.throwOnError !== false || options.throwOnError !== false,
+      };
+      return;
+    }
+    this.#publicationRequests.push({
+      generation,
+      options: { ...options },
+    });
+  }
+
+  #publish(options: PublicationOptions = {}): void {
+    this.#queuePublicationRequest(options);
     if (this.#publishInProgress) {
-      this.#publishQueued = true;
       return;
     }
 
     this.#publishInProgress = true;
     const errors: unknown[] = [];
+    let shouldThrow = false;
     try {
-      let shouldRun = true;
-      while (shouldRun) {
-        shouldRun = false;
-        const subscribers = this.#publicationSubscriberSnapshot ?? this.#subscribers.slice();
-        const publicationState = this.#capturePendingPublicationState();
-        const shouldPublishIteration = Boolean(options.force || options.publishResults || publicationState.commandResults.length > 0 || publicationState.dirtyCells.length > 0);
-        if (shouldPublishIteration) {
-          const iterationErrors = this.#publishOnce(publicationState, options, subscribers);
-          errors.push(...iterationErrors);
+      while (this.#publicationRequests.length > 0) {
+        const request = this.#publicationRequests.shift();
+        if (!request) {
+          continue;
         }
-        if (this.#publishQueued) {
-          this.#publishQueued = false;
-          const shouldQueueNextIteration = this.#publicationSubscriberSnapshot === null;
-          shouldRun = shouldQueueNextIteration;
+        const requestOptions = request.options;
+        const subscribers = this.#subscribers.slice();
+        const publicationState = this.#capturePendingPublicationState();
+        const shouldPublishIteration = Boolean(requestOptions.force || requestOptions.publishResults || publicationState.commandResults.length > 0 || publicationState.dirtyCells.length > 0);
+        if (shouldPublishIteration) {
+          const iterationErrors = this.#publishOnce(publicationState, requestOptions, subscribers);
+          errors.push(...iterationErrors);
+          if (iterationErrors.length > 0 && requestOptions.throwOnError !== false) {
+            shouldThrow = true;
+          }
         }
       }
     } finally {
       this.#publishInProgress = false;
     }
 
-    if (errors.length > 0 && options.throwOnError !== false) {
+    if (errors.length > 0 && shouldThrow) {
       const message = errors.map((error) => error instanceof Error ? error.message : String(error)).join("; ");
       throw new AggregateError(errors, `LocalTransport subscriber publication failed: ${message}`);
     }
   }
 
-  #publishOnce(publicationState: PublicationIterationState, options: { force?: boolean; materializeSnapshot?: boolean; publishResults?: boolean } = {}, subscribers: TransportSubscriber[] = this.#subscribers.slice()): unknown[] {
+  #publishOnce(publicationState: PublicationIterationState, options: PublicationOptions = {}, subscribers: TransportSubscriber[] = this.#subscribers.slice()): unknown[] {
+    const authorityWorld = publicationState.authorityWorld;
     const pendingCommandResults = publicationState.commandResults;
     const pendingCellEntries = publicationState.dirtyCells;
-    const nextDelta = this.#buildDelta(this.#replica.snapshot, pendingCellEntries);
+    const nextDelta = this.#buildDelta(this.#replica.snapshot, authorityWorld, pendingCellEntries);
     const lastCommandResults = pendingCommandResults;
     const shouldPublish = Boolean(options.force || nextDelta !== null || lastCommandResults.length > 0);
     if (!shouldPublish) {
       this.#replica.lastCommandResults = lastCommandResults.slice();
       return [];
     }
-    const authorityRevision = this.#getAuthorityRevision(this.#world);
+    const authorityRevision = this.#getAuthorityRevision(authorityWorld);
     const publicationRevision = authorityRevision;
     const effectiveRevision = authorityRevision;
     const forceResync = Boolean(options.materializeSnapshot);
 
-    this.#updateReplica(this.#replica, nextDelta, authorityRevision, effectiveRevision, { forceResync });
+    this.#updateReplica(this.#replica, nextDelta, authorityWorld, authorityRevision, effectiveRevision, { forceResync });
     this.#replica.lastCommandResults = lastCommandResults;
     if (nextDelta !== null) {
       for (const cellDelta of nextDelta.cells) {
@@ -410,13 +495,14 @@ export class LocalTransport {
         continue;
       }
       try {
+        subscriber.initialSyncPending = false;
         if (nextDelta && subscriber.replica.snapshot.worldRevision !== nextDelta.baseRevision) {
-          this.#resyncReplicaToAuthority(subscriber.replica, authorityRevision, effectiveRevision);
+          this.#resyncReplicaToAuthority(subscriber.replica, authorityWorld, authorityRevision, effectiveRevision);
         } else {
-          this.#updateReplica(subscriber.replica, nextDelta, authorityRevision, effectiveRevision, { forceResync });
+          this.#updateReplica(subscriber.replica, nextDelta, authorityWorld, authorityRevision, effectiveRevision, { forceResync });
         }
         subscriber.replica.lastCommandResults = lastCommandResults;
-        subscriber.listener(this.#buildClientState(subscriber.replica, Boolean(options.materializeSnapshot)));
+        this.#notifySubscriber(subscriber, this.#buildClientState(subscriber.replica, Boolean(options.materializeSnapshot)));
       } catch (error) {
         errors.push(error);
       }
@@ -426,22 +512,31 @@ export class LocalTransport {
       return errors;
     }
 
-    this.#world.grid.dirtyCells.commitPending(pendingCellEntries);
+    authorityWorld.grid.dirtyCells.commitPending(pendingCellEntries);
     return errors;
   }
 
-  #buildDelta(previousSnapshot: WorldSnapshot, dirtyCellEntries: DirtyCellEntry[]): WorldDelta | null {
-    const commandLedgerDelta = createCommandLedgerDelta(this.#replica.snapshot.worldState.commandLedger, this.#world.commandLedger);
-    return createWorldDelta(previousSnapshot, this.#world, {
+  #notifySubscriber(subscriber: TransportSubscriber, state: TransportClientState): void {
+    this.#notificationDepth += 1;
+    try {
+      subscriber.listener(state);
+    } finally {
+      this.#notificationDepth -= 1;
+    }
+  }
+
+  #buildDelta(previousSnapshot: WorldSnapshot, authorityWorld: WorldState, dirtyCellEntries: DirtyCellEntry[]): WorldDelta | null {
+    const commandLedgerDelta = createCommandLedgerDelta(this.#replica.snapshot.worldState.commandLedger, authorityWorld.commandLedger);
+    return createWorldDelta(previousSnapshot, authorityWorld, {
       dirtyCellEntries,
       publishedCellRevisions: this.#publishedCellRevisions,
       commandLedgerDelta,
     });
   }
 
-  #updateReplica(replica: TransportReplica, delta: WorldDelta | null, authorityRevision: number, replicaRevision: number, options: { forceResync?: boolean; materializeSnapshot?: boolean } = {}): void {
+  #updateReplica(replica: TransportReplica, delta: WorldDelta | null, authorityWorld: WorldState, authorityRevision: number, replicaRevision: number, options: { forceResync?: boolean; materializeSnapshot?: boolean } = {}): void {
     if (options.forceResync) {
-      this.#syncReplicaFromAuthority(replica, authorityRevision, replicaRevision);
+      this.#syncReplicaFromAuthority(replica, authorityWorld, authorityRevision, replicaRevision);
       return;
     }
     replica.delta = delta ?? null;
@@ -455,7 +550,7 @@ export class LocalTransport {
       applyWorldDeltaToSnapshotStateFast(replica.snapshot.worldState, delta);
     } catch (error) {
       if (this.#isReplicaResyncError(error)) {
-        this.#resyncReplicaToAuthority(replica, authorityRevision, replicaRevision);
+        this.#resyncReplicaToAuthority(replica, authorityWorld, authorityRevision, replicaRevision);
         return;
       }
       throw error;
@@ -468,12 +563,12 @@ export class LocalTransport {
     this.#applyDeltaToWorld(replica.clientWorld, delta, authorityRevision);
   }
 
-  #resyncReplicaToAuthority(replica: TransportReplica, authorityRevision: number, replicaRevision: number): void {
-    this.#syncReplicaFromAuthority(replica, authorityRevision, replicaRevision);
+  #resyncReplicaToAuthority(replica: TransportReplica, authorityWorld: WorldState, authorityRevision: number, replicaRevision: number): void {
+    this.#syncReplicaFromAuthority(replica, authorityWorld, authorityRevision, replicaRevision);
   }
 
-  #syncReplicaFromAuthority(replica: TransportReplica, authorityRevision: number, replicaRevision: number): void {
-    const snapshot = createWorldSnapshot(this.#world);
+  #syncReplicaFromAuthority(replica: TransportReplica, authorityWorld: WorldState, authorityRevision: number, replicaRevision: number): void {
+    const snapshot = createWorldSnapshot(authorityWorld);
     replica.snapshot = cloneWorldSnapshot(snapshot);
     replica.canonicalSnapshot = cloneWorldSnapshot(snapshot);
     replica.delta = null;

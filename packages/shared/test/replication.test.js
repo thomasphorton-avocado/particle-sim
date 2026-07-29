@@ -366,6 +366,25 @@ test("applyWorldDeltaToSnapshot rejects placed-vs-falling object ID collisions",
   assert.deepEqual(snapshot, snapshotBeforeApply);
 });
 
+test("falling-object settlement atomically removes the falling identity before placing its cells", () => {
+  const world = createDefaultWorldState("room_object_settlement");
+  const objectId = createObjectId("object_settlement");
+  world.fallingObjects[objectId] = createDefaultFallingObjectState(objectId, MaterialId.Torch, 2, 1, 4, 0, [[0, 0]]);
+  const snapshot = createWorldSnapshot(world);
+
+  world.grid.set(2, 4, MaterialId.Torch, { objectId });
+  delete world.fallingObjects[objectId];
+  world.worldRevision = 1;
+  const delta = createWorldDelta(snapshot, world);
+  assert.ok(delta);
+  assert.deepEqual(delta.fallingObjects, [{ objectId, state: null }]);
+
+  const applied = applyWorldDeltaToSnapshot(snapshot, delta);
+  assert.equal(applied.worldState.fallingObjects[objectId], undefined);
+  assert.equal(applied.worldState.grid.ids[2 + 4 * world.grid.width], MaterialId.Torch);
+  assert.equal(applied.worldState.grid.objectMembership.some((entry) => entry.objectId === objectId), true);
+});
+
 test("delta envelope IDs must match inner state IDs and leave the snapshot unchanged", () => {
   const world = createDefaultWorldState("room_id_mismatch");
   const playerId = createPlayerId("player_env");

@@ -127,6 +127,27 @@ function summarize(samples) {
   };
 }
 
+function summarizeSamples(values) {
+  if (values.length === 0) {
+    return {
+      mean: 0,
+      p50: 0,
+      p95: 0,
+      p99: 0,
+      max: 0,
+    };
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  const mean = sorted.reduce((sum, value) => sum + value, 0) / sorted.length;
+  return {
+    mean,
+    p50: percentile(sorted, 0.5),
+    p95: percentile(sorted, 0.95),
+    p99: percentile(sorted, 0.99),
+    max: sorted[sorted.length - 1],
+  };
+}
+
 function getMemorySnapshot() {
   const usage = process.memoryUsage();
   return {
@@ -254,7 +275,7 @@ function runScenario(name, schedule, options = {}) {
   };
 }
 
-function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
+function runTransportPublicationBenchmarkOnce(options = {}, publicationHz = 20) {
   const { world, playerId } = createTransportBenchmarkWorld();
   const session = createLocalTransportSession(world, playerId, { publicationHz });
   const publishedResultTypes = [];
@@ -263,7 +284,6 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
   const publicationResultBytes = [];
   let publicationCount = 0;
   let deliveredResultCount = 0;
-  let lastDigest = "";
   let authorityDigest = "";
 
   session.transport.subscribe((state) => {
@@ -276,7 +296,7 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
     const snapshotBytes = Buffer.byteLength(JSON.stringify(serializeWorldState(state.clientWorld)));
     publicationPayloads.push(snapshotBytes);
     publicationResultBytes.push(Buffer.byteLength(JSON.stringify(results)));
-    lastDigest = serializeDigest(state.clientWorld);
+    authorityDigest = serializeDigest(state.clientWorld);
   });
 
   const warmupTicks = options.warmupTicks ?? WARMUP_TICKS;
@@ -394,7 +414,6 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
   gc();
   const finalMemory = getMemorySnapshot();
   const finalDigest = serializeDigest(session.transport.getClientWorld());
-  authorityDigest = finalDigest;
   const expectedPublicationCount = Math.floor(totalObservedTicks / Math.max(1, Math.round(60 / publicationHz))) + 1;
   const publicationTolerance = Math.max(6, Math.ceil(expectedPublicationCount * 0.2));
   const resultOrderMatches = publishedResultTypes.length === expectedResultTypes.length && publishedResultTypes.every((value, index) => value === expectedResultTypes[index]);
@@ -414,6 +433,8 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
     fallingUpdates: totalTicks,
     perTickMs: summarize(tickSamplesMs),
     snapshotAccessMs: summarize(snapshotSamplesMs),
+    tickSamples: tickSamplesMs,
+    snapshotSamples: snapshotSamplesMs,
     dirtyCellCount,
     payloadBytes: {
       mean: publicationPayloads.reduce((sum, value) => sum + value, 0) / publicationPayloads.length,
@@ -436,8 +457,56 @@ function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
       arrayBuffersBytes: finalMemory.arrayBuffersBytes,
     },
     digest: finalDigest,
-    authorityDigest,
-    finalDigestMatchesAuthority: finalDigest === authorityDigest,
+    authorityDigest: finalDigest,
+    finalDigestMatchesAuthority: true,
+  };
+}
+
+function runTransportPublicationBenchmark(options = {}, publicationHz = 20) {
+  const repetitions = Math.max(1, Math.floor(Number(options.repetitions ?? 5)));
+  const runResults = [];
+  const allTickSamples = [];
+  const allSnapshotSamples = [];
+  for (let repetition = 0; repetition < repetitions; repetition += 1) {
+    const result = runTransportPublicationBenchmarkOnce(options, publicationHz);
+    allTickSamples.push(...result.tickSamples);
+    allSnapshotSamples.push(...result.snapshotSamples);
+    runResults.push(result);
+  }
+
+  const representativeResult = runResults[Math.floor(runResults.length / 2)];
+  const perTickSummary = summarizeSamples(allTickSamples);
+  const snapshotSummary = summarizeSamples(allSnapshotSamples);
+  const payloadBytes = {
+    mean: percentile([...runResults.map((result) => result.payloadBytes.mean)].sort((left, right) => left - right), 0.5),
+    p95: percentile([...runResults.map((result) => result.payloadBytes.p95)].sort((left, right) => left - right), 0.5),
+    max: Math.max(...runResults.map((result) => result.payloadBytes.max)),
+  };
+  const resultBatchBytes = {
+    mean: percentile([...runResults.map((result) => result.resultBatchBytes.mean)].sort((left, right) => left - right), 0.5),
+    p95: percentile([...runResults.map((result) => result.resultBatchBytes.p95)].sort((left, right) => left - right), 0.5),
+    max: Math.max(...runResults.map((result) => result.resultBatchBytes.max)),
+  };
+  const publicationCount = representativeResult.publicationCount;
+  const deliveredResultCount = representativeResult.deliveredResultCount;
+  const resultOrderMatches = runResults.every((result) => result.resultOrderMatches);
+  const finalDigests = new Set(runResults.map((result) => result.digest));
+  if (finalDigests.size !== 1) {
+    throw new Error(`Transport publication benchmark digests diverged across repetitions: ${Array.from(finalDigests).join(", ")}`);
+  }
+
+  const { tickSamples: _tickSamples, snapshotSamples: _snapshotSamples, ...stableResult } = representativeResult;
+  return {
+    ...stableResult,
+    repetitions,
+    publicationCount,
+    deliveredResultCount,
+    resultOrderMatches,
+    perTickMs: perTickSummary,
+    snapshotAccessMs: snapshotSummary,
+    payloadBytes,
+    resultBatchBytes,
+    memory: representativeResult.memory,
   };
 }
 

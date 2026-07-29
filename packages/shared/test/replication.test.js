@@ -14,10 +14,8 @@ import {
   decodeWorldDelta,
   applyWorldDeltaToSnapshot,
   applyWorldDeltaToSnapshotState,
-  applyWorldDeltaStream,
   computeWorldChecksum,
   createPlayerId,
-  deserializeWorldState,
   Grid,
   MaterialId,
   normalizePlayerInput,
@@ -332,7 +330,6 @@ test("full snapshots round-trip to an identical checksum", () => {
 test("tampered snapshots are rejected without mutating the caller-owned payload", () => {
   const world = createDefaultWorldState("room_tampered_snapshot");
   const snapshot = createWorldSnapshot(world);
-  const originalSnapshot = JSON.parse(JSON.stringify(snapshot));
 
   const checksumTampered = JSON.parse(JSON.stringify(snapshot));
   checksumTampered.checksum = "not-the-real-checksum";

@@ -1,7 +1,8 @@
 import { advanceWorldTick, DAY_NIGHT_CYCLE_TICKS, type PlayerInputState } from "./gameplay.js";
 import { createCommandEnvelope, processPendingCommands, type CommandResult, type GameplayCommand } from "./commands.js";
 import { type PlayerId } from "./ids.js";
-import { type WorldState, createDefaultCommandLedger, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
+import { cloneHotbar } from "./inventory.js";
+import { type PlayerState, type WorldState, createDefaultCommandLedger, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
 import { createPlayerId } from "./ids.js";
 import { applyWorldDeltaToSnapshotStateFast, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, cloneWorldState as cloneWorldStateFromReplication, createCommandLedgerDelta, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
 import type { DirtyCellEntry } from "./dirty-journal.js";
@@ -75,6 +76,17 @@ interface PublicationRequest {
   options: PublicationOptions;
 }
 
+interface PendingCommandProjection {
+  inventoryRevisionDelta: number;
+  targetRevisionDeltas: Map<number, number>;
+}
+
+export interface LocalTransportCommandCompositionState {
+  player: PlayerState;
+  projectedInventoryRevision: number;
+  projectedCellRevision: (x: number, y: number) => number;
+}
+
 function cloneTransportWorld(world: WorldState): WorldState {
   const cloned = cloneWorldState(world);
   cloned.commandInbox = [];
@@ -100,6 +112,7 @@ export class LocalTransport {
   #notificationDepth: number;
   #publicationCadence: PublicationCadence;
   #publicationGeneration: number;
+  #pendingCommandProjections: Map<PlayerId, PendingCommandProjection>;
 
   constructor(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1"), options: LocalTransportOptions = {}) {
     this.#world = cloneTransportWorld(world);
@@ -119,6 +132,7 @@ export class LocalTransport {
     this.#pendingAdvanceInputs = [];
     this.#notificationDepth = 0;
     this.#publicationGeneration = 0;
+    this.#pendingCommandProjections = new Map<PlayerId, PendingCommandProjection>();
     this.#publicationCadence = new PublicationCadence(options.publicationCadence ?? {
       publicationHz: options.publicationHz ?? DEFAULT_PUBLICATION_HZ,
     });
@@ -215,6 +229,7 @@ export class LocalTransport {
     const actorId = this.#ownerPlayerId;
     const actorSequence = this.#getNextActorSequence(actorId);
     const envelope = createCommandEnvelope(actorId, actorSequence, this.#world.tick, command);
+    this.#recordPendingCommandProjection(actorId, command);
     this.#world.commandInbox.push(envelope);
   }
 
@@ -251,7 +266,7 @@ export class LocalTransport {
 
   #advanceTickOnce(input?: PlayerInputState): void {
     const previousPaused = this.#world.paused;
-    const results = processPendingCommands(this.#world);
+    const results = this.#processPendingCommands();
     if (results.length > 0) {
       this.#pendingPublicationGenerations.push({
         generation: this.#publicationGeneration + 1,
@@ -300,6 +315,178 @@ export class LocalTransport {
     this.#world.time.dayNightCycle = this.#world.time.dayNightTick / DAY_NIGHT_CYCLE_TICKS;
     this.#world.tick += 1;
     this.#world.worldRevision += 1;
+  }
+
+  #processPendingCommands(): CommandResult[] {
+    const pendingEnvelopes = this.#world.commandInbox.splice(0);
+    const results: CommandResult[] = [];
+    for (const envelope of pendingEnvelopes) {
+      this.#consumePendingCommandProjection(envelope.actorId, envelope.command);
+      const resolvedEnvelope = this.#prepareEnvelopeForProcessing(envelope);
+      const result = processPendingCommands(this.#world, [resolvedEnvelope])[0];
+      if (result) {
+        results.push(result);
+      }
+    }
+    return results;
+  }
+
+  #prepareEnvelopeForProcessing(envelope: { actorId: PlayerId; command: GameplayCommand }): { actorId: PlayerId; command: GameplayCommand } {
+    const player = this.#world.players[envelope.actorId];
+    if (!player) {
+      return envelope;
+    }
+    switch (envelope.command.type) {
+      case "select_slot": {
+        return {
+          ...envelope,
+          command: {
+            ...envelope.command,
+            expectedInventoryRevision: player.inventoryRevision,
+          },
+        };
+      }
+      case "place": {
+        return {
+          ...envelope,
+          command: {
+            ...envelope.command,
+            expectedInventoryRevision: player.inventoryRevision,
+            expectedAnchorRevision: this.#getProjectedCellRevision(envelope.actorId, envelope.command.x, envelope.command.y),
+          },
+        };
+      }
+      case "harvest": {
+        return {
+          ...envelope,
+          command: {
+            ...envelope.command,
+            expectedTargetRevision: this.#getProjectedCellRevision(envelope.actorId, envelope.command.x, envelope.command.y),
+          },
+        };
+      }
+      case "cycle_faucet": {
+        return {
+          ...envelope,
+          command: {
+            ...envelope.command,
+            expectedTargetRevision: this.#getProjectedCellRevision(envelope.actorId, envelope.command.x, envelope.command.y),
+          },
+        };
+      }
+      default: {
+        return envelope;
+      }
+    }
+  }
+
+  #recordPendingCommandProjection(actorId: PlayerId, command: GameplayCommand): void {
+    const projection = this.#pendingCommandProjections.get(actorId) ?? {
+      inventoryRevisionDelta: 0,
+      targetRevisionDeltas: new Map<number, number>(),
+    };
+    switch (command.type) {
+      case "place": {
+        projection.inventoryRevisionDelta += 1;
+        const index = this.#world.grid.index(command.x, command.y);
+        projection.targetRevisionDeltas.set(index, (projection.targetRevisionDeltas.get(index) ?? 0) + 1);
+        break;
+      }
+      case "harvest": {
+        projection.inventoryRevisionDelta += 1;
+        const index = this.#world.grid.index(command.x, command.y);
+        projection.targetRevisionDeltas.set(index, (projection.targetRevisionDeltas.get(index) ?? 0) + 1);
+        break;
+      }
+      case "cycle_faucet": {
+        const index = this.#world.grid.index(command.x, command.y);
+        projection.targetRevisionDeltas.set(index, (projection.targetRevisionDeltas.get(index) ?? 0) + 1);
+        break;
+      }
+      default: {
+        break;
+      }
+    }
+    this.#pendingCommandProjections.set(actorId, projection);
+  }
+
+  #consumePendingCommandProjection(actorId: PlayerId, command: GameplayCommand): void {
+    const projection = this.#pendingCommandProjections.get(actorId);
+    if (!projection) {
+      return;
+    }
+    switch (command.type) {
+      case "place": {
+        projection.inventoryRevisionDelta = Math.max(0, projection.inventoryRevisionDelta - 1);
+        const index = this.#world.grid.index(command.x, command.y);
+        projection.targetRevisionDeltas.set(index, Math.max(0, (projection.targetRevisionDeltas.get(index) ?? 0) - 1));
+        if (projection.targetRevisionDeltas.get(index) === 0) {
+          projection.targetRevisionDeltas.delete(index);
+        }
+        break;
+      }
+      case "harvest": {
+        projection.inventoryRevisionDelta = Math.max(0, projection.inventoryRevisionDelta - 1);
+        const index = this.#world.grid.index(command.x, command.y);
+        projection.targetRevisionDeltas.set(index, Math.max(0, (projection.targetRevisionDeltas.get(index) ?? 0) - 1));
+        if (projection.targetRevisionDeltas.get(index) === 0) {
+          projection.targetRevisionDeltas.delete(index);
+        }
+        break;
+      }
+      case "cycle_faucet": {
+        const index = this.#world.grid.index(command.x, command.y);
+        projection.targetRevisionDeltas.set(index, Math.max(0, (projection.targetRevisionDeltas.get(index) ?? 0) - 1));
+        if (projection.targetRevisionDeltas.get(index) === 0) {
+          projection.targetRevisionDeltas.delete(index);
+        }
+        break;
+      }
+      default: {
+        break;
+      }
+    }
+    if (projection.inventoryRevisionDelta === 0 && projection.targetRevisionDeltas.size === 0) {
+      this.#pendingCommandProjections.delete(actorId);
+    } else {
+      this.#pendingCommandProjections.set(actorId, projection);
+    }
+  }
+
+  #getProjectedInventoryRevision(actorId: PlayerId): number {
+    const player = this.#world.players[actorId];
+    if (!player) {
+      return 0;
+    }
+    const projection = this.#pendingCommandProjections.get(actorId);
+    return player.inventoryRevision + (projection?.inventoryRevisionDelta ?? 0);
+  }
+
+  #getProjectedCellRevision(actorId: PlayerId, x: number, y: number): number {
+    const index = this.#world.grid.index(x, y);
+    const projection = this.#pendingCommandProjections.get(actorId);
+    const baseRevision = this.#world.grid.cellRevisions[index] ?? 0;
+    return baseRevision + (projection?.targetRevisionDeltas.get(index) ?? 0);
+  }
+
+  getCommandCompositionState(actorId: PlayerId): LocalTransportCommandCompositionState | null {
+    const player = this.#world.players[actorId];
+    if (!player) {
+      return null;
+    }
+    const nextPlayer = {
+      ...player,
+      input: { ...player.input },
+      inventory: { ...player.inventory },
+      hotbar: cloneHotbar(player.hotbar),
+      pendingRefunds: { ...player.pendingRefunds },
+    };
+    nextPlayer.inventoryRevision = this.#getProjectedInventoryRevision(actorId);
+    return {
+      player: nextPlayer,
+      projectedInventoryRevision: nextPlayer.inventoryRevision,
+      projectedCellRevision: (cellX: number, cellY: number) => this.#getProjectedCellRevision(actorId, cellX, cellY),
+    };
   }
 
   #getNextActorSequence(actorId: PlayerId): number {
@@ -358,6 +545,7 @@ export class LocalTransport {
     this.#publishedCellRevisions.clear();
     this.#lastCommandResults = [];
     this.#pendingPublicationGenerations = [];
+    this.#pendingCommandProjections.clear();
     this.#nextActorSequenceByPlayer = new Map<PlayerId, number>();
     this.#nextActorSequenceByPlayer.set(this.#ownerPlayerId, (this.#world.commandLedger.actorHighWater[this.#ownerPlayerId] ?? 0) + 1);
     this.#publicationCadence.reset(this.#getAuthorityRevision(this.#world));

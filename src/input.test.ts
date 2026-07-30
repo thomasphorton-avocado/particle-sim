@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MaterialId, createDefaultPlayerState, createDefaultWorldState, createLocalTransportSession, createObjectId, createPlayerId } from "@particle-sim/shared";
 import { attachInput } from "./input";
 import { state } from "./state";
@@ -217,5 +217,202 @@ describe("production input routing", () => {
     const result = session.transport.getLastCommandResults().at(-1);
     expect(result?.kind).toBe("accepted");
     expect(result?.type).toBe("place");
+  });
+
+  it("does not publish or notify on an up-to-date placement click", async () => {
+    const cellSize = 10;
+    const playerId = createPlayerId("player_input_dom_no_publish");
+    const world = createDefaultWorldState("room_input_dom_no_publish");
+    const player = createDefaultPlayerState(playerId);
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Torch, count: 1 },
+      ...Array.from({ length: 9 }, () => ({ kind: "empty" as const })),
+    ];
+    player.activeHotbarSlot = 0;
+    world.players[playerId] = player;
+    const session = createLocalTransportSession(world, playerId, { publicationHz: 1 });
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "play";
+    state.brushSize = 1;
+    await Promise.resolve();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 320;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 320,
+        bottom: 320,
+        width: 320,
+        height: 320,
+        toJSON: () => ({}),
+      }),
+    });
+    document.body.appendChild(canvas);
+    attachInput(canvas, cellSize, session.editor);
+
+    const notifications: number[] = [];
+    const unsubscribe = session.transport.subscribe((stateSnapshot) => {
+      notifications.push(stateSnapshot.revision);
+    });
+    await Promise.resolve();
+    notifications.length = 0;
+
+    const flushSpy = vi.spyOn(session.transport, "flushPublication");
+    dispatchCanvasPress(canvas, 3, 3, cellSize);
+    await Promise.resolve();
+
+    expect(flushSpy).not.toHaveBeenCalled();
+    expect(notifications).toHaveLength(0);
+    expect(session.transport.getClientWorld().grid.get(3, 3)).toBe(MaterialId.Empty);
+    unsubscribe();
+  });
+
+  it("uses the transport composition API once per placement click", async () => {
+    const cellSize = 10;
+    const playerId = createPlayerId("player_input_dom_one_sync");
+    const world = createDefaultWorldState("room_input_dom_one_sync");
+    const player = createDefaultPlayerState(playerId);
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Torch, count: 1 },
+      ...Array.from({ length: 9 }, () => ({ kind: "empty" as const })),
+    ];
+    player.activeHotbarSlot = 0;
+    world.players[playerId] = player;
+    const session = createLocalTransportSession(world, playerId, { publicationHz: 1 });
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "play";
+    state.brushSize = 1;
+    await Promise.resolve();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 320;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 320,
+        bottom: 320,
+        width: 320,
+        height: 320,
+        toJSON: () => ({}),
+      }),
+    });
+    document.body.appendChild(canvas);
+    attachInput(canvas, cellSize, session.editor);
+
+    const compositionSpy = vi.spyOn(session.transport, "getCommandCompositionState");
+    dispatchCanvasPress(canvas, 4, 4, cellSize);
+
+    expect(compositionSpy).toHaveBeenCalledTimes(1);
+    expect(compositionSpy).toHaveBeenLastCalledWith(playerId);
+  });
+
+  it("batches two valid static placement presses before the next tick", async () => {
+    const cellSize = 10;
+    const playerId = createPlayerId("player_input_dom_static_batch");
+    const world = createDefaultWorldState("room_input_dom_static_batch");
+    const player = createDefaultPlayerState(playerId);
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Clock, count: 2 },
+      ...Array.from({ length: 9 }, () => ({ kind: "empty" as const })),
+    ];
+    player.activeHotbarSlot = 0;
+    world.players[playerId] = player;
+    const session = createLocalTransportSession(world, playerId, { publicationHz: 1 });
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "play";
+    state.brushSize = 1;
+    await Promise.resolve();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 320;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 320,
+        bottom: 320,
+        width: 320,
+        height: 320,
+        toJSON: () => ({}),
+      }),
+    });
+    document.body.appendChild(canvas);
+    attachInput(canvas, cellSize, session.editor);
+
+    dispatchCanvasPress(canvas, 1, 1, cellSize);
+    dispatchCanvasPress(canvas, 2, 2, cellSize);
+    session.transport.advanceTick();
+    session.transport.flushPublication({ materializeSnapshot: true });
+
+    const results = session.transport.getLastCommandResults();
+    expect(results.map((result) => [result.type, result.kind])).toEqual([
+      ["place", "accepted"],
+      ["place", "accepted"],
+    ]);
+    const clientWorld = session.transport.getClientWorld();
+    expect(clientWorld.grid.get(1, 1)).toBe(MaterialId.Clock);
+    expect(clientWorld.grid.get(2, 2)).toBe(MaterialId.Clock);
+    expect(clientWorld.players[playerId].inventoryRevision).toBe(2);
+  });
+
+  it("reconciles a rejected placement command before a later valid placement", async () => {
+    const playerId = createPlayerId("player_input_dom_rejected_batch");
+    const world = createDefaultWorldState("room_input_dom_rejected_batch");
+    const player = createDefaultPlayerState(playerId);
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Clock, count: 2 },
+      ...Array.from({ length: 9 }, () => ({ kind: "empty" as const })),
+    ];
+    player.activeHotbarSlot = 0;
+    world.players[playerId] = player;
+    const session = createLocalTransportSession(world, playerId, { publicationHz: 1 });
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "play";
+    state.brushSize = 1;
+    await Promise.resolve();
+
+    session.transport.enqueueCommand({
+      type: "place",
+      x: 1,
+      y: 1,
+      brushRadius: 1,
+      expectedInventoryRevision: 999,
+      expectedAnchorRevision: 999,
+    });
+    session.transport.enqueueCommand({
+      type: "place",
+      x: 2,
+      y: 2,
+      brushRadius: 1,
+      expectedInventoryRevision: 0,
+      expectedAnchorRevision: 0,
+    });
+    session.transport.advanceTick();
+    session.transport.flushPublication({ materializeSnapshot: true });
+
+    const results = session.transport.getLastCommandResults();
+    expect(results.map((result) => result.kind)).toEqual(["accepted", "accepted"]);
+    const clientWorld = session.transport.getClientWorld();
+    expect(clientWorld.grid.get(2, 2)).toBe(MaterialId.Clock);
+    expect(clientWorld.players[playerId].inventoryRevision).toBe(2);
   });
 });

@@ -1,13 +1,11 @@
 import {
   advanceWorldTick,
   computeWorldChecksum,
-  createCommandId,
   createDefaultPlayerState,
   createDefaultWorldState,
   createPlayerId,
   createWorldSnapshot,
-  enqueueCommand,
-  processPendingCommands,
+  processCommand,
   type CommandEnvelope,
   type CommandReceipt,
   type GameplayCommand,
@@ -17,9 +15,10 @@ import {
 } from "@particle-sim/shared";
 import type { WorldState } from "@particle-sim/shared";
 import { createDefaultRoomId } from "../config.js";
+import { createRoomAdmissionCommandId, RoomAdmissionPolicy, createRoomAdmissionPolicyConfig, type RoomAdmissionPolicyConfig } from "./admission.js";
 import type { Clock } from "./scheduler.js";
 import type { DeadlineSchedulerState, RoomScheduler } from "./scheduler.js";
-import type { CommandRequest, JoinRequest, LeaveRequest, RoomIngress, RoomPublication, RoomPublisher, RoomTransportHooks, RoomLifecycleReason, MembershipSummary, RoomMemberState } from "./types.js";
+import type { CommandRequest, JoinRequest, LeaveRequest, RoomIngress, RoomPublication, RoomPublisher, RoomTransportHooks, RoomLifecycleReason, MembershipSummary, RoomMemberState, RoomCommandAck } from "./types.js";
 
 export interface RoomStateSummary {
   readonly roomId: RoomId;
@@ -59,6 +58,7 @@ export interface RoomConfig {
   readonly idleCleanupThresholdMs: number;
   readonly reconnectTimeoutMs?: number;
   readonly reconnectTombstoneLimit?: number;
+  readonly admissionPolicy?: RoomAdmissionPolicyConfig;
 }
 
 export interface RoomDependencies {
@@ -83,6 +83,7 @@ export class Room {
   #tombstonesBySession: Map<string, MembershipRecord>;
   #pendingReservationsBySession: Map<string, MembershipRecord>;
   #ingressQueue: RoomIngress[];
+  #pendingCommandIngresses: RoomIngress[];
   #nextJoinOrdinal: number;
   #nextReceiveOrdinal: number;
   #nextMembershipGeneration: number;
@@ -97,6 +98,8 @@ export class Room {
   #lastPublication: RoomPublication | null;
   #lastActivityAtMs: number;
   #activeCommandReceipts: CommandReceipt[];
+  #admissionPolicyConfig: RoomAdmissionPolicyConfig;
+  #admissionPolicy: RoomAdmissionPolicy;
   #commandSequencesByMembership: Map<string, number>;
   #reconnectTimeoutMs: number;
   #reconnectTombstoneLimit: number;
@@ -118,6 +121,7 @@ export class Room {
     this.#tombstonesBySession = new Map();
     this.#pendingReservationsBySession = new Map();
     this.#ingressQueue = [];
+    this.#pendingCommandIngresses = [];
     this.#nextJoinOrdinal = 1;
     this.#nextReceiveOrdinal = 1;
     this.#nextMembershipGeneration = 1;
@@ -129,6 +133,8 @@ export class Room {
     this.#lastPublication = null;
     this.#lastActivityAtMs = this.#clock.nowMs();
     this.#activeCommandReceipts = [];
+    this.#admissionPolicyConfig = createRoomAdmissionPolicyConfig(config.admissionPolicy);
+    this.#admissionPolicy = new RoomAdmissionPolicy(this.#admissionPolicyConfig, this.#clock);
     this.#commandSequencesByMembership = new Map();
     this.#reconnectTimeoutMs = config.reconnectTimeoutMs ?? 60_000;
     this.#reconnectTombstoneLimit = config.reconnectTombstoneLimit ?? Math.max(4, config.maxCapacity * 2);
@@ -248,7 +254,9 @@ export class Room {
     this.#schedulerSuspended = true;
     this.#scheduler.stop();
     this.#ingressQueue.length = 0;
+    this.#pendingCommandIngresses.length = 0;
     this.#pendingReservationsBySession.clear();
+    this.#admissionPolicy.clear();
     this.#pruneExpiredTombstones();
     this.#lastActivityAtMs = this.#clock.nowMs();
     if (this.#tickInProgress) {
@@ -354,15 +362,33 @@ export class Room {
     if (request.membershipId !== membership.membershipId || request.connectionId !== membership.connectionId || request.generation !== membership.generation) {
       return { accepted: false, code: "stale_membership", message: "membership identity is stale" };
     }
+    const actorSequence = request.actorSequence ?? (this.#commandSequencesByMembership.get(membership.membershipId) ?? membership.nextCommandSequence ?? 1);
+    const admissionResult = this.#admissionPolicy.enqueueCommand({
+      roomId: this.#roomId,
+      membershipId: membership.membershipId,
+      sessionId: request.sessionId,
+      connectionId: request.connectionId,
+      generation: membership.generation,
+      playerId: membership.playerId,
+      actorSequence,
+      command: request.command,
+    });
+    if (!admissionResult.accepted) {
+      return { accepted: false, code: admissionResult.code, message: admissionResult.message };
+    }
+    const entry = admissionResult.entry;
+    if (!entry) {
+      return { accepted: false, code: "malformed_message", message: "command admission failed" };
+    }
     const ingress: RoomIngress = {
       kind: "command",
       membershipId: membership.membershipId,
       sessionId: request.sessionId,
       connectionId: request.connectionId,
       connectionOrdinal: request.connectionOrdinal,
-      receiveOrdinal: this.#nextReceiveOrdinal,
+      receiveOrdinal: entry.receiveOrdinal,
       generation: membership.generation,
-      command: this.#buildCommandEnvelope(membership, request.command),
+      command: this.#buildCommandEnvelope(membership, request.command, actorSequence, entry.receiveOrdinal),
     };
     this.#nextReceiveOrdinal += 1;
     this.#ingressQueue.push(ingress);
@@ -407,8 +433,16 @@ export class Room {
       if (!ingress) {
         break;
       }
+      if (ingress.kind === "command") {
+        this.#pendingCommandIngresses.push(ingress);
+        continue;
+      }
+      if (this.#pendingCommandIngresses.length > 0) {
+        this.#drainPendingCommands();
+      }
       this.processIngress(ingress);
     }
+    this.#drainPendingCommands();
   }
 
   private processIngress(ingress: RoomIngress): void {
@@ -428,6 +462,12 @@ export class Room {
       return;
     }
     this.#pruneExpiredTombstones();
+    const tombstone = this.#tombstonesBySession.get(ingress.sessionId);
+    const reconnecting = Boolean(tombstone && !this.#tombstoneExpired(tombstone));
+    if (reconnecting) {
+      this.#clearPendingCommandIngressesForSession(ingress.sessionId);
+      this.#admissionPolicy.clearPendingForSession(ingress.sessionId);
+    }
     const reservation = this.#pendingReservationsBySession.get(ingress.sessionId);
     if (reservation) {
       this.#pendingReservationsBySession.delete(ingress.sessionId);
@@ -436,8 +476,6 @@ export class Room {
     if (existing && existing.connected) {
       return;
     }
-    const tombstone = this.#tombstonesBySession.get(ingress.sessionId);
-    const reconnecting = Boolean(tombstone && !this.#tombstoneExpired(tombstone));
     const membership = reservation ?? this.#createMembershipRecord(ingress);
     const hadActiveMemberships = this.#activeMembershipCount() > 0;
     if (reservation) {
@@ -550,36 +588,141 @@ export class Room {
     if (!envelope) {
       return;
     }
-    enqueueCommand(this.#world, envelope);
-    const results = processPendingCommands(this.#world);
-    if (results.length > 0) {
-      const receipt = this.#world.commandLedger.recent[this.#world.commandLedger.recent.length - 1] as CommandReceipt | undefined;
-      if (receipt) {
-        this.#activeCommandReceipts = [receipt];
-        const membershipSummary = this.#membershipSummary(membership);
-        void this.#queueHook(async () => {
-          await this.#hooks?.onCommandAck?.(this.#roomId, membershipSummary, receipt);
-        });
-      }
+    const result = processCommand(this.#world, envelope);
+    const receipt = this.#world.commandLedger.recent[this.#world.commandLedger.recent.length - 1] as CommandReceipt | undefined;
+    if (!receipt) {
+      return;
     }
+    this.#activeCommandReceipts = [receipt];
+    const membershipSummary = this.#membershipSummary(membership);
+    const ack = this.#buildCommandAck(membership, ingress, receipt, result.kind === "accepted" ? "accepted" : "rejected");
+    this.#admissionPolicy.recordAck(ack);
+    void this.#queueHook(async () => {
+      await this.#hooks?.onCommandAck?.(this.#roomId, membershipSummary, receipt);
+    });
   }
 
-  #buildCommandEnvelope(membership: MembershipRecord, command: GameplayCommand): CommandEnvelope {
-    const actorSequence = this.#getNextCommandSequence(membership.membershipId);
-    membership.nextCommandSequence = actorSequence + 1;
+  #drainPendingCommands(): void {
+    if (this.#closing || this.#pendingCommandIngresses.length === 0) {
+      return;
+    }
+    const batch = this.#admissionPolicy.takeNextBatch(
+      this.#admissionPolicyConfig.maxCommandsPerTick,
+      this.#admissionPolicyConfig.maxCommandsPerPlayerPerTick,
+    );
+    if (batch.length === 0) {
+      this.#pendingCommandIngresses.length = 0;
+      return;
+    }
+    const remainingIngresses: RoomIngress[] = [];
+    for (const ingress of this.#pendingCommandIngresses) {
+      const entry = batch.find((candidate) => candidate.receiveOrdinal === ingress.receiveOrdinal);
+      if (!entry) {
+        remainingIngresses.push(ingress);
+        continue;
+      }
+      const membership = this.#membershipsBySession.get(ingress.sessionId);
+      const inventoryRevision = membership?.playerId ? this.#world.players[membership.playerId]?.inventoryRevision ?? 0 : 0;
+      const targetRevision = this.#world.worldRevision;
+      if (!membership || !membership.connected) {
+        const policyAck = this.#buildCommandAck(
+          membership ?? this.#createPendingReservation(ingress, undefined),
+          ingress,
+          {
+            commandId: ingress.command?.commandId ?? createRoomAdmissionCommandId(ingress.receiveOrdinal),
+            actorId: membership?.playerId ?? createPlayerId(`player_${ingress.receiveOrdinal}`),
+            actorSequence: entry.actorSequence,
+            authorityOrder: null,
+            issuedTick: this.#world.tick,
+            processedTick: this.#world.tick,
+            commandType: (ingress.command?.command.type as CommandReceipt["commandType"]) ?? "pause_world",
+            code: "stale",
+            accepted: false,
+            beforeWorldRevision: this.#world.worldRevision,
+            afterWorldRevision: this.#world.worldRevision,
+            beforeInventoryRevision: inventoryRevision,
+            afterInventoryRevision: inventoryRevision,
+            beforeTargetRevision: targetRevision,
+            afterTargetRevision: targetRevision,
+            acceptedEffect: null,
+            fingerprint: "",
+          } as CommandReceipt,
+          "stale_membership",
+        );
+        this.#admissionPolicy.recordAck(policyAck);
+        continue;
+      }
+      if (membership.membershipId !== ingress.membershipId || membership.connectionId !== ingress.connectionId || membership.generation !== ingress.generation) {
+        const policyAck = this.#buildCommandAck(
+          membership,
+          ingress,
+          {
+            commandId: ingress.command?.commandId ?? createRoomAdmissionCommandId(ingress.receiveOrdinal),
+            actorId: membership.playerId,
+            actorSequence: entry.actorSequence,
+            authorityOrder: null,
+            issuedTick: this.#world.tick,
+            processedTick: this.#world.tick,
+            commandType: (ingress.command?.command.type as CommandReceipt["commandType"]) ?? "pause_world",
+            code: "stale",
+            accepted: false,
+            beforeWorldRevision: this.#world.worldRevision,
+            afterWorldRevision: this.#world.worldRevision,
+            beforeInventoryRevision: inventoryRevision,
+            afterInventoryRevision: inventoryRevision,
+            beforeTargetRevision: targetRevision,
+            afterTargetRevision: targetRevision,
+            acceptedEffect: null,
+            fingerprint: "",
+          } as CommandReceipt,
+          "stale_membership",
+        );
+        this.#admissionPolicy.recordAck(policyAck);
+        continue;
+      }
+      this.applyCommand(ingress);
+    }
+    this.#pendingCommandIngresses = remainingIngresses;
+  }
+
+  #clearPendingCommandIngressesForSession(sessionId: string): void {
+    this.#pendingCommandIngresses = this.#pendingCommandIngresses.filter((ingress) => ingress.sessionId !== sessionId);
+  }
+
+  #buildCommandAck(membership: MembershipRecord, ingress: RoomIngress, receipt: CommandReceipt, policyCode: string): RoomCommandAck {
     return {
-      commandId: createCommandId(`command_${actorSequence}`),
+      membershipId: membership.membershipId,
+      sessionId: membership.sessionId,
+      connectionId: membership.connectionId,
+      generation: membership.generation,
+      playerId: membership.playerId,
+      receiveOrdinal: ingress.receiveOrdinal,
+      actorSequence: receipt.actorSequence,
+      accepted: receipt.accepted,
+      policyCode,
+      gameplayCode: receipt.code,
+      processedTick: receipt.processedTick,
+      authorityOrder: receipt.authorityOrder,
+      beforeWorldRevision: receipt.beforeWorldRevision,
+      afterWorldRevision: receipt.afterWorldRevision,
+      beforeInventoryRevision: receipt.beforeInventoryRevision,
+      afterInventoryRevision: receipt.afterInventoryRevision,
+      beforeTargetRevision: receipt.beforeTargetRevision,
+      afterTargetRevision: receipt.afterTargetRevision,
+      acceptedEffect: receipt.acceptedEffect,
+    };
+  }
+
+  #buildCommandEnvelope(membership: MembershipRecord, command: GameplayCommand, actorSequence: number, receiveOrdinal: number): CommandEnvelope {
+    membership.nextCommandSequence = actorSequence + 1;
+    this.#commandSequencesByMembership.set(membership.membershipId, membership.nextCommandSequence);
+    return {
+      commandId: createRoomAdmissionCommandId(receiveOrdinal),
       actorId: membership.playerId,
       actorSequence,
       issuedTick: this.#world.tick,
       command,
     };
-  }
-
-  #getNextCommandSequence(membershipId: string): number {
-    const nextSequence = this.#commandSequencesByMembership.get(membershipId) ?? 1;
-    this.#commandSequencesByMembership.set(membershipId, nextSequence + 1);
-    return nextSequence;
   }
 
   #clonePlayerState(playerState: PlayerState): PlayerState {

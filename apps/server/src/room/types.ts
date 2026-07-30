@@ -1,4 +1,4 @@
-import type { CommandEnvelope, CommandReceipt, GameplayCommand, WorldSnapshot } from "@particle-sim/shared";
+import type { CommandEnvelope, CommandReceipt, GameplayCommand, WorldSnapshot, CommandResultCode } from "@particle-sim/shared";
 import type { PlayerId, RoomId } from "@particle-sim/shared";
 
 export type RoomLifecycleReason = "server_shutdown" | "idle_cleanup" | "manual_close";
@@ -71,7 +71,44 @@ export interface CommandRequest {
   readonly connectionId: string;
   readonly connectionOrdinal: number;
   readonly generation?: number;
+  readonly actorSequence?: number;
   readonly command: GameplayCommand;
+}
+
+export interface RoomCommandAck {
+  readonly membershipId: string;
+  readonly sessionId: string;
+  readonly connectionId: string;
+  readonly generation: number;
+  readonly playerId: PlayerId;
+  readonly receiveOrdinal: number;
+  readonly actorSequence: number;
+  readonly accepted: boolean;
+  readonly policyCode: string;
+  readonly gameplayCode: CommandResultCode | null;
+  readonly processedTick: number;
+  readonly authorityOrder: number | null;
+  readonly beforeWorldRevision: number;
+  readonly afterWorldRevision: number;
+  readonly beforeInventoryRevision: number;
+  readonly afterInventoryRevision: number;
+  readonly beforeTargetRevision: number;
+  readonly afterTargetRevision: number;
+  readonly acceptedEffect: string | null;
+}
+
+export interface RoomCommandAdmissionResult {
+  readonly accepted: boolean;
+  readonly code?: string;
+  readonly message?: string;
+  readonly ack?: RoomCommandAck;
+}
+
+export interface RoomCommandBatchAdmissionResult {
+  readonly accepted: boolean;
+  readonly code?: string;
+  readonly message?: string;
+  readonly results: RoomCommandAdmissionResult[];
 }
 
 export interface RoomMemberState {

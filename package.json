@@ -4,21 +4,25 @@
   "version": "0.0.0",
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "apps/*"
   ],
   "scripts": {
     "dev": "vite",
     "typecheck:shared": "tsc -p packages/shared/tsconfig.json --pretty false --noEmit",
     "typecheck:client": "tsc -p tsconfig.json --pretty false",
-    "typecheck": "npm run typecheck:shared && npm run typecheck:client",
+    "typecheck:server": "npm --workspace @particle-sim/server run typecheck",
+    "typecheck": "npm run typecheck:shared && npm run typecheck:client && npm run typecheck:server",
     "build:shared": "npm --workspace @particle-sim/shared run build",
     "build:client": "tsc -p tsconfig.json --pretty false && vite build",
-    "build": "npm run build:shared && npm run build:client",
+    "build:server": "npm --workspace @particle-sim/server run build",
+    "build": "npm run build:shared && npm run build:client && npm run build:server",
     "test:shared": "npm --workspace @particle-sim/shared run test:smoke",
     "test:client": "vitest run",
+    "test:server": "npm --workspace @particle-sim/server run test",
     "test:benchmark": "node --expose-gc --test ./scripts/benchmark-shared.test.mjs",
     "benchmark:render-read-path": "vitest run --config vitest.benchmark.config.ts src/render-read-path.benchmark.test.ts --reporter=dot",
-    "test": "npm run build:shared && npm run test:client && npm run test:shared && npm run test:benchmark",
+    "test": "npm run build:shared && npm run test:client && npm run test:shared && npm run test:benchmark && npm run test:server",
     "preview": "vite preview",
     "benchmark": "npm run benchmark:render-read-path && node --expose-gc ./scripts/benchmark-shared.mjs"
   },
@@ -26,6 +30,7 @@
     "@particle-sim/shared": "0.0.0"
   },
   "devDependencies": {
+    "@types/node": "^24.3.1",
     "@vitest/coverage-v8": "^4.1.10",
     "jsdom": "^29.1.1",
     "typescript": "~6.0.2",

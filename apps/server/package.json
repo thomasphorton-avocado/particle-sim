@@ -1,0 +1,17 @@
+{
+  "name": "@particle-sim/server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "@particle-sim/shared": "0.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1"
+  }
+}

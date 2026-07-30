@@ -82,4 +82,140 @@ describe("production input routing", () => {
     expect(session.transport.getLastCommandResults().map((result) => [result.type, result.kind])).toEqual([["cycle_faucet", "accepted"]]);
     expect(session.transport.getClientWorld().grid.getFaucetFlow(18, 12)).toBe(2);
   });
+
+  it("routes play-mode object placement through the production command path for falling objects", async () => {
+    const cellSize = 10;
+    const playerId = createPlayerId("player_input_dom_object_play");
+    const world = createDefaultWorldState("room_input_dom_object_play");
+    const player = createDefaultPlayerState(playerId);
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Torch, count: 1 },
+      ...Array.from({ length: 9 }, () => ({ kind: "empty" as const })),
+    ];
+    player.activeHotbarSlot = 0;
+    world.players[playerId] = player;
+    const session = createLocalTransportSession(world, playerId);
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "play";
+    state.brushSize = 1;
+    await Promise.resolve();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 320;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 320,
+        bottom: 320,
+        width: 320,
+        height: 320,
+        toJSON: () => ({}),
+      }),
+    });
+    document.body.appendChild(canvas);
+    attachInput(canvas, cellSize, session.editor);
+
+    dispatchCanvasPress(canvas, 3, 3, cellSize);
+    session.transport.advanceTick();
+    const clientWorld = session.transport.getClientWorld();
+    expect(session.transport.getLastCommandResults().at(-1)?.type).toBe("place");
+    expect(session.transport.getLastCommandResults().at(-1)?.kind).toBe("accepted");
+    expect(Object.keys(clientWorld.fallingObjects)).toHaveLength(1);
+    expect(clientWorld.grid.get(3, 3)).toBe(MaterialId.Empty);
+  });
+
+  it("routes edit-mode object placement through editor mutation for static objects", async () => {
+    const cellSize = 10;
+    const playerId = createPlayerId("player_input_dom_object_editor");
+    const world = createDefaultWorldState("room_input_dom_object_editor");
+    const player = createDefaultPlayerState(playerId);
+    world.players[playerId] = player;
+    const session = createLocalTransportSession(world, playerId);
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "editor";
+    state.selectedMaterial = MaterialId.Clock;
+    state.brushSize = 1;
+    await Promise.resolve();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 320;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 320,
+        bottom: 320,
+        width: 320,
+        height: 320,
+        toJSON: () => ({}),
+      }),
+    });
+    document.body.appendChild(canvas);
+    attachInput(canvas, cellSize, session.editor);
+
+    dispatchCanvasPress(canvas, 5, 5, cellSize);
+    const clientWorld = session.transport.getClientWorld();
+    expect(clientWorld.grid.get(5, 5)).toBe(MaterialId.Clock);
+    expect(clientWorld.grid.getObjectId(5, 5)).not.toBeNull();
+  });
+
+  it("uses fresh player revisions for follow-up play-mode object placement commands", async () => {
+    const cellSize = 10;
+    const playerId = createPlayerId("player_input_dom_object_revisions");
+    const world = createDefaultWorldState("room_input_dom_object_revisions");
+    const player = createDefaultPlayerState(playerId);
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Torch, count: 2 },
+      ...Array.from({ length: 9 }, () => ({ kind: "empty" as const })),
+    ];
+    player.activeHotbarSlot = 0;
+    world.players[playerId] = player;
+    const session = createLocalTransportSession(world, playerId, { publicationHz: 1 });
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "play";
+    state.brushSize = 1;
+    await Promise.resolve();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 320;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 320,
+        bottom: 320,
+        width: 320,
+        height: 320,
+        toJSON: () => ({}),
+      }),
+    });
+    document.body.appendChild(canvas);
+    attachInput(canvas, cellSize, session.editor);
+
+    dispatchCanvasPress(canvas, 1, 1, cellSize);
+    session.transport.advanceTick();
+    expect(session.transport.getLastCommandResults().at(-1)?.kind).toBe("accepted");
+
+    dispatchCanvasPress(canvas, 2, 2, cellSize);
+    session.transport.advanceTick();
+    const result = session.transport.getLastCommandResults().at(-1);
+    expect(result?.kind).toBe("accepted");
+    expect(result?.type).toBe("place");
+  });
 });

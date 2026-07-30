@@ -63,13 +63,24 @@ function removeActiveSlotForWorld(world: WorldState): boolean {
   return true;
 }
 
+function resolvePlayCommandWorld(world: WorldState): WorldState {
+  // Keep revision-guarded gameplay commands aligned with the latest published transport
+  // state after a prior command has advanced the authority without a fresh publication.
+  if (world === state.world && state.transport.getLastCommandResults().length > 0) {
+    state.transport.flushPublication({ materializeSnapshot: true });
+    return state.world;
+  }
+  return world;
+}
+
 function enqueuePlayCommand(world: WorldState, command: GameplayCommand): void {
-  if (world === state.world) {
+  const resolvedWorld = resolvePlayCommandWorld(world);
+  if (resolvedWorld === state.world) {
     state.transport.enqueueCommand(command);
     return;
   }
-  const envelope = createCommandEnvelope(state.localPlayerId, getNextActorSequence(world, state.localPlayerId), world.tick, command);
-  enqueueCommand(world, envelope);
+  const envelope = createCommandEnvelope(state.localPlayerId, getNextActorSequence(resolvedWorld, state.localPlayerId), resolvedWorld.tick, command);
+  enqueueCommand(resolvedWorld, envelope);
 }
 
 function getObjectOffsets(materialId: MaterialId): [number, number][] {
@@ -115,12 +126,13 @@ function canDescendObjectFootprint(world: WorldState, anchorX: number, anchorY: 
 
 export function handleHarvestInputAt(world: WorldState, gx: number, gy: number, editor?: LocalTransportEditorCapability): boolean {
   if (state.toolMode === "play") {
-    const cluster = findFlowerCluster(world.grid, gx, gy);
+    const resolvedWorld = resolvePlayCommandWorld(world);
+    const cluster = findFlowerCluster(resolvedWorld.grid, gx, gy);
     if (!cluster || cluster.size === 0) {
       return false;
     }
-    const targetRevision = world.grid.cellRevisions[world.grid.index(gx, gy)] ?? 0;
-    enqueuePlayCommand(world, { type: "harvest", x: gx, y: gy, expectedTargetRevision: targetRevision });
+    const targetRevision = resolvedWorld.grid.cellRevisions[resolvedWorld.grid.index(gx, gy)] ?? 0;
+    enqueuePlayCommand(resolvedWorld, { type: "harvest", x: gx, y: gy, expectedTargetRevision: targetRevision });
     return true;
   }
 
@@ -144,14 +156,15 @@ export function handleHarvestInputAt(world: WorldState, gx: number, gy: number, 
 
 export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number, editor?: LocalTransportEditorCapability): boolean {
   if (state.toolMode === "play") {
+    const resolvedWorld = resolvePlayCommandWorld(world);
     const player = getLocalPlayer();
-    enqueuePlayCommand(world, {
+    enqueuePlayCommand(resolvedWorld, {
       type: "place",
       x: gx,
       y: gy,
       brushRadius: state.brushSize,
       expectedInventoryRevision: player.inventoryRevision,
-      expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(gx, gy)] ?? 0,
+      expectedAnchorRevision: resolvedWorld.grid.cellRevisions[resolvedWorld.grid.index(gx, gy)] ?? 0,
     });
     return true;
   }
@@ -309,7 +322,7 @@ export function attachInput(canvas: HTMLCanvasElement, cellSize: number, editor?
   /** Flood-fill all connected faucet cells and cycle their flow state. */
   const cycleFaucet = (gx: number, gy: number): boolean => {
     if (state.toolMode === "play") {
-      const currentWorld = state.world;
+      const currentWorld = resolvePlayCommandWorld(state.world);
       const objectId = currentWorld.grid.getObjectId(gx, gy);
       if (!objectId) return false;
       enqueuePlayCommand(currentWorld, {

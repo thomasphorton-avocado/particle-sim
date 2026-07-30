@@ -7,6 +7,8 @@ import { createPlayerId } from "./ids.js";
 import { applyWorldDeltaToSnapshotStateFast, cloneDeltaValue, cloneWorldDelta, cloneWorldSnapshot, cloneWorldState as cloneWorldStateFromReplication, createCommandLedgerDelta, createWorldDelta, createWorldSnapshot, restoreWorldState, type WorldDelta, type WorldSnapshot } from "./replication.js";
 import type { DirtyCellEntry } from "./dirty-journal.js";
 import { DEFAULT_PUBLICATION_HZ, PublicationCadence, type PublicationCadenceConfig } from "./publication-cadence.js";
+import { MATERIALS, MaterialId } from "./materials.js";
+import { findFlowerCluster } from "./harvest.js";
 
 export type DayNightPreset = "morning" | "day" | "dusk" | "night";
 
@@ -342,35 +344,48 @@ export class LocalTransport {
           ...envelope,
           command: {
             ...envelope.command,
-            expectedInventoryRevision: player.inventoryRevision,
+            expectedInventoryRevision: typeof envelope.command.expectedInventoryRevision === "number"
+              ? envelope.command.expectedInventoryRevision
+              : player.inventoryRevision,
           },
         };
       }
       case "place": {
+        const anchorIndex = this.#world.grid.index(envelope.command.x, envelope.command.y);
         return {
           ...envelope,
           command: {
             ...envelope.command,
-            expectedInventoryRevision: player.inventoryRevision,
-            expectedAnchorRevision: this.#getProjectedCellRevision(envelope.actorId, envelope.command.x, envelope.command.y),
+            expectedInventoryRevision: typeof envelope.command.expectedInventoryRevision === "number"
+              ? envelope.command.expectedInventoryRevision
+              : player.inventoryRevision,
+            expectedAnchorRevision: typeof envelope.command.expectedAnchorRevision === "number"
+              ? envelope.command.expectedAnchorRevision
+              : (this.#world.grid.cellRevisions[anchorIndex] ?? 0),
           },
         };
       }
       case "harvest": {
+        const targetIndex = this.#world.grid.index(envelope.command.x, envelope.command.y);
         return {
           ...envelope,
           command: {
             ...envelope.command,
-            expectedTargetRevision: this.#getProjectedCellRevision(envelope.actorId, envelope.command.x, envelope.command.y),
+            expectedTargetRevision: typeof envelope.command.expectedTargetRevision === "number"
+              ? envelope.command.expectedTargetRevision
+              : (this.#world.grid.cellRevisions[targetIndex] ?? 0),
           },
         };
       }
       case "cycle_faucet": {
+        const targetIndex = this.#world.grid.index(envelope.command.x, envelope.command.y);
         return {
           ...envelope,
           command: {
             ...envelope.command,
-            expectedTargetRevision: this.#getProjectedCellRevision(envelope.actorId, envelope.command.x, envelope.command.y),
+            expectedTargetRevision: typeof envelope.command.expectedTargetRevision === "number"
+              ? envelope.command.expectedTargetRevision
+              : (this.#world.grid.cellRevisions[targetIndex] ?? 0),
           },
         };
       }
@@ -385,29 +400,177 @@ export class LocalTransport {
       inventoryRevisionDelta: 0,
       targetRevisionDeltas: new Map<number, number>(),
     };
+    const projectionDelta = this.#getPendingProjectionDelta(actorId, command);
+    projection.inventoryRevisionDelta += projectionDelta.inventoryRevisionDelta;
+    for (const [index, delta] of projectionDelta.targetRevisionDeltas) {
+      projection.targetRevisionDeltas.set(index, (projection.targetRevisionDeltas.get(index) ?? 0) + delta);
+    }
+    this.#pendingCommandProjections.set(actorId, projection);
+  }
+
+  #getPendingProjectionDelta(actorId: PlayerId, command: GameplayCommand): PendingCommandProjection {
+    const projection: PendingCommandProjection = {
+      inventoryRevisionDelta: 0,
+      targetRevisionDeltas: new Map<number, number>(),
+    };
     switch (command.type) {
       case "place": {
-        projection.inventoryRevisionDelta += 1;
-        const index = this.#world.grid.index(command.x, command.y);
-        projection.targetRevisionDeltas.set(index, (projection.targetRevisionDeltas.get(index) ?? 0) + 1);
+        const actor = this.#world.players[actorId];
+        if (!actor) {
+          break;
+        }
+        const hotbarEntry = actor.hotbar[actor.activeHotbarSlot];
+        if (hotbarEntry?.kind !== "material" || hotbarEntry.count <= 0) {
+          break;
+        }
+        const materialId = hotbarEntry.materialId;
+        if (!this.#world.grid.inBounds(command.x, command.y)) {
+          break;
+        }
+        const material = MATERIALS[materialId];
+        if (material.placement.kind === "object") {
+          const offsets = this.#getObjectOffsets(materialId);
+          if (offsets.length === 0) {
+            break;
+          }
+          if (!this.#canPlaceObjectFootprint(actor, materialId, command.x, command.y, offsets)) {
+            break;
+          }
+          const fallsWhenAirborne = materialId === MaterialId.Torch || materialId === MaterialId.Stone;
+          let restY = command.y;
+          if (fallsWhenAirborne) {
+            while (this.#canDescendObjectFootprint(command.x, restY + 1, offsets)) {
+              restY += 1;
+            }
+          }
+          if (!fallsWhenAirborne || restY <= command.y) {
+            const writesAnchor = offsets.some(([dx, dy]) => dx === 0 && dy === 0);
+            projection.inventoryRevisionDelta = 1;
+            if (writesAnchor) {
+              projection.targetRevisionDeltas.set(this.#world.grid.index(command.x, command.y), 1);
+            }
+          } else {
+            projection.inventoryRevisionDelta = 1;
+          }
+          break;
+        }
+        const candidates = this.#getBrushPlacementCandidates(actor, materialId, command.x, command.y, command.brushRadius);
+        if (candidates.length === 0) {
+          break;
+        }
+        projection.inventoryRevisionDelta = 1;
+        if (candidates.some(([x, y]) => x === command.x && y === command.y)) {
+          projection.targetRevisionDeltas.set(this.#world.grid.index(command.x, command.y), 1);
+        }
         break;
       }
       case "harvest": {
-        projection.inventoryRevisionDelta += 1;
-        const index = this.#world.grid.index(command.x, command.y);
-        projection.targetRevisionDeltas.set(index, (projection.targetRevisionDeltas.get(index) ?? 0) + 1);
+        if (!this.#world.grid.inBounds(command.x, command.y)) {
+          break;
+        }
+        const cluster = this.#getHarvestCluster(command.x, command.y);
+        if (!cluster || cluster.size === 0) {
+          break;
+        }
+        projection.inventoryRevisionDelta = 1;
+        projection.targetRevisionDeltas.set(this.#world.grid.index(command.x, command.y), 1);
         break;
       }
       case "cycle_faucet": {
-        const index = this.#world.grid.index(command.x, command.y);
-        projection.targetRevisionDeltas.set(index, (projection.targetRevisionDeltas.get(index) ?? 0) + 1);
+        if (!this.#world.grid.inBounds(command.x, command.y)) {
+          break;
+        }
+        const cell = this.#world.grid.get(command.x, command.y);
+        const objectId = this.#world.grid.getObjectId(command.x, command.y);
+        if (cell !== MaterialId.Faucet || !objectId || objectId !== command.objectId) {
+          break;
+        }
+        projection.targetRevisionDeltas.set(this.#world.grid.index(command.x, command.y), 1);
         break;
       }
       default: {
         break;
       }
     }
-    this.#pendingCommandProjections.set(actorId, projection);
+    return projection;
+  }
+
+  #getObjectOffsets(materialId: MaterialId): [number, number][] {
+    const material = MATERIALS[materialId];
+    if (material.placement.kind !== "object") {
+      return [];
+    }
+    const { shape, width, height } = material.placement;
+    const halfW = width / 2;
+    const halfH = height / 2;
+    const offsets: [number, number][] = [];
+    for (let dy = -Math.floor(halfH); dy < height - Math.floor(halfH); dy++) {
+      for (let dx = -Math.floor(halfW); dx < width - Math.floor(halfW); dx++) {
+        if (shape === "circle" && (dx / halfW) ** 2 + (dy / halfH) ** 2 > 1) continue;
+        offsets.push([dx, dy]);
+      }
+    }
+    return offsets;
+  }
+
+  #canPlaceOver(x: number, y: number, materialId: MaterialId): boolean {
+    const existing = this.#world.grid.get(x, y);
+    if (existing === MaterialId.Empty) return true;
+    if (materialId === MaterialId.Empty) return true;
+    if (existing === MaterialId.Water && !MATERIALS[materialId].permeable) return true;
+    return false;
+  }
+
+  #canPlaceObjectFootprint(actor: PlayerState, materialId: MaterialId, anchorX: number, anchorY: number, offsets: [number, number][]): boolean {
+    const grid = this.#world.grid;
+    for (const [dx, dy] of offsets) {
+      const x = anchorX + dx;
+      const y = anchorY + dy;
+      if (!grid.inBounds(x, y)) return false;
+      if (!this.#withinPlacementRange(actor, x, y)) return false;
+      if (!this.#canPlaceOver(x, y, materialId)) return false;
+    }
+    return true;
+  }
+
+  #canDescendObjectFootprint(anchorX: number, anchorY: number, offsets: [number, number][]): boolean {
+    const grid = this.#world.grid;
+    for (const [dx, dy] of offsets) {
+      const x = anchorX + dx;
+      const y = anchorY + dy;
+      if (!grid.inBounds(x, y)) return false;
+      if (grid.get(x, y) !== MaterialId.Empty) return false;
+    }
+    return true;
+  }
+
+  #getBrushPlacementCandidates(actor: PlayerState, materialId: MaterialId, anchorX: number, anchorY: number, brushRadius: number): Array<[number, number]> {
+    const candidates: Array<[number, number]> = [];
+    for (let dy = -brushRadius; dy <= brushRadius; dy += 1) {
+      for (let dx = -brushRadius; dx <= brushRadius; dx += 1) {
+        if (dx * dx + dy * dy > brushRadius * brushRadius) continue;
+        const x = anchorX + dx;
+        const y = anchorY + dy;
+        if (!this.#world.grid.inBounds(x, y)) continue;
+        if (!this.#withinPlacementRange(actor, x, y)) continue;
+        if (!this.#canPlaceOver(x, y, materialId)) continue;
+        candidates.push([x, y]);
+      }
+    }
+    return candidates;
+  }
+
+  #withinPlacementRange(actor: PlayerState, gx: number, gy: number): boolean {
+    const cx = actor.x + actor.width / 2;
+    const cy = actor.y + actor.height / 2;
+    const dx = gx - cx;
+    const dy = gy - cy;
+    return dx * dx + dy * dy <= 30 * 30;
+  }
+
+  #getHarvestCluster(x: number, y: number): Set<number> | null {
+    const cluster = findFlowerCluster(this.#world.grid, x, y);
+    return cluster && cluster.size > 0 ? cluster : null;
   }
 
   #consumePendingCommandProjection(actorId: PlayerId, command: GameplayCommand): void {
@@ -455,18 +618,13 @@ export class LocalTransport {
 
   #getProjectedInventoryRevision(actorId: PlayerId): number {
     const player = this.#world.players[actorId];
-    if (!player) {
-      return 0;
-    }
-    const projection = this.#pendingCommandProjections.get(actorId);
-    return player.inventoryRevision + (projection?.inventoryRevisionDelta ?? 0);
+    return player?.inventoryRevision ?? 0;
   }
 
   #getProjectedCellRevision(actorId: PlayerId, x: number, y: number): number {
     const index = this.#world.grid.index(x, y);
-    const projection = this.#pendingCommandProjections.get(actorId);
-    const baseRevision = this.#world.grid.cellRevisions[index] ?? 0;
-    return baseRevision + (projection?.targetRevisionDeltas.get(index) ?? 0);
+    const pendingDelta = this.#pendingCommandProjections.get(actorId)?.targetRevisionDeltas.get(index) ?? 0;
+    return (this.#world.grid.cellRevisions[index] ?? 0) + pendingDelta;
   }
 
   getCommandCompositionState(actorId: PlayerId): LocalTransportCommandCompositionState | null {
@@ -667,16 +825,22 @@ export class LocalTransport {
     const pendingCommandResults = publicationState.commandResults;
     const pendingCellEntries = publicationState.dirtyCells;
     const nextDelta = this.#buildDelta(this.#replica.snapshot, authorityWorld, pendingCellEntries);
-    const lastCommandResults = pendingCommandResults;
-    const shouldPublish = Boolean(options.force || nextDelta !== null || lastCommandResults.length > 0);
-    if (!shouldPublish) {
-      this.#replica.lastCommandResults = lastCommandResults.slice();
-      return [];
-    }
+    const lastCommandResults = pendingCommandResults.length > 0
+      ? pendingCommandResults
+      : this.#replica.lastCommandResults.slice();
+    const hasPendingState = pendingCommandResults.length > 0 || pendingCellEntries.length > 0 || nextDelta !== null;
+    const shouldPublish = Boolean(hasPendingState || (!options.force && lastCommandResults.length > 0));
     const authorityRevision = this.#getAuthorityRevision(authorityWorld);
     const publicationRevision = authorityRevision;
     const effectiveRevision = authorityRevision;
     const forceResync = Boolean(options.materializeSnapshot);
+    if (!shouldPublish) {
+      this.#replica.lastCommandResults = lastCommandResults.slice();
+      if (options.materializeSnapshot) {
+        this.#syncReplicaFromAuthority(this.#replica, authorityWorld, authorityRevision, effectiveRevision);
+      }
+      return [];
+    }
 
     this.#updateReplica(this.#replica, nextDelta, authorityWorld, authorityRevision, effectiveRevision, { forceResync });
     this.#replica.lastCommandResults = lastCommandResults;

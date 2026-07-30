@@ -326,7 +326,9 @@ export function attachInput(canvas: HTMLCanvasElement, cellSize: number, editor?
   /** Flood-fill all connected faucet cells and cycle their flow state. */
   const cycleFaucet = (gx: number, gy: number): boolean => {
     if (state.toolMode === "play") {
-      const currentWorld = state.transport.getClientWorld();
+      const currentWorld = state.world;
+      const cellMaterial = currentWorld.grid.get(gx, gy);
+      if (cellMaterial !== MaterialId.Faucet) return false;
       const objectId = currentWorld.grid.getObjectId(gx, gy);
       if (!objectId) return false;
       const composition = state.transport.getCommandCompositionState(state.localPlayerId);

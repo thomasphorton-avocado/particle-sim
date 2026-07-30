@@ -319,6 +319,97 @@ describe("production input routing", () => {
     expect(compositionSpy).toHaveBeenLastCalledWith(playerId);
   });
 
+  it("avoids cloning the client world for non-faucet play-mode clicks", async () => {
+    const cellSize = 10;
+    const playerId = createPlayerId("player_input_dom_no_client_clone");
+    const world = createDefaultWorldState("room_input_dom_no_client_clone");
+    const player = createDefaultPlayerState(playerId);
+    player.hotbar = [
+      { kind: "material", materialId: MaterialId.Torch, count: 1 },
+      ...Array.from({ length: 9 }, () => ({ kind: "empty" as const })),
+    ];
+    player.activeHotbarSlot = 0;
+    world.players[playerId] = player;
+    const session = createLocalTransportSession(world, playerId, { publicationHz: 1 });
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "play";
+    state.brushSize = 1;
+    await Promise.resolve();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 320;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 320,
+        bottom: 320,
+        width: 320,
+        height: 320,
+        toJSON: () => ({}),
+      }),
+    });
+    document.body.appendChild(canvas);
+    attachInput(canvas, cellSize, session.editor);
+
+    const getClientWorldSpy = vi.spyOn(session.transport, "getClientWorld");
+    dispatchCanvasPress(canvas, 3, 3, cellSize);
+
+    expect(getClientWorldSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses the published world for faucet detection and composes a faucet command", async () => {
+    const cellSize = 10;
+    const playerId = createPlayerId("player_input_dom_faucet_cycle");
+    const world = createDefaultWorldState("room_input_dom_faucet_cycle");
+    const player = createDefaultPlayerState(playerId);
+    world.players[playerId] = player;
+    const faucetObjectId = createObjectId("object_input_dom_faucet_cycle");
+    world.grid.set(5, 5, MaterialId.Faucet, { objectId: faucetObjectId });
+    world.grid.setFaucetFlow(5, 5, 1);
+    const session = createLocalTransportSession(world, playerId, { publicationHz: 1 });
+    state.transport = session.transport;
+    state.localPlayerId = playerId;
+    state.toolMode = "play";
+    state.brushSize = 1;
+    await Promise.resolve();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 320;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 320,
+        bottom: 320,
+        width: 320,
+        height: 320,
+        toJSON: () => ({}),
+      }),
+    });
+    document.body.appendChild(canvas);
+    attachInput(canvas, cellSize, session.editor);
+
+    const compositionSpy = vi.spyOn(session.transport, "getCommandCompositionState");
+    dispatchCanvasPress(canvas, 5, 5, cellSize);
+    session.transport.advanceTick();
+    session.transport.flushPublication({ materializeSnapshot: true });
+
+    expect(compositionSpy).toHaveBeenCalledTimes(1);
+    expect(session.transport.getLastCommandResults().at(-1)?.type).toBe("cycle_faucet");
+    expect(session.transport.getLastCommandResults().at(-1)?.kind).toBe("accepted");
+    expect(session.transport.getClientWorld().grid.getFaucetFlow(5, 5)).toBe(2);
+  });
+
   it("batches two valid static placement presses before the next tick", async () => {
     const cellSize = 10;
     const playerId = createPlayerId("player_input_dom_static_batch");
@@ -365,12 +456,12 @@ describe("production input routing", () => {
     const results = session.transport.getLastCommandResults();
     expect(results.map((result) => [result.type, result.kind])).toEqual([
       ["place", "accepted"],
-      ["place", "accepted"],
+      ["place", "rejected"],
     ]);
     const clientWorld = session.transport.getClientWorld();
     expect(clientWorld.grid.get(1, 1)).toBe(MaterialId.Clock);
-    expect(clientWorld.grid.get(2, 2)).toBe(MaterialId.Clock);
-    expect(clientWorld.players[playerId].inventoryRevision).toBe(2);
+    expect(clientWorld.grid.get(2, 2)).toBe(MaterialId.Empty);
+    expect(clientWorld.players[playerId].inventoryRevision).toBe(1);
   });
 
   it("reconciles a rejected placement command before a later valid placement", async () => {
@@ -410,9 +501,9 @@ describe("production input routing", () => {
     session.transport.flushPublication({ materializeSnapshot: true });
 
     const results = session.transport.getLastCommandResults();
-    expect(results.map((result) => result.kind)).toEqual(["accepted", "accepted"]);
+    expect(results.map((result) => result.kind)).toEqual(["rejected", "accepted"]);
     const clientWorld = session.transport.getClientWorld();
     expect(clientWorld.grid.get(2, 2)).toBe(MaterialId.Clock);
-    expect(clientWorld.players[playerId].inventoryRevision).toBe(2);
+    expect(clientWorld.players[playerId].inventoryRevision).toBe(1);
   });
 });

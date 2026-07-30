@@ -91,55 +91,100 @@ test("LocalTransport uses queued projections for repeated static placement befor
   const secondComposition = transport.getCommandCompositionState(actorId);
   transport.enqueueCommand({
     type: "place",
-    x: 1,
+    x: 2,
     y: 1,
     brushRadius: 1,
     expectedInventoryRevision: secondComposition.projectedInventoryRevision,
-    expectedAnchorRevision: secondComposition.projectedCellRevision(1, 1),
+    expectedAnchorRevision: secondComposition.projectedCellRevision(2, 1),
   });
 
   transport.advanceTick();
   transport.flushPublication({ materializeSnapshot: true });
   const results = transport.getLastCommandResults();
-  assert.deepEqual(results.map((result) => [result.type, result.kind]), [["place", "accepted"], ["place", "rejected"]]);
-  assert.equal(transport.getClientWorld().players[actorId].inventoryRevision, 1);
+  assert.deepEqual(results.map((result) => [result.type, result.kind]), [["place", "accepted"], ["place", "accepted"]]);
+  assert.equal(transport.getClientWorld().players[actorId].inventoryRevision, 2);
 });
 
-test("LocalTransport rejects a repeated harvest after the first accepted harvest", () => {
+test("LocalTransport uses the correct queued revision after a rejected earlier placement", () => {
   const { world, actorId } = createWorldWithPlayer();
   const player = world.players[actorId];
   player.x = 0;
   player.y = 0;
-  world.grid.set(2, 2, MaterialId.Flower);
+  player.hotbar = [
+    { kind: "material", materialId: MaterialId.Clock, count: 2 },
+    ...Array.from({ length: 9 }, () => ({ kind: "empty" }))
+  ];
+  player.activeHotbarSlot = 0;
 
   const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
   const firstComposition = transport.getCommandCompositionState(actorId);
   transport.enqueueCommand({
-    type: "harvest",
-    x: 2,
-    y: 2,
-    expectedTargetRevision: firstComposition.projectedCellRevision(2, 2),
+    type: "place",
+    x: 1,
+    y: 1,
+    brushRadius: 1,
+    expectedInventoryRevision: firstComposition.projectedInventoryRevision - 1,
+    expectedAnchorRevision: firstComposition.projectedCellRevision(1, 1),
   });
   const secondComposition = transport.getCommandCompositionState(actorId);
   transport.enqueueCommand({
-    type: "harvest",
+    type: "place",
     x: 2,
-    y: 2,
-    expectedTargetRevision: secondComposition.projectedCellRevision(2, 2),
+    y: 1,
+    brushRadius: 1,
+    expectedInventoryRevision: secondComposition.projectedInventoryRevision,
+    expectedAnchorRevision: secondComposition.projectedCellRevision(2, 1),
   });
 
   transport.advanceTick();
   transport.flushPublication({ materializeSnapshot: true });
   const results = transport.getLastCommandResults();
-  assert.deepEqual(results.map((result) => [result.type, result.kind]), [["harvest", "accepted"], ["harvest", "rejected"]]);
-  assert.equal(results[1].code, "target");
+  assert.deepEqual(results.map((result) => [result.type, result.kind]), [["place", "rejected"], ["place", "accepted"]]);
+  assert.equal(transport.getClientWorld().players[actorId].inventoryRevision, 1);
 });
 
-test("LocalTransport accepts a repeated faucet cycle against the projected revision", () => {
+test("LocalTransport suppresses rejection-only subscriber notifications at low cadence", async () => {
+  const { world, actorId } = createWorldWithPlayer();
+  const player = world.players[actorId];
+  player.x = 0;
+  player.y = 0;
+  player.hotbar = [
+    { kind: "material", materialId: MaterialId.Clock, count: 2 },
+    ...Array.from({ length: 9 }, () => ({ kind: "empty" }))
+  ];
+  player.activeHotbarSlot = 0;
+
+  const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 1 });
+  const notifications = [];
+  transport.subscribe((state) => {
+    if (state.lastCommandResults.length > 0) {
+      notifications.push(state.lastCommandResults.map((result) => result.kind));
+    }
+  });
+  await Promise.resolve();
+
+  const firstComposition = transport.getCommandCompositionState(actorId);
+  transport.enqueueCommand({
+    type: "place",
+    x: 1,
+    y: 1,
+    brushRadius: 1,
+    expectedInventoryRevision: firstComposition.projectedInventoryRevision - 1,
+    expectedAnchorRevision: firstComposition.projectedCellRevision(1, 1),
+  });
+
+  transport.advanceTick();
+  transport.flushPublication({ materializeSnapshot: true });
+  assert.deepEqual(notifications, []);
+});
+
+test("LocalTransport accepts repeated faucet cycles across a multi-cell object", () => {
   const { world, actorId } = createWorldWithPlayer();
   const faucetObjectId = createObjectId("object_transport_faucet");
-  world.grid.set(3, 3, MaterialId.Faucet, { objectId: faucetObjectId });
-  world.grid.setFaucetFlow(3, 3, 1);
+  world.grid.setCellState(world.grid.index(3, 3), MaterialId.Faucet, 0, 0, faucetObjectId);
+  world.grid.setCellState(world.grid.index(4, 3), MaterialId.Faucet, 0, 0, faucetObjectId);
+  world.grid.setAuxiliaryValue(3, 3, 0);
+  world.grid.setAuxiliaryValue(4, 3, 0);
 
   const { transport } = createLocalTransportSession(world, actorId, { publicationHz: 20 });
   const firstComposition = transport.getCommandCompositionState(actorId);
@@ -162,8 +207,11 @@ test("LocalTransport accepts a repeated faucet cycle against the projected revis
   transport.advanceTick();
   transport.flushPublication({ materializeSnapshot: true });
   const results = transport.getLastCommandResults();
-  assert.deepEqual(results.map((result) => [result.type, result.kind]), [["cycle_faucet", "accepted"], ["cycle_faucet", "rejected"]]);
-  assert.equal(transport.getClientWorld().grid.getFaucetFlow(3, 3), 2);
+  assert.deepEqual(results.map((result) => [result.type, result.kind]), [["cycle_faucet", "accepted"], ["cycle_faucet", "accepted"]]);
+  assert.equal(transport.getClientWorld().grid.getAuxiliaryValue(3, 3), 2);
+  assert.equal(transport.getClientWorld().grid.getAuxiliaryValue(4, 3), 2);
+  assert.equal(transport.getClientWorld().grid.cellRevisions[world.grid.index(3, 3)], 3);
+  assert.equal(transport.getClientWorld().grid.cellRevisions[world.grid.index(4, 3)], 3);
 });
 
 test("LocalTransport does not project an anchor revision for falling placement", () => {
@@ -190,19 +238,19 @@ test("LocalTransport does not project an anchor revision for falling placement",
   const secondComposition = transport.getCommandCompositionState(actorId);
   transport.enqueueCommand({
     type: "place",
-    x: 4,
+    x: 5,
     y: 4,
     brushRadius: 1,
     expectedInventoryRevision: secondComposition.projectedInventoryRevision,
-    expectedAnchorRevision: secondComposition.projectedCellRevision(4, 4),
+    expectedAnchorRevision: secondComposition.projectedCellRevision(5, 4),
   });
 
   transport.advanceTick();
   transport.flushPublication({ materializeSnapshot: true });
   const results = transport.getLastCommandResults();
-  assert.deepEqual(results.map((result) => [result.type, result.kind]), [["place", "accepted"], ["place", "rejected"]]);
-  assert.equal(transport.getClientWorld().players[actorId].inventoryRevision, 1);
-  assert.equal(Object.keys(transport.getClientWorld().fallingObjects).length, 1);
+  assert.deepEqual(results.map((result) => [result.type, result.kind]), [["place", "accepted"], ["place", "accepted"]]);
+  assert.equal(transport.getClientWorld().players[actorId].inventoryRevision, 2);
+  assert.equal(Object.keys(transport.getClientWorld().fallingObjects).length, 2);
 });
 
 test("PublicationCadence schedules 60/30/20 Hz publications from authoritative revisions", () => {

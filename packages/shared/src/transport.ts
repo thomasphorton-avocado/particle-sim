@@ -1,5 +1,5 @@
 import { advanceWorldTick, DAY_NIGHT_CYCLE_TICKS, type PlayerInputState } from "./gameplay.js";
-import { createCommandEnvelope, processPendingCommands, type CommandResult, type GameplayCommand } from "./commands.js";
+import { createCommandEnvelope, processPendingCommands, type CommandEnvelope, type CommandResult, type GameplayCommand } from "./commands.js";
 import { type PlayerId } from "./ids.js";
 import { cloneHotbar } from "./inventory.js";
 import { type PlayerState, type WorldState, createDefaultCommandLedger, createDefaultPlayerState, createDefaultWorldState } from "./world-state.js";
@@ -83,6 +83,10 @@ interface PendingCommandProjection {
   targetRevisionDeltas: Map<number, number>;
 }
 
+interface PendingCommandEnvelopeMetadata {
+  useComposedExpectedRevisions: boolean;
+}
+
 export interface LocalTransportCommandCompositionState {
   player: PlayerState;
   projectedInventoryRevision: number;
@@ -115,6 +119,7 @@ export class LocalTransport {
   #publicationCadence: PublicationCadence;
   #publicationGeneration: number;
   #pendingCommandProjections: Map<PlayerId, PendingCommandProjection>;
+  #pendingCommandMetadata: WeakMap<object, PendingCommandEnvelopeMetadata>;
 
   constructor(world: WorldState = createDefaultWorldState("room_default"), ownerPlayerId: PlayerId = createPlayerId("player_1"), options: LocalTransportOptions = {}) {
     this.#world = cloneTransportWorld(world);
@@ -135,6 +140,7 @@ export class LocalTransport {
     this.#notificationDepth = 0;
     this.#publicationGeneration = 0;
     this.#pendingCommandProjections = new Map<PlayerId, PendingCommandProjection>();
+    this.#pendingCommandMetadata = new WeakMap<object, PendingCommandEnvelopeMetadata>();
     this.#publicationCadence = new PublicationCadence(options.publicationCadence ?? {
       publicationHz: options.publicationHz ?? DEFAULT_PUBLICATION_HZ,
     });
@@ -231,8 +237,45 @@ export class LocalTransport {
     const actorId = this.#ownerPlayerId;
     const actorSequence = this.#getNextActorSequence(actorId);
     const envelope = createCommandEnvelope(actorId, actorSequence, this.#world.tick, command);
+    const pendingProjection = this.#pendingCommandProjections.get(actorId) ?? this.#createPendingCommandProjection();
+    const metadata = this.#buildPendingCommandEnvelopeMetadata(actorId, command, pendingProjection);
     this.#recordPendingCommandProjection(actorId, command);
+    this.#pendingCommandMetadata.set(envelope, metadata);
     this.#world.commandInbox.push(envelope);
+  }
+
+  #buildPendingCommandEnvelopeMetadata(actorId: PlayerId, command: GameplayCommand, pendingProjection?: PendingCommandProjection): PendingCommandEnvelopeMetadata {
+    const compositionState = this.#createCommandCompositionState(actorId, pendingProjection);
+    const projectedInventoryRevision = compositionState?.projectedInventoryRevision;
+    let useComposedExpectedRevisions = false;
+    switch (command.type) {
+      case "select_slot": {
+        useComposedExpectedRevisions = typeof projectedInventoryRevision === "number"
+          && typeof command.expectedInventoryRevision === "number"
+          && command.expectedInventoryRevision === projectedInventoryRevision;
+        break;
+      }
+      case "place": {
+        useComposedExpectedRevisions = typeof projectedInventoryRevision === "number"
+          && typeof command.expectedInventoryRevision === "number"
+          && command.expectedInventoryRevision === projectedInventoryRevision
+          && typeof command.expectedAnchorRevision === "number"
+          && command.expectedAnchorRevision === compositionState?.projectedCellRevision(command.x, command.y);
+        break;
+      }
+      case "harvest":
+      case "cycle_faucet": {
+        useComposedExpectedRevisions = typeof command.expectedTargetRevision === "number"
+          && command.expectedTargetRevision === compositionState?.projectedCellRevision(command.x, command.y);
+        break;
+      }
+      default: {
+        break;
+      }
+    }
+    return {
+      useComposedExpectedRevisions,
+    };
   }
 
   advanceTick(input?: PlayerInputState): void {
@@ -240,7 +283,7 @@ export class LocalTransport {
     this.#drainAdvanceTicks();
   }
 
-  #drainAdvanceTicks(): void {
+  #drainAdvanceTicks(options: { forcePublication?: boolean } = {}): void {
     if (this.#advanceInProgress || this.#notificationDepth > 0) {
       return;
     }
@@ -250,7 +293,7 @@ export class LocalTransport {
       while (this.#pendingAdvanceInputs.length > 0) {
         const input = this.#pendingAdvanceInputs.shift();
         try {
-          this.#advanceTickOnce(input);
+          this.#advanceTickOnce(input, options);
         } catch (error) {
           errors.push(error);
         }
@@ -266,7 +309,7 @@ export class LocalTransport {
     }
   }
 
-  #advanceTickOnce(input?: PlayerInputState): void {
+  #advanceTickOnce(input?: PlayerInputState, options: { forcePublication?: boolean } = {}): void {
     const previousPaused = this.#world.paused;
     const results = this.#processPendingCommands();
     if (results.length > 0) {
@@ -282,13 +325,15 @@ export class LocalTransport {
       }
     }
     this.#replica.lastCommandResults = this.#lastCommandResults.slice();
-    const shouldPublishImmediately = this.#shouldPublishImmediately(results, previousPaused);
-    const shouldPublishResults = shouldPublishImmediately || results.some((result) => result.kind === "rejected");
+    const shouldPublishImmediately = options.forcePublication || this.#shouldPublishImmediately(results, previousPaused);
+    const shouldPublishResults = shouldPublishImmediately || (this.#world.paused && results.some((result) => result.kind === "rejected"));
     if (this.#world.paused) {
       clearPendingInputs(this.#world);
-      const cadenceDecision = this.#publicationCadence.observe(this.#getAuthorityRevision(this.#world), { force: shouldPublishImmediately });
+      const authorityRevision = this.#getAuthorityRevision(this.#world);
+      const shouldSyncAuthorityRevision = authorityRevision !== this.#replica.revision;
+      const cadenceDecision = this.#publicationCadence.observe(authorityRevision, { force: shouldPublishImmediately });
       const shouldPublish = cadenceDecision.shouldPublish || shouldPublishImmediately || shouldPublishResults;
-      if (shouldPublish) {
+      if (shouldPublish || shouldSyncAuthorityRevision) {
         this.#publish({
           force: shouldPublish,
           publishResults: shouldPublishResults,
@@ -302,9 +347,14 @@ export class LocalTransport {
     } else {
       advanceWorldTick(this.#world, resolvedInputs);
     }
-    const cadenceDecision = this.#publicationCadence.observe(this.#getAuthorityRevision(this.#world), { force: shouldPublishImmediately });
+    const authorityRevision = this.#getAuthorityRevision(this.#world);
+    const shouldSyncAuthorityRevision = authorityRevision !== this.#replica.revision;
+    const cadenceDecision = this.#publicationCadence.observe(authorityRevision, { force: shouldPublishImmediately });
     const shouldPublish = cadenceDecision.shouldPublish || shouldPublishImmediately || shouldPublishResults;
-    if (shouldPublish) {
+    const hasPendingCommandState = results.some((result) => result.kind === "accepted") || results.some((result) => result.kind === "rejected");
+    const hasPendingDirtyCells = this.#world.grid.dirtyCells.size > 0;
+    const shouldPublishAuthorityChanges = shouldSyncAuthorityRevision && !hasPendingCommandState && hasPendingDirtyCells;
+    if (shouldPublish || shouldPublishAuthorityChanges) {
       this.#publish({
         force: shouldPublish,
         publishResults: shouldPublishResults,
@@ -323,69 +373,83 @@ export class LocalTransport {
     const pendingEnvelopes = this.#world.commandInbox.splice(0);
     const results: CommandResult[] = [];
     for (const envelope of pendingEnvelopes) {
-      this.#consumePendingCommandProjection(envelope.actorId, envelope.command);
       const resolvedEnvelope = this.#prepareEnvelopeForProcessing(envelope);
       const result = processPendingCommands(this.#world, [resolvedEnvelope])[0];
       if (result) {
         results.push(result);
       }
     }
+    this.#pendingCommandProjections.clear();
     return results;
   }
 
-  #prepareEnvelopeForProcessing(envelope: { actorId: PlayerId; command: GameplayCommand }): { actorId: PlayerId; command: GameplayCommand } {
+  #prepareEnvelopeForProcessing(
+    envelope: CommandEnvelope,
+  ): CommandEnvelope {
     const player = this.#world.players[envelope.actorId];
     if (!player) {
       return envelope;
     }
+    const metadata = this.#pendingCommandMetadata.get(envelope);
+    const useComposedExpectedRevisions = metadata?.useComposedExpectedRevisions === true;
+    const currentInventoryRevision = this.#getProjectedInventoryRevision(envelope.actorId);
+    const currentCellRevision = (x: number, y: number) => this.#getProjectedCellRevision(x, y);
     switch (envelope.command.type) {
       case "select_slot": {
         return {
           ...envelope,
           command: {
             ...envelope.command,
-            expectedInventoryRevision: typeof envelope.command.expectedInventoryRevision === "number"
-              ? envelope.command.expectedInventoryRevision
-              : player.inventoryRevision,
+            expectedInventoryRevision: useComposedExpectedRevisions
+              ? currentInventoryRevision
+              : (typeof envelope.command.expectedInventoryRevision === "number"
+                ? envelope.command.expectedInventoryRevision
+                : currentInventoryRevision),
           },
         };
       }
       case "place": {
-        const anchorIndex = this.#world.grid.index(envelope.command.x, envelope.command.y);
         return {
           ...envelope,
           command: {
             ...envelope.command,
-            expectedInventoryRevision: typeof envelope.command.expectedInventoryRevision === "number"
-              ? envelope.command.expectedInventoryRevision
-              : player.inventoryRevision,
-            expectedAnchorRevision: typeof envelope.command.expectedAnchorRevision === "number"
-              ? envelope.command.expectedAnchorRevision
-              : (this.#world.grid.cellRevisions[anchorIndex] ?? 0),
+            expectedInventoryRevision: useComposedExpectedRevisions
+              ? currentInventoryRevision
+              : (typeof envelope.command.expectedInventoryRevision === "number"
+                ? envelope.command.expectedInventoryRevision
+                : currentInventoryRevision),
+            expectedAnchorRevision: useComposedExpectedRevisions
+              ? currentCellRevision(envelope.command.x, envelope.command.y)
+              : (typeof envelope.command.expectedAnchorRevision === "number"
+                ? envelope.command.expectedAnchorRevision
+                : currentCellRevision(envelope.command.x, envelope.command.y)),
           },
         };
       }
       case "harvest": {
-        const targetIndex = this.#world.grid.index(envelope.command.x, envelope.command.y);
         return {
           ...envelope,
           command: {
             ...envelope.command,
-            expectedTargetRevision: typeof envelope.command.expectedTargetRevision === "number"
-              ? envelope.command.expectedTargetRevision
-              : (this.#world.grid.cellRevisions[targetIndex] ?? 0),
+            expectedTargetRevision: useComposedExpectedRevisions
+              ? currentCellRevision(envelope.command.x, envelope.command.y)
+              : (typeof envelope.command.expectedTargetRevision === "number"
+                ? envelope.command.expectedTargetRevision
+                : currentCellRevision(envelope.command.x, envelope.command.y)),
           },
         };
       }
       case "cycle_faucet": {
-        const targetIndex = this.#world.grid.index(envelope.command.x, envelope.command.y);
+        const resolvedExpectedTargetRevision = useComposedExpectedRevisions
+          ? currentCellRevision(envelope.command.x, envelope.command.y)
+          : (typeof envelope.command.expectedTargetRevision === "number"
+            ? envelope.command.expectedTargetRevision
+            : currentCellRevision(envelope.command.x, envelope.command.y));
         return {
           ...envelope,
           command: {
             ...envelope.command,
-            expectedTargetRevision: typeof envelope.command.expectedTargetRevision === "number"
-              ? envelope.command.expectedTargetRevision
-              : (this.#world.grid.cellRevisions[targetIndex] ?? 0),
+            expectedTargetRevision: resolvedExpectedTargetRevision,
           },
         };
       }
@@ -396,16 +460,9 @@ export class LocalTransport {
   }
 
   #recordPendingCommandProjection(actorId: PlayerId, command: GameplayCommand): void {
-    const projection = this.#pendingCommandProjections.get(actorId) ?? {
-      inventoryRevisionDelta: 0,
-      targetRevisionDeltas: new Map<number, number>(),
-    };
+    const projection = this.#pendingCommandProjections.get(actorId) ?? this.#createPendingCommandProjection();
     const projectionDelta = this.#getPendingProjectionDelta(actorId, command);
-    projection.inventoryRevisionDelta += projectionDelta.inventoryRevisionDelta;
-    for (const [index, delta] of projectionDelta.targetRevisionDeltas) {
-      projection.targetRevisionDeltas.set(index, (projection.targetRevisionDeltas.get(index) ?? 0) + delta);
-    }
-    this.#pendingCommandProjections.set(actorId, projection);
+    this.#pendingCommandProjections.set(actorId, this.#mergePendingCommandProjection(projection, projectionDelta));
   }
 
   #getPendingProjectionDelta(actorId: PlayerId, command: GameplayCommand): PendingCommandProjection {
@@ -573,61 +630,42 @@ export class LocalTransport {
     return cluster && cluster.size > 0 ? cluster : null;
   }
 
-  #consumePendingCommandProjection(actorId: PlayerId, command: GameplayCommand): void {
-    const projection = this.#pendingCommandProjections.get(actorId);
-    if (!projection) {
-      return;
-    }
-    switch (command.type) {
-      case "place": {
-        projection.inventoryRevisionDelta = Math.max(0, projection.inventoryRevisionDelta - 1);
-        const index = this.#world.grid.index(command.x, command.y);
-        projection.targetRevisionDeltas.set(index, Math.max(0, (projection.targetRevisionDeltas.get(index) ?? 0) - 1));
-        if (projection.targetRevisionDeltas.get(index) === 0) {
-          projection.targetRevisionDeltas.delete(index);
-        }
-        break;
-      }
-      case "harvest": {
-        projection.inventoryRevisionDelta = Math.max(0, projection.inventoryRevisionDelta - 1);
-        const index = this.#world.grid.index(command.x, command.y);
-        projection.targetRevisionDeltas.set(index, Math.max(0, (projection.targetRevisionDeltas.get(index) ?? 0) - 1));
-        if (projection.targetRevisionDeltas.get(index) === 0) {
-          projection.targetRevisionDeltas.delete(index);
-        }
-        break;
-      }
-      case "cycle_faucet": {
-        const index = this.#world.grid.index(command.x, command.y);
-        projection.targetRevisionDeltas.set(index, Math.max(0, (projection.targetRevisionDeltas.get(index) ?? 0) - 1));
-        if (projection.targetRevisionDeltas.get(index) === 0) {
-          projection.targetRevisionDeltas.delete(index);
-        }
-        break;
-      }
-      default: {
-        break;
-      }
-    }
-    if (projection.inventoryRevisionDelta === 0 && projection.targetRevisionDeltas.size === 0) {
-      this.#pendingCommandProjections.delete(actorId);
-    } else {
-      this.#pendingCommandProjections.set(actorId, projection);
-    }
+  #createPendingCommandProjection(): PendingCommandProjection {
+    return {
+      inventoryRevisionDelta: 0,
+      targetRevisionDeltas: new Map<number, number>(),
+    };
   }
 
-  #getProjectedInventoryRevision(actorId: PlayerId): number {
+  #mergePendingCommandProjection(base: PendingCommandProjection, delta: PendingCommandProjection): PendingCommandProjection {
+    const merged = this.#createPendingCommandProjection();
+    merged.inventoryRevisionDelta = base.inventoryRevisionDelta + delta.inventoryRevisionDelta;
+    for (const [index, value] of base.targetRevisionDeltas) {
+      merged.targetRevisionDeltas.set(index, value);
+    }
+    for (const [index, value] of delta.targetRevisionDeltas) {
+      merged.targetRevisionDeltas.set(index, (merged.targetRevisionDeltas.get(index) ?? 0) + value);
+    }
+    return merged;
+  }
+
+  #getProjectedInventoryRevision(actorId: PlayerId, projection?: PendingCommandProjection): number {
     const player = this.#world.players[actorId];
-    return player?.inventoryRevision ?? 0;
+    const baseInventoryRevision = player?.inventoryRevision ?? 0;
+    return baseInventoryRevision + (projection?.inventoryRevisionDelta ?? 0);
   }
 
-  #getProjectedCellRevision(actorId: PlayerId, x: number, y: number): number {
+  #getProjectedCellRevision(x: number, y: number, projection?: PendingCommandProjection): number {
     const index = this.#world.grid.index(x, y);
-    const pendingDelta = this.#pendingCommandProjections.get(actorId)?.targetRevisionDeltas.get(index) ?? 0;
+    const pendingDelta = (projection?.targetRevisionDeltas.get(index) ?? 0);
     return (this.#world.grid.cellRevisions[index] ?? 0) + pendingDelta;
   }
 
   getCommandCompositionState(actorId: PlayerId): LocalTransportCommandCompositionState | null {
+    return this.#createCommandCompositionState(actorId, this.#pendingCommandProjections.get(actorId));
+  }
+
+  #createCommandCompositionState(actorId: PlayerId, pendingProjection?: PendingCommandProjection): LocalTransportCommandCompositionState | null {
     const player = this.#world.players[actorId];
     if (!player) {
       return null;
@@ -639,11 +677,11 @@ export class LocalTransport {
       hotbar: cloneHotbar(player.hotbar),
       pendingRefunds: { ...player.pendingRefunds },
     };
-    nextPlayer.inventoryRevision = this.#getProjectedInventoryRevision(actorId);
+    nextPlayer.inventoryRevision = this.#getProjectedInventoryRevision(actorId, pendingProjection);
     return {
       player: nextPlayer,
       projectedInventoryRevision: nextPlayer.inventoryRevision,
-      projectedCellRevision: (cellX: number, cellY: number) => this.#getProjectedCellRevision(actorId, cellX, cellY),
+      projectedCellRevision: (cellX: number, cellY: number) => this.#getProjectedCellRevision(cellX, cellY, pendingProjection),
     };
   }
 
@@ -801,7 +839,14 @@ export class LocalTransport {
         const requestOptions = request.options;
         const subscribers = this.#subscribers.slice();
         const publicationState = this.#capturePendingPublicationState();
-        const shouldPublishIteration = Boolean(requestOptions.force || requestOptions.publishResults || publicationState.commandResults.length > 0 || publicationState.dirtyCells.length > 0);
+        const authorityRevision = this.#getAuthorityRevision(publicationState.authorityWorld);
+        const hasAuthorityRevisionState = authorityRevision !== this.#replica.revision;
+        const hasMeaningfulPublicationState = Boolean(
+          requestOptions.publishResults
+          || publicationState.commandResults.some((result) => result.kind === "accepted")
+          || publicationState.dirtyCells.length > 0,
+        );
+        const shouldPublishIteration = hasMeaningfulPublicationState || requestOptions.materializeSnapshot || hasAuthorityRevisionState;
         if (shouldPublishIteration) {
           const iterationErrors = this.#publishOnce(publicationState, requestOptions, subscribers);
           errors.push(...iterationErrors);
@@ -825,20 +870,41 @@ export class LocalTransport {
     const pendingCommandResults = publicationState.commandResults;
     const pendingCellEntries = publicationState.dirtyCells;
     const nextDelta = this.#buildDelta(this.#replica.snapshot, authorityWorld, pendingCellEntries);
+    const authorityRevision = this.#getAuthorityRevision(authorityWorld);
     const lastCommandResults = pendingCommandResults.length > 0
       ? pendingCommandResults
       : this.#replica.lastCommandResults.slice();
-    const hasPendingState = pendingCommandResults.length > 0 || pendingCellEntries.length > 0 || nextDelta !== null;
-    const shouldPublish = Boolean(hasPendingState || (!options.force && lastCommandResults.length > 0));
-    const authorityRevision = this.#getAuthorityRevision(authorityWorld);
+    const hasOnlyRejections = pendingCommandResults.length > 0 && pendingCommandResults.every((result) => result.kind === "rejected");
+    const hasPendingState = pendingCommandResults.some((result) => result.kind === "accepted") || pendingCellEntries.length > 0;
+    const hasMeaningfulDelta = Boolean(
+      nextDelta
+      && (nextDelta.cells.length > 0
+        || nextDelta.players.length > 0
+        || nextDelta.fallingObjects.length > 0
+        || nextDelta.metadata.some((entry) => entry.field !== "commandLedger")),
+    );
+    const shouldNotifyRejectedResults = options.publishResults && (!hasOnlyRejections || this.#world.paused);
+    const shouldNotifySubscribers = Boolean(
+      hasPendingState
+      || shouldNotifyRejectedResults
+      || (!hasOnlyRejections && (pendingCommandResults.length > 0 || authorityRevision !== this.#replica.revision || hasMeaningfulDelta))
+      || (options.materializeSnapshot && hasMeaningfulDelta && !hasOnlyRejections),
+    );
     const publicationRevision = authorityRevision;
     const effectiveRevision = authorityRevision;
     const forceResync = Boolean(options.materializeSnapshot);
-    if (!shouldPublish) {
+    const shouldSyncReplica = Boolean(
+      pendingCommandResults.length > 0
+      || pendingCellEntries.length > 0
+      || authorityRevision !== this.#replica.revision
+      || options.materializeSnapshot
+    );
+    if (!shouldSyncReplica) {
+      return [];
+    }
+    if (!shouldNotifySubscribers) {
       this.#replica.lastCommandResults = lastCommandResults.slice();
-      if (options.materializeSnapshot) {
-        this.#syncReplicaFromAuthority(this.#replica, authorityWorld, authorityRevision, effectiveRevision);
-      }
+      this.#syncReplicaFromAuthority(this.#replica, authorityWorld, authorityRevision, effectiveRevision);
       return [];
     }
 
@@ -872,6 +938,14 @@ export class LocalTransport {
 
     if (errors.length > 0) {
       return errors;
+    }
+
+    if (this.#notificationDepth === 0 && this.#pendingAdvanceInputs.length > 0) {
+      try {
+        this.#drainAdvanceTicks({ forcePublication: true });
+      } catch (error) {
+        errors.push(error);
+      }
     }
 
     authorityWorld.grid.dirtyCells.commitPending(pendingCellEntries);

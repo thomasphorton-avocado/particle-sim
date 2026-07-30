@@ -456,12 +456,12 @@ describe("production input routing", () => {
     const results = session.transport.getLastCommandResults();
     expect(results.map((result) => [result.type, result.kind])).toEqual([
       ["place", "accepted"],
-      ["place", "rejected"],
+      ["place", "accepted"],
     ]);
     const clientWorld = session.transport.getClientWorld();
     expect(clientWorld.grid.get(1, 1)).toBe(MaterialId.Clock);
-    expect(clientWorld.grid.get(2, 2)).toBe(MaterialId.Empty);
-    expect(clientWorld.players[playerId].inventoryRevision).toBe(1);
+    expect(clientWorld.grid.get(2, 2)).toBe(MaterialId.Clock);
+    expect(clientWorld.players[playerId].inventoryRevision).toBe(2);
   });
 
   it("reconciles a rejected placement command before a later valid placement", async () => {

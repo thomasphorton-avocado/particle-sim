@@ -880,9 +880,9 @@ const canonicalReplayGoldenCheckpoints = {
   movement: "73e4007772e3fee475e4039d74e4020a6fe3fa2b6ee3f89871e3fd5170e3fbbe",
   mining: "e0fb7dd6e1fb7f69defb7ab0dffb7c43e4fb8422e5fb85b5e2fb80fce3fb828f",
   flower_harvest: "5de68e765ee690095be68b505ce68ce361e694c262e696555fe6919c60e6932f",
-  faucet_water: "058912c90489113603890fa302890e100989191508891782078915ef0689145c",
-  night_transition: "e118b656e218b7e9df18b330e018b4c3e518bca2e618be35e318b97ce418bb0f",
-  final: "e118b656e218b7e9df18b330e018b4c3e518bca2e618be35e318b97ce418bb0f",
+  faucet_water: "56ce224657ce23d954ce1f2055ce20b35ace28925bce2a2558ce256c59ce26ff",
+  night_transition: "a941ceefa841cd5cab41d215aa41d082a541c8a3a441c710a741cbc9a641ca36",
+  final: "a941ceefa841cd5cab41d215aa41d082a541c8a3a441c710a741cbc9a641ca36",
 };
 
 const canonicalSubsystemGoldenCheckpoints = {

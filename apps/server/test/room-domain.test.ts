@@ -979,7 +979,7 @@ test("maxPendingAckDeliveries bounds concurrency and every accepted ingress gets
       tickHz: 60,
       maxCatchUpTicks: 2,
       idleCleanupThresholdMs: 1_000,
-      maxPendingAckDeliveries: 1,
+      maxPendingAckDeliveries: 3,
     },
     {
       clock: new FakeClock(0),
@@ -1029,6 +1029,109 @@ test("maxPendingAckDeliveries bounds concurrency and every accepted ingress gets
   assert.equal(maxActive, 1);
   assert.equal(acks.length, 3);
   assert.deepEqual(acks.map((ack) => ack.receiveOrdinal), [2, 3, 4]);
+});
+
+test("maxPendingAckDeliveries reserves queued slots and rejects overflow while preserving ordered delivery", async () => {
+  const release = createDeferred<void>();
+  const acks: RoomCommandAck[] = [];
+  let active = 0;
+  let maxActive = 0;
+  const room = new Room(
+    {
+      roomId: `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+      maxPendingAckDeliveries: 4,
+    },
+    {
+      clock: new FakeClock(0),
+      scheduler: new DeadlineScheduler(new FakeClock(0), 100, 2, new ManualDeadlineTimerDriver()),
+      publisher: new TestPublisher(),
+      hooks: {
+        onCommandAck: async (_roomId: string, _membership: unknown, ack: RoomCommandAck) => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          acks.push(ack);
+          if (ack.receiveOrdinal === 2) {
+            await release.promise;
+          }
+          active -= 1;
+        },
+      },
+    } as RoomDependencies,
+  );
+
+  assert.equal(room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.flushPendingIngresses();
+  acks.length = 0;
+
+  const membership = room.memberships[0];
+  assert.ok(membership);
+  const acceptedCommands = [1, 2, 3, 4].map((actorSequence) => room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: actorSequence + 1,
+    generation: membership!.generation,
+    actorSequence,
+    issuedTick: actorSequence,
+    command: { type: "pause_world", expectedWorldRevision: room.state.worldRevision },
+  }));
+  for (const accepted of acceptedCommands) {
+    assert.equal(accepted.accepted, true);
+  }
+
+  const flushPromise = room.flushPendingIngresses();
+  await Promise.resolve();
+  assert.equal(maxActive, 1);
+
+  const backlogFirst = room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 6,
+    generation: membership!.generation,
+    actorSequence: 5,
+    issuedTick: 5,
+    command: { type: "pause_world", expectedWorldRevision: room.state.worldRevision },
+  });
+  const backlogSecond = room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 7,
+    generation: membership!.generation,
+    actorSequence: 6,
+    issuedTick: 6,
+    command: { type: "pause_world", expectedWorldRevision: room.state.worldRevision },
+  });
+
+  assert.equal(backlogFirst.accepted, false);
+  assert.equal(backlogFirst.code, "delivery_backlog");
+  assert.equal(backlogSecond.accepted, false);
+  assert.equal(backlogSecond.code, "delivery_backlog");
+  assert.equal(maxActive, 1);
+  assert.equal(acks.filter((ack) => ack.policyCode === "delivery_backlog").length, 0);
+
+  let shutdownSettled = false;
+  const shutdownPromise = room.beginShutdown("server_shutdown").then(() => {
+    shutdownSettled = true;
+  });
+  await Promise.resolve();
+  assert.equal(shutdownSettled, false);
+
+  release.resolve();
+  await shutdownPromise;
+  await flushPromise;
+
+  assert.equal(shutdownSettled, true);
+  assert.equal(maxActive, 1);
+  assert.equal(acks.filter((ack) => ack.policyCode === "delivery_backlog").length, 0);
+  assert.equal(acks.filter((ack) => ack.kind === "gameplay_result").length, 4);
+  assert.deepEqual(acks.map((ack) => ack.receiveOrdinal), [2, 3, 4, 5]);
 });
 
 test("duplicate replays reuse the original receipt without advancing sequence", async () => {

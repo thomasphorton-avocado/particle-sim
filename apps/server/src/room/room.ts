@@ -876,17 +876,16 @@ export class Room {
       }
     };
     const enqueueAck = async (): Promise<void> => {
-      if (this.#pendingAckDeliveries >= this.#maxPendingAckDeliveries) {
-        await callback();
-        return;
-      }
-      this.#pendingAckDeliveries += 1;
       try {
         await callback();
       } finally {
         this.#pendingAckDeliveries = Math.max(0, this.#pendingAckDeliveries - 1);
       }
     };
+    if (this.#pendingAckDeliveries >= this.#maxPendingAckDeliveries) {
+      return;
+    }
+    this.#pendingAckDeliveries += 1;
     this.#ackDeliveryPromise = this.#ackDeliveryPromise.then(enqueueAck).catch(() => undefined);
   }
 

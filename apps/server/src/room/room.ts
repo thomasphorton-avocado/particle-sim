@@ -875,16 +875,19 @@ export class Room {
         this.#handleHookError(error);
       }
     };
-    if (this.#pendingAckDeliveries >= this.#maxPendingAckDeliveries) {
-      this.#ackDeliveryPromise = this.#ackDeliveryPromise.then(async () => {
+    const enqueueAck = async (): Promise<void> => {
+      if (this.#pendingAckDeliveries >= this.#maxPendingAckDeliveries) {
         await callback();
-      }).catch(() => undefined);
-      return;
-    }
-    this.#pendingAckDeliveries += 1;
-    void callback().finally(() => {
-      this.#pendingAckDeliveries = Math.max(0, this.#pendingAckDeliveries - 1);
-    });
+        return;
+      }
+      this.#pendingAckDeliveries += 1;
+      try {
+        await callback();
+      } finally {
+        this.#pendingAckDeliveries = Math.max(0, this.#pendingAckDeliveries - 1);
+      }
+    };
+    this.#ackDeliveryPromise = this.#ackDeliveryPromise.then(enqueueAck).catch(() => undefined);
   }
 
   async #drainAckQueue(): Promise<void> {

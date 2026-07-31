@@ -8,7 +8,7 @@ import { RoomAdmissionPolicy, createRoomAdmissionPolicyConfig } from "../src/roo
 import { Room, type RoomConfig, type RoomDependencies } from "../src/room/room.js";
 import { DeadlineScheduler, ManualDeadlineTimerDriver, type Clock } from "../src/room/scheduler.js";
 import { MemoryPublisher, RoomManager, type RoomTimerAdapter } from "../src/room/room-manager.js";
-import type { RoomCommandAck, RoomPublication } from "../src/room/types.js";
+import type { RoomCommandAck, RoomLifecycleReason, RoomPublication } from "../src/room/types.js";
 
 let nextTestRoomOrdinal = 1;
 
@@ -98,6 +98,16 @@ function createTestRoom(configOverrides: Partial<RoomConfig> = {}) {
     { clock, scheduler, publisher } as RoomDependencies,
   );
   return { room, clock, scheduler, publisher, manualDriver };
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 test("rooms stay isolated while advancing deterministically", async () => {
@@ -811,6 +821,7 @@ test("deferred lifecycle ingress yields to the next boundary without spinning", 
   assert.equal(leave.accepted, true);
 
   room.handleTick();
+  await room.flushPendingIngresses();
   assert.equal(acks.length, 2);
   assert.equal(room.world.commandLedger.recent.length, 2);
   assert.equal(room.memberships.length, 1);
@@ -822,6 +833,202 @@ test("deferred lifecycle ingress yields to the next boundary without spinning", 
   assert.equal(acks.length, 3);
   assert.equal(room.world.commandLedger.recent.length, 3);
   assert.equal(room.memberships.length, 0);
+});
+
+test("onCommandAck deliveries are serialized and preserve ingress completion order", async () => {
+  const release = createDeferred<void>();
+  const acks: RoomCommandAck[] = [];
+  let active = 0;
+  let maxActive = 0;
+  const hooks = {
+    onCommandAck: async (_roomId: string, _membership: unknown, ack: RoomCommandAck) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      acks.push(ack);
+      if (ack.receiveOrdinal === 2) {
+        await release.promise;
+      }
+      active -= 1;
+    },
+  };
+  const room = new Room(
+    {
+      roomId: `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+    },
+    { clock: new FakeClock(0), scheduler: new DeadlineScheduler(new FakeClock(0), 100, 2, new ManualDeadlineTimerDriver()), publisher: new TestPublisher(), hooks } as RoomDependencies,
+  );
+
+  assert.equal(room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.flushPendingIngresses();
+  acks.length = 0;
+
+  const membership = room.memberships[0];
+  assert.ok(membership);
+  const first = room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: membership!.generation,
+    actorSequence: 1,
+    issuedTick: 1,
+    command: { type: "pause_world", expectedWorldRevision: room.state.worldRevision },
+  });
+  const second = room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 3,
+    generation: membership!.generation,
+    actorSequence: 2,
+    issuedTick: 2,
+    command: { type: "pause_world", expectedWorldRevision: room.state.worldRevision },
+  });
+  assert.equal(first.accepted, true);
+  assert.equal(second.accepted, true);
+
+  const flushPromise = room.flushPendingIngresses();
+  await Promise.resolve();
+  assert.equal(maxActive, 1);
+  assert.deepEqual(acks.map((ack) => ack.receiveOrdinal), [2]);
+
+  release.resolve();
+  await flushPromise;
+
+  assert.equal(maxActive, 1);
+  assert.deepEqual(acks.map((ack) => ack.receiveOrdinal), [2, 3]);
+});
+
+test("beginShutdown waits for the final ack hook before closing", async () => {
+  const release = createDeferred<void>();
+  const acks: RoomCommandAck[] = [];
+  const closedReasons: string[] = [];
+  const room = new Room(
+    {
+      roomId: `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+      maxPendingAckDeliveries: 1,
+    },
+    {
+      clock: new FakeClock(0),
+      scheduler: new DeadlineScheduler(new FakeClock(0), 100, 2, new ManualDeadlineTimerDriver()),
+      publisher: new TestPublisher(),
+      hooks: {
+        onCommandAck: async (_roomId: string, _membership: unknown, ack: RoomCommandAck) => {
+          acks.push(ack);
+          await release.promise;
+        },
+        onClosed: (_roomId: string, reason: RoomLifecycleReason) => {
+          closedReasons.push(reason);
+        },
+      },
+    } as RoomDependencies,
+  );
+
+  assert.equal(room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.flushPendingIngresses();
+  acks.length = 0;
+
+  assert.equal(room.enqueueCommand({
+    membershipId: room.memberships[0]!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: room.memberships[0]!.generation,
+    actorSequence: 1,
+    issuedTick: 1,
+    command: { type: "pause_world", expectedWorldRevision: room.state.worldRevision },
+  }).accepted, true);
+
+  let settled = false;
+  const closePromise = room.beginShutdown("server_shutdown").then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+
+  assert.equal(acks.length, 1);
+  assert.equal(settled, false);
+
+  release.resolve();
+  await closePromise;
+
+  assert.equal(settled, true);
+  assert.equal(acks.length, 1);
+  assert.deepEqual(closedReasons, ["server_shutdown"]);
+});
+
+test("maxPendingAckDeliveries bounds concurrency and every accepted ingress gets one terminal ack", async () => {
+  const release = createDeferred<void>();
+  const acks: RoomCommandAck[] = [];
+  let active = 0;
+  let maxActive = 0;
+  const room = new Room(
+    {
+      roomId: `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+      maxPendingAckDeliveries: 1,
+    },
+    {
+      clock: new FakeClock(0),
+      scheduler: new DeadlineScheduler(new FakeClock(0), 100, 2, new ManualDeadlineTimerDriver()),
+      publisher: new TestPublisher(),
+      hooks: {
+        onCommandAck: async (_roomId: string, _membership: unknown, ack: RoomCommandAck) => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          acks.push(ack);
+          if (acks.length === 1) {
+            await release.promise;
+          }
+          active -= 1;
+        },
+      },
+    } as RoomDependencies,
+  );
+
+  assert.equal(room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.flushPendingIngresses();
+  acks.length = 0;
+
+  const membership = room.memberships[0];
+  assert.ok(membership);
+  const acceptedCommands = [1, 2, 3].map((actorSequence) => room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: actorSequence + 1,
+    generation: membership!.generation,
+    actorSequence,
+    issuedTick: actorSequence,
+    command: { type: "pause_world", expectedWorldRevision: room.state.worldRevision },
+  }));
+  for (const accepted of acceptedCommands) {
+    assert.equal(accepted.accepted, true);
+  }
+
+  const flushPromise = room.flushPendingIngresses();
+  await Promise.resolve();
+  assert.equal(maxActive, 1);
+
+  release.resolve();
+  await flushPromise;
+
+  assert.equal(maxActive, 1);
+  assert.equal(acks.length, 3);
+  assert.deepEqual(acks.map((ack) => ack.receiveOrdinal), [2, 3, 4]);
 });
 
 test("duplicate replays reuse the original receipt without advancing sequence", async () => {

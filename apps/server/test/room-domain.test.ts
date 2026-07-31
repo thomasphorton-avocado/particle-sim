@@ -768,6 +768,7 @@ test("duplicate replays reuse the original receipt without advancing sequence", 
 
   const membership = roomWithHooks.memberships[0];
   assert.ok(membership);
+  const replayCommand = { type: "pause_world" as const, expectedWorldRevision: roomWithHooks.state.worldRevision };
   const first = roomWithHooks.enqueueCommand({
     membershipId: membership!.membershipId,
     sessionId: "one",
@@ -776,7 +777,7 @@ test("duplicate replays reuse the original receipt without advancing sequence", 
     generation: membership!.generation,
     actorSequence: 1,
     issuedTick: 1,
-    command: { type: "pause_world", expectedWorldRevision: roomWithHooks.state.worldRevision },
+    command: replayCommand,
   });
   assert.equal(first.accepted, true);
   await roomWithHooks.flushPendingIngresses();
@@ -789,13 +790,27 @@ test("duplicate replays reuse the original receipt without advancing sequence", 
     generation: membership!.generation,
     actorSequence: 1,
     issuedTick: 1,
-    command: { type: "pause_world", expectedWorldRevision: roomWithHooks.state.worldRevision },
+    command: replayCommand,
   });
   assert.equal(duplicate.accepted, true);
   await roomWithHooks.flushPendingIngresses();
 
+  const conflicting = roomWithHooks.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 4,
+    generation: membership!.generation,
+    actorSequence: 1,
+    issuedTick: 1,
+    command: { type: "pause_world", expectedWorldRevision: roomWithHooks.state.worldRevision + 1 },
+  });
+  assert.equal(conflicting.accepted, false);
+  assert.equal(conflicting.code, "conflicting_sequence");
+  await roomWithHooks.flushPendingIngresses();
+
   assert.equal(roomWithHooks.world.commandLedger.recent.length, 1);
-  assert.equal(acks.length, 2);
+  assert.equal(acks.length, 3);
   assert.equal(acks[1]?.commandId, acks[0]?.commandId);
   assert.equal(acks[1]?.authorityOrder, acks[0]?.authorityOrder);
 });

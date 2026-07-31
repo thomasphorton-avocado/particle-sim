@@ -587,7 +587,7 @@ export class Room {
         this.#drainPendingCommands();
         if (this.#pendingCommandIngresses.length > 0) {
           this.#ingressQueue.unshift(ingress);
-          continue;
+          break;
         }
       }
       this.processIngress(ingress);
@@ -882,13 +882,9 @@ export class Room {
       return;
     }
     this.#pendingAckDeliveries += 1;
-    this.#ackDeliveryPromise = this.#ackDeliveryPromise.then(async () => {
-      try {
-        await callback();
-      } finally {
-        this.#pendingAckDeliveries = Math.max(0, this.#pendingAckDeliveries - 1);
-      }
-    }).catch(() => undefined);
+    void callback().finally(() => {
+      this.#pendingAckDeliveries = Math.max(0, this.#pendingAckDeliveries - 1);
+    });
   }
 
   async #drainAckQueue(): Promise<void> {

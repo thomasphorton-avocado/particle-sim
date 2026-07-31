@@ -743,6 +743,87 @@ test("admission policy drains players in round-robin order", () => {
   assert.deepEqual(batch.map((entry) => entry.playerId), [createPlayerId("player_a"), createPlayerId("player_b"), createPlayerId("player_c")]);
 });
 
+test("deferred lifecycle ingress yields to the next boundary without spinning", { timeout: 1_000 }, async () => {
+  const acks: RoomCommandAck[] = [];
+  const manualDriver = new ManualDeadlineTimerDriver();
+  const clock = new FakeClock(0, manualDriver);
+  const scheduler = new DeadlineScheduler(clock, 100, 2, manualDriver);
+  const publisher = new TestPublisher();
+  const room = new Room(
+    {
+      roomId: `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+      admissionPolicy: {
+        maxBatchSize: 2,
+        rateWindowMs: 1_000,
+        rateLimit: 16,
+        maxQueuedCommandsPerPlayer: 16,
+        maxQueuedCommandsPerRoom: 16,
+        maxCommandsPerPlayerPerTick: 2,
+        maxCommandsPerTick: 2,
+        maxAckHistory: 64,
+        maxRateBuckets: 16,
+        rateBucketTtlMs: 2_000,
+      },
+    },
+    {
+      clock,
+      scheduler,
+      publisher,
+      hooks: {
+        onCommandAck: (_roomId: string, _membership: unknown, ack: RoomCommandAck) => {
+          acks.push(ack);
+        },
+      },
+    } as RoomDependencies,
+  );
+
+  assert.equal(room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.flushPendingIngresses();
+
+  const membership = room.memberships[0];
+  assert.ok(membership);
+  const acceptedCommands = [1, 2, 3].map((actorSequence) => room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: actorSequence + 1,
+    generation: membership!.generation,
+    actorSequence,
+    issuedTick: actorSequence,
+    command: { type: "pause_world", expectedWorldRevision: room.state.worldRevision },
+  }));
+  for (const accepted of acceptedCommands) {
+    assert.equal(accepted.accepted, true);
+  }
+
+  const leave = room.enqueueLeave({
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 5,
+    generation: membership!.generation,
+    membershipId: membership!.membershipId,
+  });
+  assert.equal(leave.accepted, true);
+
+  room.handleTick();
+  assert.equal(acks.length, 2);
+  assert.equal(room.world.commandLedger.recent.length, 2);
+  assert.equal(room.memberships.length, 1);
+  assert.equal(room.ingressQueueSize, 1);
+
+  room.handleTick();
+  await room.flushPendingIngresses();
+
+  assert.equal(acks.length, 3);
+  assert.equal(room.world.commandLedger.recent.length, 3);
+  assert.equal(room.memberships.length, 0);
+});
+
 test("duplicate replays reuse the original receipt without advancing sequence", async () => {
   const acks: RoomCommandAck[] = [];
   const room = createTestRoom();

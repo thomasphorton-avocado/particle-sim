@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import test from "node:test";
-import { createGameplayRandomState, type RoomId } from "@particle-sim/shared";
+import { createGameplayRandomState, createPlayerId, type RoomId } from "@particle-sim/shared";
 import { parseServerConfig } from "../src/config.js";
 import { startServer } from "../src/main.js";
+import { RoomAdmissionPolicy, createRoomAdmissionPolicyConfig } from "../src/room/admission.js";
 import { Room, type RoomConfig, type RoomDependencies } from "../src/room/room.js";
 import { DeadlineScheduler, ManualDeadlineTimerDriver, type Clock } from "../src/room/scheduler.js";
 import { MemoryPublisher, RoomManager, type RoomTimerAdapter } from "../src/room/room-manager.js";
@@ -585,6 +586,88 @@ test("commands are rejected until the join reservation is realized", async () =>
   await room.room.flushPendingIngresses();
 
   assert.equal(room.room.world.commandLedger.recent.length, 1);
+});
+
+test("admission policy enforces rate-window and backlog limits", () => {
+  const clock = new FakeClock(0);
+  const policy = new RoomAdmissionPolicy(
+    createRoomAdmissionPolicyConfig({
+      rateWindowMs: 1_000,
+      rateLimit: 1,
+      maxQueuedCommandsPerPlayer: 1,
+      maxQueuedCommandsPerRoom: 1,
+      maxCommandsPerPlayerPerTick: 2,
+      maxCommandsPerTick: 2,
+    }),
+    clock,
+  );
+
+  const first = policy.enqueueCommand({
+    membershipId: "membership_a",
+    sessionId: "one",
+    connectionId: "conn-a",
+    generation: 1,
+    playerId: createPlayerId("player_a"),
+    actorSequence: 1,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  });
+  assert.equal(first.accepted, true);
+
+  const rateLimited = policy.enqueueCommand({
+    membershipId: "membership_a",
+    sessionId: "one",
+    connectionId: "conn-a",
+    generation: 1,
+    playerId: createPlayerId("player_a"),
+    actorSequence: 2,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  });
+  assert.equal(rateLimited.accepted, false);
+  assert.equal(rateLimited.code, "rate_limited");
+
+  clock.advance(1_000);
+  const roomBacklog = policy.enqueueCommand({
+    membershipId: "membership_b",
+    sessionId: "two",
+    connectionId: "conn-b",
+    generation: 1,
+    playerId: createPlayerId("player_b"),
+    actorSequence: 1,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  });
+  assert.equal(roomBacklog.accepted, false);
+  assert.equal(roomBacklog.code, "room_backlog");
+});
+
+test("admission policy drains players in round-robin order", () => {
+  const clock = new FakeClock(0);
+  const policy = new RoomAdmissionPolicy(
+    createRoomAdmissionPolicyConfig({
+      maxBatchSize: 4,
+      maxCommandsPerTick: 4,
+      maxCommandsPerPlayerPerTick: 1,
+      maxQueuedCommandsPerPlayer: 4,
+      maxQueuedCommandsPerRoom: 4,
+    }),
+    clock,
+  );
+
+  for (const [index, playerId] of [createPlayerId("player_a"), createPlayerId("player_b"), createPlayerId("player_c")].entries()) {
+    const accepted = policy.enqueueCommand({
+      membershipId: `membership_${index + 1}`,
+      sessionId: `session_${index + 1}`,
+      connectionId: `conn-${index + 1}`,
+      generation: 1,
+      playerId,
+      actorSequence: index + 1,
+      command: { type: "pause_world", expectedWorldRevision: 1 },
+    });
+    assert.equal(accepted.accepted, true);
+  }
+
+  const batch = policy.takeNextBatch(4, 1);
+  assert.equal(batch.length, 3);
+  assert.deepEqual(batch.map((entry) => entry.playerId), [createPlayerId("player_a"), createPlayerId("player_b"), createPlayerId("player_c")]);
 });
 
 test("same-boundary leave replacement clears old command sequence state", async () => {

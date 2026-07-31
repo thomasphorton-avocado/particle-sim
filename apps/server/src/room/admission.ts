@@ -1,4 +1,4 @@
-import { createCommandId, parseGameplayCommand, type CommandId, type GameplayCommand, type PlayerId, type RoomId } from "@particle-sim/shared";
+import { createCommandId, parseGameplayCommand, type CommandId, type GameplayCommand, type PlayerId } from "@particle-sim/shared";
 import type { Clock } from "./scheduler.js";
 import type { RoomCommandAck, RoomCommandAdmissionResult } from "./types.js";
 
@@ -25,7 +25,6 @@ export interface PendingCommandEntry {
 }
 
 interface EnqueueCommandOptions {
-  readonly roomId: RoomId;
   readonly membershipId: string;
   readonly sessionId: string;
   readonly connectionId: string;
@@ -111,7 +110,6 @@ export class RoomAdmissionPolicy {
     };
     this.#nextReceiveOrdinal += 1;
     this.#pendingCommands.push(entry);
-    this.#pendingCommands.sort((left, right) => left.receiveOrdinal - right.receiveOrdinal);
     return { accepted: true, entry };
   }
 
@@ -120,7 +118,7 @@ export class RoomAdmissionPolicy {
       return [];
     }
 
-    const ordered = [...this.#pendingCommands].sort((left, right) => left.receiveOrdinal - right.receiveOrdinal);
+    const ordered = [...this.#pendingCommands];
     const effectiveMaxCommandsPerTick = Math.min(maxCommandsPerTick, this.#config.maxBatchSize);
     const players = this.#orderedPlayers(ordered);
     if (players.length === 0) {

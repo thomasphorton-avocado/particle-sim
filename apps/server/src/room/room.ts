@@ -1,6 +1,7 @@
 import {
   advanceWorldTick,
   computeWorldChecksum,
+  createCommandIdValue,
   createDefaultPlayerState,
   createDefaultWorldState,
   createPlayerId,
@@ -363,9 +364,11 @@ export class Room {
     if (request.membershipId !== membership.membershipId || request.connectionId !== membership.connectionId || request.generation !== membership.generation) {
       return { accepted: false, code: "stale_membership", message: "membership identity is stale" };
     }
-    const actorSequence = request.actorSequence ?? (this.#commandSequencesByMembership.get(membership.membershipId) ?? membership.nextCommandSequence ?? 1);
+    const actorSequence = this.#normalizeActorSequence(request.actorSequence, membership);
+    if (actorSequence === null) {
+      return { accepted: false, code: "invalid_actor_sequence", message: "actor sequence must be a positive integer" };
+    }
     const admissionResult = this.#admissionPolicy.enqueueCommand({
-      roomId: this.#roomId,
       membershipId: membership.membershipId,
       sessionId: request.sessionId,
       connectionId: request.connectionId,
@@ -389,7 +392,7 @@ export class Room {
       connectionOrdinal: request.connectionOrdinal,
       receiveOrdinal: entry.receiveOrdinal,
       generation: membership.generation,
-      command: this.#buildCommandEnvelope(membership, request.command, actorSequence, entry.receiveOrdinal),
+      command: this.#buildCommandEnvelope(membership, request.command, actorSequence),
     };
     this.#nextReceiveOrdinal += 1;
     this.#ingressQueue.push(ingress);
@@ -717,11 +720,22 @@ export class Room {
     };
   }
 
-  #buildCommandEnvelope(membership: MembershipRecord, command: GameplayCommand, actorSequence: number, receiveOrdinal: number): CommandEnvelope {
-    membership.nextCommandSequence = actorSequence + 1;
-    this.#commandSequencesByMembership.set(membership.membershipId, membership.nextCommandSequence);
+  #normalizeActorSequence(actorSequence: number | undefined, membership: MembershipRecord): number | null {
+    if (actorSequence === undefined) {
+      return (this.#commandSequencesByMembership.get(membership.membershipId) ?? membership.nextCommandSequence ?? 1);
+    }
+    if (!Number.isSafeInteger(actorSequence) || actorSequence <= 0) {
+      return null;
+    }
+    return actorSequence;
+  }
+
+  #buildCommandEnvelope(membership: MembershipRecord, command: GameplayCommand, actorSequence: number): CommandEnvelope {
+    const nextSequence = Math.max(membership.nextCommandSequence, actorSequence + 1);
+    membership.nextCommandSequence = nextSequence;
+    this.#commandSequencesByMembership.set(membership.membershipId, nextSequence);
     return {
-      commandId: createRoomAdmissionCommandId(receiveOrdinal),
+      commandId: createCommandIdValue(membership.playerId, actorSequence),
       actorId: membership.playerId,
       actorSequence,
       issuedTick: this.#world.tick,

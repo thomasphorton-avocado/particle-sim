@@ -11,6 +11,8 @@ export interface RoomAdmissionPolicyConfig {
   readonly maxCommandsPerPlayerPerTick: number;
   readonly maxCommandsPerTick: number;
   readonly maxAckHistory: number;
+  readonly maxRateBuckets: number;
+  readonly rateBucketTtlMs: number;
 }
 
 export interface PendingCommandEntry {
@@ -25,6 +27,7 @@ export interface PendingCommandEntry {
 }
 
 interface EnqueueCommandOptions {
+  readonly receiveOrdinal?: number;
   readonly membershipId: string;
   readonly sessionId: string;
   readonly connectionId: string;
@@ -40,6 +43,7 @@ interface RateBucketState {
 }
 
 interface BatchSelectionState {
+  tick: number;
   totalUsed: number;
   perPlayerCount: Map<PlayerId, number>;
 }
@@ -51,7 +55,6 @@ export class RoomAdmissionPolicy {
   #connectionRateBuckets: Map<string, RateBucketState>;
   #playerRateBuckets: Map<string, RateBucketState>;
   #ackHistory: RoomCommandAck[];
-  #nextReceiveOrdinal: number;
   #drainCursor: number;
 
   constructor(config: RoomAdmissionPolicyConfig, clock: Clock) {
@@ -61,7 +64,6 @@ export class RoomAdmissionPolicy {
     this.#connectionRateBuckets = new Map();
     this.#playerRateBuckets = new Map();
     this.#ackHistory = [];
-    this.#nextReceiveOrdinal = 1;
     this.#drainCursor = 0;
   }
 
@@ -104,7 +106,7 @@ export class RoomAdmissionPolicy {
       };
     }
     const entry: PendingCommandEntry = {
-      receiveOrdinal: this.#nextReceiveOrdinal,
+      receiveOrdinal: options.receiveOrdinal ?? 0,
       membershipId: options.membershipId,
       sessionId: options.sessionId,
       connectionId: options.connectionId,
@@ -113,17 +115,26 @@ export class RoomAdmissionPolicy {
       actorSequence: options.actorSequence,
       command: options.command,
     };
-    this.#nextReceiveOrdinal += 1;
     this.#pendingCommands.push(entry);
     return { accepted: true, entry };
   }
 
-  takeNextBatch(maxCommandsPerTick: number, maxCommandsPerPlayerPerTick: number, selectionState?: BatchSelectionState): PendingCommandEntry[] {
+  takeNextBatch(
+    maxCommandsPerTick: number,
+    maxCommandsPerPlayerPerTick: number,
+    selectionState?: BatchSelectionState,
+    eligibleReceiveOrdinals?: Iterable<number>,
+  ): PendingCommandEntry[] {
     if (this.#pendingCommands.length === 0) {
       return [];
     }
 
-    const ordered = [...this.#pendingCommands];
+    const eligibleSet = eligibleReceiveOrdinals ? new Set(eligibleReceiveOrdinals) : null;
+    const ordered = this.#pendingCommands.filter((entry) => (eligibleSet === null ? true : eligibleSet.has(entry.receiveOrdinal)));
+    if (ordered.length === 0) {
+      return [];
+    }
+
     const effectiveMaxCommandsPerTick = Math.min(maxCommandsPerTick, this.#config.maxBatchSize);
     const players = this.#orderedPlayers(ordered);
     if (players.length === 0) {
@@ -161,13 +172,22 @@ export class RoomAdmissionPolicy {
       }
     }
 
-    this.#pendingCommands = remaining;
-    this.#drainCursor = (this.#drainCursor + 1) % players.length;
+    if (players.length > 0) {
+      this.#drainCursor = (this.#drainCursor + 1) % players.length;
+    }
     if (selectionState) {
       selectionState.totalUsed = totalUsed;
       selectionState.perPlayerCount = perPlayerCount;
     }
     return selected;
+  }
+
+  removeEntries(receiveOrdinals: Iterable<number>): void {
+    const removeSet = new Set(receiveOrdinals);
+    if (removeSet.size === 0) {
+      return;
+    }
+    this.#pendingCommands = this.#pendingCommands.filter((entry) => !removeSet.has(entry.receiveOrdinal));
   }
 
   recordAck(ack: RoomCommandAck): void {
@@ -188,12 +208,19 @@ export class RoomAdmissionPolicy {
     this.#playerRateBuckets.delete(playerId);
   }
 
+  clearRateBucketForConnection(connectionId: string): void {
+    this.#connectionRateBuckets.delete(connectionId);
+  }
+
+  clearRateBucketForPlayer(playerId: PlayerId): void {
+    this.#playerRateBuckets.delete(playerId);
+  }
+
   clear(): void {
     this.#pendingCommands = [];
     this.#connectionRateBuckets.clear();
     this.#playerRateBuckets.clear();
     this.#ackHistory = [];
-    this.#nextReceiveOrdinal = 1;
     this.#drainCursor = 0;
   }
 
@@ -223,7 +250,8 @@ export class RoomAdmissionPolicy {
   }
 
   #consumeRateLimit(connectionId: string, playerId: PlayerId): boolean {
-    const nowMs = this.#clock.nowMs();
+    const nowMs = Math.max(0, this.#clock.nowMs());
+    this.#pruneBuckets(nowMs);
     const connectionBucket = this.#getOrCreateBucket(this.#connectionRateBuckets, connectionId, nowMs);
     if (!connectionBucket) {
       return false;
@@ -240,10 +268,11 @@ export class RoomAdmissionPolicy {
     const refillPerMs = capacity / Math.max(1, this.#config.rateWindowMs);
     const existing = buckets.get(key);
     if (existing) {
-      const elapsedMs = Math.max(0, nowMs - existing.lastRefillMs);
+      const effectiveNowMs = Math.max(nowMs, existing.lastRefillMs);
+      const elapsedMs = Math.max(0, effectiveNowMs - existing.lastRefillMs);
       const refillTokens = elapsedMs * refillPerMs;
       existing.tokens = Math.min(capacity, existing.tokens + refillTokens);
-      existing.lastRefillMs = nowMs;
+      existing.lastRefillMs = effectiveNowMs;
       if (existing.tokens < 1) {
         return null;
       }
@@ -252,7 +281,39 @@ export class RoomAdmissionPolicy {
     }
     const nextBucket: RateBucketState = { tokens: capacity - 1, lastRefillMs: nowMs };
     buckets.set(key, nextBucket);
+    this.#pruneBuckets(nowMs);
     return nextBucket;
+  }
+
+  #pruneBuckets(nowMs: number): void {
+    const ttlMs = Math.max(1, this.#config.rateBucketTtlMs);
+    for (const [key, bucket] of Array.from(this.#connectionRateBuckets.entries())) {
+      if (nowMs - bucket.lastRefillMs > ttlMs) {
+        this.#connectionRateBuckets.delete(key);
+      }
+    }
+    for (const [key, bucket] of Array.from(this.#playerRateBuckets.entries())) {
+      if (nowMs - bucket.lastRefillMs > ttlMs) {
+        this.#playerRateBuckets.delete(key);
+      }
+    }
+    this.#pruneBucketMap(this.#connectionRateBuckets);
+    this.#pruneBucketMap(this.#playerRateBuckets);
+  }
+
+  #pruneBucketMap(buckets: Map<string, RateBucketState>): void {
+    const maxBuckets = Math.max(1, this.#config.maxRateBuckets);
+    if (buckets.size <= maxBuckets) {
+      return;
+    }
+    const sorted = Array.from(buckets.entries()).sort((left, right) => left[1].lastRefillMs - right[1].lastRefillMs);
+    while (buckets.size > maxBuckets) {
+      const oldest = sorted.shift();
+      if (!oldest) {
+        break;
+      }
+      buckets.delete(oldest[0]);
+    }
   }
 }
 
@@ -266,6 +327,8 @@ export function createRoomAdmissionPolicyConfig(overrides: Partial<RoomAdmission
     maxCommandsPerPlayerPerTick: 8,
     maxCommandsPerTick: 8,
     maxAckHistory: 64,
+    maxRateBuckets: 256,
+    rateBucketTtlMs: 2_000,
     ...overrides,
   };
 }

@@ -18,6 +18,8 @@ export type RoomPolicyCode =
   | "invalid_actor_sequence"
   | "invalid_issued_tick"
   | "future_sequence"
+  | "stale_sequence"
+  | "delivery_backlog"
   | "shutdown";
 
 export interface MembershipSummary {

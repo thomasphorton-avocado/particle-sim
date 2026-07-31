@@ -341,8 +341,30 @@ function createCommandResult(planOrRejection: ValidatedCommandPlan | CommandReje
   };
 }
 
-function getCommandFingerprint(envelope: CommandEnvelope): string {
+export function getCommandFingerprint(envelope: CommandEnvelope): string {
   return sanitizeCommandFingerprint(envelope);
+}
+
+export function findStableCommandReceipt(world: WorldState, envelope: CommandEnvelope): CommandReceipt | undefined {
+  return world.commandLedger.recent.find((receipt) =>
+    receipt.actorId === envelope.actorId
+    && receipt.actorSequence === envelope.actorSequence
+    && receipt.commandId === envelope.commandId
+    && receipt.issuedTick === envelope.issuedTick
+    && receipt.fingerprint === getCommandFingerprint(envelope),
+  );
+}
+
+export function findConflictingCommandReceipt(world: WorldState, envelope: CommandEnvelope): CommandReceipt | undefined {
+  return world.commandLedger.recent.find((receipt) => {
+    if (receipt.actorId !== envelope.actorId || receipt.actorSequence !== envelope.actorSequence) {
+      return false;
+    }
+    if (receipt.commandId !== envelope.commandId || receipt.issuedTick !== envelope.issuedTick) {
+      return true;
+    }
+    return receipt.fingerprint !== getCommandFingerprint(envelope);
+  });
 }
 
 function createResultFromReceipt(receipt: CommandReceipt, envelope: CommandEnvelope): CommandResult {

@@ -1,7 +1,31 @@
-import type { CommandEnvelope, CommandReceipt, GameplayCommand, WorldSnapshot } from "@particle-sim/shared";
+import type { CommandEnvelope, GameplayCommand, WorldSnapshot, CommandResultCode } from "@particle-sim/shared";
 import type { PlayerId, RoomId } from "@particle-sim/shared";
 
 export type RoomLifecycleReason = "server_shutdown" | "idle_cleanup" | "manual_close";
+
+export type RoomPolicyCode =
+  | "malformed_message"
+  | "rate_limited"
+  | "rate_state_capacity"
+  | "player_backlog"
+  | "room_backlog"
+  | "join_pending"
+  | "room_full"
+  | "already_joined"
+  | "stale_session"
+  | "room_closed"
+  | "room_closing"
+  | "leave_pending"
+  | "left_room"
+  | "not_joined"
+  | "stale_membership"
+  | "invalid_actor_sequence"
+  | "invalid_issued_tick"
+  | "future_sequence"
+  | "stale_sequence"
+  | "conflicting_sequence"
+  | "delivery_backlog"
+  | "shutdown";
 
 export interface MembershipSummary {
   readonly membershipId: string;
@@ -33,7 +57,7 @@ export interface RoomTransportHooks {
   onJoined?(roomId: RoomId, membership: MembershipSummary): void | Promise<void>;
   onLeft?(roomId: RoomId, membership: MembershipSummary): void | Promise<void>;
   onClosed?(roomId: RoomId, reason: RoomLifecycleReason): void | Promise<void>;
-  onCommandAck?(roomId: RoomId, membership: MembershipSummary, receipt: CommandReceipt): void | Promise<void>;
+  onCommandAck?(roomId: RoomId, membership: MembershipSummary, ack: RoomCommandAck): void | Promise<void>;
   onError?(roomId: RoomId, error: unknown): void | Promise<void>;
 }
 
@@ -47,6 +71,8 @@ export interface RoomIngress {
   readonly generation: number;
   readonly joinOrdinal?: number;
   readonly playerId?: PlayerId;
+  readonly actorSequence?: number;
+  readonly issuedTick?: number;
   readonly command?: CommandEnvelope;
 }
 
@@ -71,7 +97,70 @@ export interface CommandRequest {
   readonly connectionId: string;
   readonly connectionOrdinal: number;
   readonly generation?: number;
+  readonly actorSequence?: number;
+  readonly issuedTick?: number;
   readonly command: GameplayCommand;
+}
+
+export interface RoomCommandAckBase {
+  readonly kind: "policy_rejection" | "gameplay_result";
+  readonly membershipId: string;
+  readonly sessionId: string;
+  readonly connectionId: string;
+  readonly generation: number;
+  readonly playerId: PlayerId;
+  readonly receiveOrdinal: number;
+  readonly actorSequence: number | null;
+  readonly issuedTick: number | null;
+  readonly accepted: boolean;
+  readonly policyCode: RoomPolicyCode | "gameplay_accepted" | "gameplay_rejected";
+  readonly gameplayCode: CommandResultCode | null;
+  readonly processedTick: number;
+  readonly authorityOrder: number | null;
+  readonly beforeWorldRevision: number;
+  readonly afterWorldRevision: number;
+  readonly beforeInventoryRevision: number;
+  readonly afterInventoryRevision: number;
+  readonly beforeTargetRevision: number;
+  readonly afterTargetRevision: number;
+  readonly acceptedEffect: string | null;
+  readonly commandId: string | null;
+}
+
+export interface RoomCommandPolicyAck extends RoomCommandAckBase {
+  readonly kind: "policy_rejection";
+  readonly policyCode: RoomPolicyCode;
+  readonly gameplayCode: null;
+  readonly accepted: false;
+}
+
+export interface RoomCommandGameplayAck extends RoomCommandAckBase {
+  readonly kind: "gameplay_result";
+  readonly policyCode: "gameplay_accepted" | "gameplay_rejected";
+  readonly gameplayCode: CommandResultCode;
+}
+
+export type RoomCommandAck = RoomCommandPolicyAck | RoomCommandGameplayAck;
+
+export type RoomAdmissionResultCode =
+  | RoomPolicyCode
+  | "room_full"
+  | "join_pending"
+  | "already_joined"
+  | "duplicate_command";
+
+export interface RoomCommandAdmissionResult {
+  readonly accepted: boolean;
+  readonly code?: RoomAdmissionResultCode;
+  readonly message?: string;
+  readonly ack?: RoomCommandAck;
+}
+
+export interface RoomCommandBatchAdmissionResult {
+  readonly accepted: boolean;
+  readonly code?: RoomAdmissionResultCode;
+  readonly message?: string;
+  readonly results: RoomCommandAdmissionResult[];
 }
 
 export interface RoomMemberState {

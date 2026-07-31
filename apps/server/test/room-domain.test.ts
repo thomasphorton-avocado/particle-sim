@@ -8,7 +8,7 @@ import { RoomAdmissionPolicy, createRoomAdmissionPolicyConfig } from "../src/roo
 import { Room, type RoomConfig, type RoomDependencies } from "../src/room/room.js";
 import { DeadlineScheduler, ManualDeadlineTimerDriver, type Clock } from "../src/room/scheduler.js";
 import { MemoryPublisher, RoomManager, type RoomTimerAdapter } from "../src/room/room-manager.js";
-import type { RoomPublication } from "../src/room/types.js";
+import type { RoomCommandAck, RoomPublication } from "../src/room/types.js";
 
 let nextTestRoomOrdinal = 1;
 
@@ -739,6 +739,150 @@ test("admission policy drains players in round-robin order", () => {
   const batch = policy.takeNextBatch(4, 1);
   assert.equal(batch.length, 3);
   assert.deepEqual(batch.map((entry) => entry.playerId), [createPlayerId("player_a"), createPlayerId("player_b"), createPlayerId("player_c")]);
+});
+
+test("duplicate replays reuse the original receipt without advancing sequence", async () => {
+  const acks: RoomCommandAck[] = [];
+  const room = createTestRoom();
+  const hooks = {
+    onCommandAck: (_roomId: string, _membership: unknown, ack: RoomCommandAck) => {
+      acks.push(ack);
+    },
+  };
+  const roomWithHooks = new Room(
+    {
+      roomId: `room_${String(nextTestRoomOrdinal++).padStart(4, "0")}` as RoomId,
+      minCapacity: 2,
+      maxCapacity: 2,
+      tickHz: 60,
+      maxCatchUpTicks: 2,
+      idleCleanupThresholdMs: 1_000,
+    },
+    { clock: room.clock, scheduler: room.scheduler, publisher: room.publisher, hooks },
+  );
+
+  assert.equal(roomWithHooks.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await roomWithHooks.flushPendingIngresses();
+
+  const membership = roomWithHooks.memberships[0];
+  assert.ok(membership);
+  const first = roomWithHooks.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: membership!.generation,
+    actorSequence: 1,
+    issuedTick: 1,
+    command: { type: "pause_world", expectedWorldRevision: roomWithHooks.state.worldRevision },
+  });
+  assert.equal(first.accepted, true);
+  await roomWithHooks.flushPendingIngresses();
+
+  const duplicate = roomWithHooks.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 3,
+    generation: membership!.generation,
+    actorSequence: 1,
+    issuedTick: 1,
+    command: { type: "pause_world", expectedWorldRevision: roomWithHooks.state.worldRevision },
+  });
+  assert.equal(duplicate.accepted, true);
+  await roomWithHooks.flushPendingIngresses();
+
+  assert.equal(roomWithHooks.world.commandLedger.recent.length, 1);
+  assert.equal(acks.length, 2);
+  assert.equal(acks[1]?.commandId, acks[0]?.commandId);
+  assert.equal(acks[1]?.authorityOrder, acks[0]?.authorityOrder);
+});
+
+test("invalid actor and issued ticks are rejected before admission", async () => {
+  const room = createTestRoom();
+
+  assert.equal(room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const membership = room.room.memberships[0];
+  assert.ok(membership);
+  const invalidSequence = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: membership!.generation,
+    actorSequence: 0,
+    issuedTick: 1,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(invalidSequence.accepted, false);
+  assert.equal(invalidSequence.code, "invalid_actor_sequence");
+
+  const invalidTick = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 3,
+    generation: membership!.generation,
+    actorSequence: 1,
+    issuedTick: -1,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(invalidTick.accepted, false);
+  assert.equal(invalidTick.code, "invalid_issued_tick");
+  assert.equal(room.room.world.commandLedger.recent.length, 0);
+});
+
+test("future and stale sequences preserve authoritative high-water", async () => {
+  const room = createTestRoom();
+
+  assert.equal(room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 1 }).accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const membership = room.room.memberships[0];
+  assert.ok(membership);
+  const first = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 2,
+    generation: membership!.generation,
+    actorSequence: 1,
+    issuedTick: 1,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(first.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const future = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 3,
+    generation: membership!.generation,
+    actorSequence: 3,
+    issuedTick: 2,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(future.accepted, false);
+  assert.equal(future.code, "future_sequence");
+
+  const next = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 4,
+    generation: membership!.generation,
+    actorSequence: 2,
+    issuedTick: 2,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(next.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const receipts = room.room.world.commandLedger.recent as Array<{ actorSequence: number }>;
+  assert.deepEqual(receipts.map((receipt) => receipt.actorSequence), [1, 2]);
 });
 
 test("same-boundary leave replacement clears old command sequence state", async () => {

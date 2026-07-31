@@ -1,4 +1,4 @@
-import { createCommandId, parseGameplayCommand, type CommandId, type GameplayCommand, type PlayerId } from "@particle-sim/shared";
+import { createCommandIdValue, parseGameplayCommand, type CommandId, type GameplayCommand, type PlayerId } from "@particle-sim/shared";
 import type { Clock } from "./scheduler.js";
 import type { RoomCommandAck, RoomCommandAdmissionResult } from "./types.js";
 
@@ -340,6 +340,6 @@ export function createRoomAdmissionPolicyConfig(overrides: Partial<RoomAdmission
   };
 }
 
-export function createRoomAdmissionCommandId(receiveOrdinal: number): CommandId {
-  return createCommandId(`command_receive_${receiveOrdinal}`);
+export function createRoomAdmissionCommandId(playerId: PlayerId, actorSequence: number): CommandId {
+  return createCommandIdValue(playerId, actorSequence);
 }

@@ -494,14 +494,14 @@ export class Room {
     if (existingReceipt) {
       const ack = this.#buildCommandAck(membership, { ...ingressStub, command: envelope }, existingReceipt, existingReceipt.accepted ? "gameplay_accepted" : "gameplay_rejected");
       this.#recordAndDeliverAck(ack);
-      return { accepted: false, code: "duplicate_command", message: "duplicate command replayed", ack };
+      return { accepted: true, code: "duplicate_command", message: "duplicate command replayed", ack };
     }
     if (actorSequenceInput < expectedSequence) {
       const ack = this.#buildPolicyAck(ingressStub, membership, "stale_sequence", actorSequenceInput, issuedTick);
       this.#recordAndDeliverAck(ack);
       return { accepted: false, code: "stale_sequence", message: "actor sequence is stale", ack };
     }
-    this.#reserveMembershipSequence(membership, actorSequenceInput);
+    this.#setMembershipSequenceState(membership, actorSequenceInput + 1);
     const ingress: RoomIngress = {
       kind: "command",
       membershipId: membership.membershipId,
@@ -715,6 +715,7 @@ export class Room {
     if (!envelope) {
       return;
     }
+    const priorReceipt = this.#findProcessedReceipt(envelope);
     const result = processCommand(this.#world, envelope);
     const receipt = this.#findProcessedReceipt(envelope);
     if (!receipt) {
@@ -722,7 +723,9 @@ export class Room {
     }
     this.#activeCommandReceipts = [receipt];
     this.#processedCommandReceiptsByCommandId.set(receipt.commandId, receipt);
-    this.#updateMembershipSequenceState(membership, envelope);
+    if (!priorReceipt) {
+      this.#updateMembershipSequenceState(membership, envelope);
+    }
     const ack = this.#buildCommandAck(membership, ingress, receipt, result.kind === "accepted" ? "gameplay_accepted" : "gameplay_rejected");
     this.#recordAndDeliverAck(ack);
   }
@@ -757,7 +760,7 @@ export class Room {
           membership ?? this.#createPendingReservation(ingress, undefined),
           ingress,
           {
-            commandId: ingress.command?.commandId ?? createRoomAdmissionCommandId(ingress.receiveOrdinal),
+            commandId: ingress.command?.commandId ?? createRoomAdmissionCommandId(membership?.playerId ?? createPlayerId(`player_${ingress.receiveOrdinal}`), entry.actorSequence),
             actorId: membership?.playerId ?? createPlayerId(`player_${ingress.receiveOrdinal}`),
             actorSequence: entry.actorSequence,
             authorityOrder: null,
@@ -785,7 +788,7 @@ export class Room {
           membership,
           ingress,
           {
-            commandId: ingress.command?.commandId ?? createRoomAdmissionCommandId(ingress.receiveOrdinal),
+            commandId: ingress.command?.commandId ?? createRoomAdmissionCommandId(membership.playerId, entry.actorSequence),
             actorId: membership.playerId,
             actorSequence: entry.actorSequence,
             authorityOrder: null,
@@ -932,7 +935,7 @@ export class Room {
       beforeTargetRevision: this.#world.worldRevision,
       afterTargetRevision: this.#world.worldRevision,
       acceptedEffect: null,
-      commandId: ingress.command?.commandId ?? createRoomAdmissionCommandId(ingress.receiveOrdinal),
+      commandId: ingress.command?.commandId ?? createRoomAdmissionCommandId(resolvedMembership.playerId, actorSequence ?? 0),
     };
   }
 
@@ -962,7 +965,7 @@ export class Room {
         beforeTargetRevision: receipt.beforeTargetRevision,
         afterTargetRevision: receipt.afterTargetRevision,
         acceptedEffect: receipt.acceptedEffect,
-        commandId: receipt.commandId ?? createRoomAdmissionCommandId(ingress.receiveOrdinal),
+        commandId: receipt.commandId ?? createRoomAdmissionCommandId(resolvedMembership.playerId, receipt.actorSequence),
       };
     }
     return {
@@ -987,7 +990,7 @@ export class Room {
       beforeTargetRevision: receipt.beforeTargetRevision,
       afterTargetRevision: receipt.afterTargetRevision,
       acceptedEffect: receipt.acceptedEffect,
-      commandId: receipt.commandId ?? createRoomAdmissionCommandId(ingress.receiveOrdinal),
+      commandId: receipt.commandId ?? createRoomAdmissionCommandId(resolvedMembership.playerId, receipt.actorSequence),
     };
   }
 
@@ -1017,11 +1020,6 @@ export class Room {
     const highWater = this.#world.commandLedger.actorHighWater[envelope.actorId] ?? 0;
     const authoritativeNext = Math.max(highWater + 1, envelope.actorSequence + 1);
     const expectedNext = Math.max(this.#expectedActorSequence(membership), authoritativeNext);
-    this.#setMembershipSequenceState(membership, expectedNext);
-  }
-
-  #reserveMembershipSequence(membership: MembershipRecord, actorSequence: number): void {
-    const expectedNext = Math.max(this.#expectedActorSequence(membership), actorSequence + 1);
     this.#setMembershipSequenceState(membership, expectedNext);
   }
 

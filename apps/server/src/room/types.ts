@@ -135,16 +135,23 @@ export interface RoomCommandGameplayAck extends RoomCommandAckBase {
 
 export type RoomCommandAck = RoomCommandPolicyAck | RoomCommandGameplayAck;
 
+export type RoomAdmissionResultCode =
+  | RoomPolicyCode
+  | "room_full"
+  | "join_pending"
+  | "already_joined"
+  | "duplicate_command";
+
 export interface RoomCommandAdmissionResult {
   readonly accepted: boolean;
-  readonly code?: string;
+  readonly code?: RoomAdmissionResultCode;
   readonly message?: string;
   readonly ack?: RoomCommandAck;
 }
 
 export interface RoomCommandBatchAdmissionResult {
   readonly accepted: boolean;
-  readonly code?: string;
+  readonly code?: RoomAdmissionResultCode;
   readonly message?: string;
   readonly results: RoomCommandAdmissionResult[];
 }

@@ -252,18 +252,21 @@ export class RoomAdmissionPolicy {
   #consumeRateLimit(connectionId: string, playerId: PlayerId): boolean {
     const nowMs = Math.max(0, this.#clock.nowMs());
     this.#pruneBuckets(nowMs);
-    const connectionBucket = this.#getOrCreateBucket(this.#connectionRateBuckets, connectionId, nowMs);
+    const connectionBucket = this.#prepareBucketState(this.#connectionRateBuckets, connectionId, nowMs);
     if (!connectionBucket) {
       return false;
     }
-    const playerBucket = this.#getOrCreateBucket(this.#playerRateBuckets, playerId, nowMs);
+    const playerBucket = this.#prepareBucketState(this.#playerRateBuckets, playerId, nowMs);
     if (!playerBucket) {
       return false;
     }
+    this.#connectionRateBuckets.set(connectionId, connectionBucket);
+    this.#playerRateBuckets.set(playerId, playerBucket);
+    this.#pruneBuckets(nowMs);
     return true;
   }
 
-  #getOrCreateBucket(buckets: Map<string, RateBucketState>, key: string, nowMs: number): RateBucketState | null {
+  #prepareBucketState(buckets: Map<string, RateBucketState>, key: string, nowMs: number): RateBucketState | null {
     const capacity = Math.max(1, this.#config.rateLimit);
     const refillPerMs = capacity / Math.max(1, this.#config.rateWindowMs);
     const existing = buckets.get(key);
@@ -271,17 +274,21 @@ export class RoomAdmissionPolicy {
       const effectiveNowMs = Math.max(nowMs, existing.lastRefillMs);
       const elapsedMs = Math.max(0, effectiveNowMs - existing.lastRefillMs);
       const refillTokens = elapsedMs * refillPerMs;
-      existing.tokens = Math.min(capacity, existing.tokens + refillTokens);
-      existing.lastRefillMs = effectiveNowMs;
-      if (existing.tokens < 1) {
+      const nextBucket: RateBucketState = {
+        tokens: Math.min(capacity, existing.tokens + refillTokens),
+        lastRefillMs: effectiveNowMs,
+      };
+      if (nextBucket.tokens < 1) {
         return null;
       }
-      existing.tokens -= 1;
-      return existing;
+      nextBucket.tokens -= 1;
+      return nextBucket;
     }
-    const nextBucket: RateBucketState = { tokens: capacity - 1, lastRefillMs: nowMs };
-    buckets.set(key, nextBucket);
-    this.#pruneBuckets(nowMs);
+    const nextBucket: RateBucketState = { tokens: capacity, lastRefillMs: nowMs };
+    if (nextBucket.tokens < 1) {
+      return null;
+    }
+    nextBucket.tokens -= 1;
     return nextBucket;
   }
 

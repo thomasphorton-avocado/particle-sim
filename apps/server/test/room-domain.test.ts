@@ -639,6 +639,77 @@ test("admission policy enforces rate-window and backlog limits", () => {
   assert.equal(roomBacklog.code, "room_backlog");
 });
 
+test("admission policy consumes connection and player buckets atomically", () => {
+  const clock = new FakeClock(0);
+  const policy = new RoomAdmissionPolicy(
+    createRoomAdmissionPolicyConfig({
+      rateWindowMs: 1_000,
+      rateLimit: 2,
+      maxQueuedCommandsPerPlayer: 4,
+      maxQueuedCommandsPerRoom: 8,
+      maxCommandsPerPlayerPerTick: 2,
+      maxCommandsPerTick: 2,
+    }),
+    clock,
+  );
+
+  const first = policy.enqueueCommand({
+    membershipId: "membership_a",
+    sessionId: "one",
+    connectionId: "conn-a",
+    generation: 1,
+    playerId: createPlayerId("player_a"),
+    actorSequence: 1,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  });
+  assert.equal(first.accepted, true);
+
+  const second = policy.enqueueCommand({
+    membershipId: "membership_b",
+    sessionId: "two",
+    connectionId: "conn-b",
+    generation: 1,
+    playerId: createPlayerId("player_b"),
+    actorSequence: 2,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  });
+  assert.equal(second.accepted, true);
+
+  const third = policy.enqueueCommand({
+    membershipId: "membership_c",
+    sessionId: "three",
+    connectionId: "conn-b",
+    generation: 1,
+    playerId: createPlayerId("player_b"),
+    actorSequence: 3,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  });
+  assert.equal(third.accepted, true);
+
+  const shouldFail = policy.enqueueCommand({
+    membershipId: "membership_d",
+    sessionId: "four",
+    connectionId: "conn-a",
+    generation: 1,
+    playerId: createPlayerId("player_b"),
+    actorSequence: 4,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  });
+  assert.equal(shouldFail.accepted, false);
+  assert.equal(shouldFail.code, "rate_limited");
+
+  const shouldSucceed = policy.enqueueCommand({
+    membershipId: "membership_e",
+    sessionId: "five",
+    connectionId: "conn-a",
+    generation: 1,
+    playerId: createPlayerId("player_c"),
+    actorSequence: 5,
+    command: { type: "pause_world", expectedWorldRevision: 1 },
+  });
+  assert.equal(shouldSucceed.accepted, true);
+});
+
 test("admission policy drains players in round-robin order", () => {
   const clock = new FakeClock(0);
   const policy = new RoomAdmissionPolicy(

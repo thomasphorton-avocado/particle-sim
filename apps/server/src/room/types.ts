@@ -8,6 +8,9 @@ export type RoomPolicyCode =
   | "rate_limited"
   | "player_backlog"
   | "room_backlog"
+  | "join_pending"
+  | "room_full"
+  | "already_joined"
   | "stale_session"
   | "room_closed"
   | "room_closing"
@@ -19,6 +22,7 @@ export type RoomPolicyCode =
   | "invalid_issued_tick"
   | "future_sequence"
   | "stale_sequence"
+  | "conflicting_sequence"
   | "delivery_backlog"
   | "shutdown";
 

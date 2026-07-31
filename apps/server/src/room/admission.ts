@@ -46,6 +46,7 @@ interface BatchSelectionState {
   tick: number;
   totalUsed: number;
   perPlayerCount: Map<PlayerId, number>;
+  nextPlayerIndex: number;
 }
 
 export class RoomAdmissionPolicy {
@@ -144,7 +145,11 @@ export class RoomAdmissionPolicy {
     const selected: PendingCommandEntry[] = [];
     const perPlayerCount = selectionState?.perPlayerCount ?? new Map<PlayerId, number>();
     let totalUsed = selectionState?.totalUsed ?? 0;
-    let nextPlayerIndex = this.#drainCursor % players.length;
+    let nextPlayerIndex = selectionState?.nextPlayerIndex ?? this.#drainCursor % players.length;
+    if (nextPlayerIndex < 0) {
+      nextPlayerIndex = 0;
+    }
+    nextPlayerIndex %= players.length;
     const remaining = ordered.slice();
 
     while (selected.length < effectiveMaxCommandsPerTick && totalUsed < effectiveMaxCommandsPerTick) {
@@ -173,11 +178,12 @@ export class RoomAdmissionPolicy {
     }
 
     if (players.length > 0) {
-      this.#drainCursor = (this.#drainCursor + 1) % players.length;
+      this.#drainCursor = nextPlayerIndex % players.length;
     }
     if (selectionState) {
       selectionState.totalUsed = totalUsed;
       selectionState.perPlayerCount = perPlayerCount;
+      selectionState.nextPlayerIndex = nextPlayerIndex % players.length;
     }
     return selected;
   }

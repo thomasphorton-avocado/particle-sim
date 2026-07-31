@@ -6,6 +6,8 @@ import {
   createDefaultWorldState,
   createPlayerId,
   createWorldSnapshot,
+  findConflictingCommandReceipt,
+  findStableCommandReceipt,
   processCommand,
   type CommandEnvelope,
   type CommandReceipt,
@@ -113,10 +115,9 @@ export class Room {
   #pendingAckDeliveries: number;
   #maxPendingAckDeliveries: number;
   #maxLifecycleIngresses: number;
-  #tickDrainSelectionState: { tick: number; totalUsed: number; perPlayerCount: Map<PlayerId, number> } | null;
+  #tickDrainSelectionState: { tick: number; totalUsed: number; perPlayerCount: Map<PlayerId, number>; nextPlayerIndex: number } | null;
   #tickDrainSelectionTick: number;
   #ackHookChain: Promise<void>;
-  #processedCommandReceiptsByCommandId: Map<string, CommandReceipt>;
 
   constructor(config: RoomConfig, dependencies: RoomDependencies) {
     this.#roomId = config.roomId;
@@ -159,7 +160,6 @@ export class Room {
     this.#tickDrainSelectionState = null;
     this.#tickDrainSelectionTick = 0;
     this.#ackHookChain = Promise.resolve();
-    this.#processedCommandReceiptsByCommandId = new Map();
     this.#closePromise = new Promise<void>((resolve, reject) => {
       this.#resolveClosePromise = resolve;
       this.#rejectClosePromise = reject;
@@ -309,7 +309,7 @@ export class Room {
     }
     this.#pruneExpiredTombstones();
     if (this.#pendingReservationsBySession.has(request.sessionId)) {
-      const ack = this.#buildPolicyAck(ingressStub, null, "leave_pending", null, null);
+      const ack = this.#buildPolicyAck(ingressStub, null, "join_pending", null, null);
       this.#recordAndDeliverAck(ack);
       return { accepted: false, code: "join_pending", message: "join already pending", ack };
     }
@@ -319,7 +319,7 @@ export class Room {
       return { accepted: false, code: "room_backlog", message: "lifecycle ingress is full", ack };
     }
     if (this.#projectedMembershipCount() >= this.#config.maxCapacity) {
-      const ack = this.#buildPolicyAck(ingressStub, null, "room_backlog", null, null);
+      const ack = this.#buildPolicyAck(ingressStub, null, "room_full", null, null);
       this.#recordAndDeliverAck(ack);
       return { accepted: false, code: "room_full", message: "room is full", ack };
     }
@@ -328,7 +328,7 @@ export class Room {
     const reconnecting = Boolean(tombstone && !this.#tombstoneExpired(tombstone));
     const pendingLeave = this.#hasPendingLeave(request.sessionId);
     if (existing && existing.connected && !pendingLeave && !reconnecting) {
-      const ack = this.#buildPolicyAck(ingressStub, existing, "room_backlog", null, null);
+      const ack = this.#buildPolicyAck(ingressStub, existing, "already_joined", null, null);
       this.#recordAndDeliverAck(ack);
       return { accepted: false, code: "already_joined", message: "session already joined", ack };
     }
@@ -448,9 +448,6 @@ export class Room {
       return { accepted: false, code: "stale_membership", message: "membership identity is stale", ack };
     }
     const expectedSequence = this.#expectedActorSequence(membership);
-    if (request.actorSequence === undefined) {
-      // use the authoritative next sequence when the client does not supply one
-    }
     const actorSequenceInput = request.actorSequence ?? expectedSequence;
     if (!Number.isSafeInteger(actorSequenceInput) || actorSequenceInput <= 0) {
       const ack = this.#buildPolicyAck(ingressStub, membership, "invalid_actor_sequence", request.actorSequence ?? null, request.issuedTick ?? null);
@@ -467,6 +464,24 @@ export class Room {
       const ack = this.#buildPolicyAck(ingressStub, membership, "invalid_issued_tick", actorSequenceInput, request.issuedTick ?? null);
       this.#recordAndDeliverAck(ack);
       return { accepted: false, code: "invalid_issued_tick", message: "issued tick must be a non-negative integer", ack };
+    }
+    const envelope = this.#buildCommandEnvelope(membership, request.command, actorSequenceInput, issuedTick);
+    const exactReceipt = this.#findMatchingReceipt(envelope);
+    if (exactReceipt) {
+      const ack = this.#buildCommandAck(membership, { ...ingressStub, command: envelope }, exactReceipt, exactReceipt.accepted ? "gameplay_accepted" : "gameplay_rejected");
+      this.#recordAndDeliverAck(ack);
+      return { accepted: true, code: "duplicate_command", message: "duplicate command replayed", ack };
+    }
+    const conflictingReceipt = this.#findConflictingReceipt(envelope);
+    if (conflictingReceipt) {
+      const ack = this.#buildPolicyAck(ingressStub, membership, "conflicting_sequence", actorSequenceInput, issuedTick);
+      this.#recordAndDeliverAck(ack);
+      return { accepted: false, code: "conflicting_sequence", message: "command conflicts with a prior sequence entry", ack };
+    }
+    if (actorSequenceInput < expectedSequence) {
+      const ack = this.#buildPolicyAck(ingressStub, membership, "stale_sequence", actorSequenceInput, issuedTick);
+      this.#recordAndDeliverAck(ack);
+      return { accepted: false, code: "stale_sequence", message: "actor sequence is stale", ack };
     }
     const admissionResult = this.#admissionPolicy.enqueueCommand({
       receiveOrdinal,
@@ -489,19 +504,6 @@ export class Room {
       this.#recordAndDeliverAck(ack);
       return { accepted: false, code: "malformed_message", message: "command admission failed", ack };
     }
-    const envelope = this.#buildCommandEnvelope(membership, request.command, actorSequenceInput, issuedTick);
-    const existingReceipt = this.#findProcessedReceipt(envelope);
-    if (existingReceipt) {
-      const ack = this.#buildCommandAck(membership, { ...ingressStub, command: envelope }, existingReceipt, existingReceipt.accepted ? "gameplay_accepted" : "gameplay_rejected");
-      this.#recordAndDeliverAck(ack);
-      return { accepted: true, code: "duplicate_command", message: "duplicate command replayed", ack };
-    }
-    if (actorSequenceInput < expectedSequence) {
-      const ack = this.#buildPolicyAck(ingressStub, membership, "stale_sequence", actorSequenceInput, issuedTick);
-      this.#recordAndDeliverAck(ack);
-      return { accepted: false, code: "stale_sequence", message: "actor sequence is stale", ack };
-    }
-    this.#setMembershipSequenceState(membership, actorSequenceInput + 1);
     const ingress: RoomIngress = {
       kind: "command",
       membershipId: membership.membershipId,
@@ -513,6 +515,7 @@ export class Room {
       command: envelope,
     };
     this.#ingressQueue.push(ingress);
+    this.#setMembershipSequenceState(membership, actorSequenceInput + 1);
     return { accepted: true };
   }
 
@@ -550,7 +553,7 @@ export class Room {
       return;
     }
     if (!this.#tickDrainSelectionState || this.#tickDrainSelectionTick !== this.#world.tick) {
-      this.#tickDrainSelectionState = { tick: this.#world.tick, totalUsed: 0, perPlayerCount: new Map<PlayerId, number>() };
+      this.#tickDrainSelectionState = { tick: this.#world.tick, totalUsed: 0, perPlayerCount: new Map<PlayerId, number>(), nextPlayerIndex: 0 };
       this.#tickDrainSelectionTick = this.#world.tick;
     }
     while (this.#ingressQueue.length > 0) {
@@ -722,7 +725,6 @@ export class Room {
       return;
     }
     this.#activeCommandReceipts = [receipt];
-    this.#processedCommandReceiptsByCommandId.set(receipt.commandId, receipt);
     if (!priorReceipt) {
       this.#updateMembershipSequenceState(membership, envelope);
     }
@@ -1005,15 +1007,23 @@ export class Room {
   }
 
   #expectedActorSequence(membership: MembershipRecord): number {
-    return this.#commandSequencesByMembership.get(membership.membershipId) ?? membership.nextCommandSequence ?? 1;
+    const fromMembership = this.#commandSequencesByMembership.get(membership.membershipId) ?? membership.nextCommandSequence ?? 1;
+    const pendingMaxSequence = Math.max(0, ...[...this.#ingressQueue, ...this.#pendingCommandIngresses]
+      .filter((ingress): ingress is RoomIngress => ingress.kind === "command" && ingress.sessionId === membership.sessionId && ingress.command !== undefined)
+      .map((ingress) => ingress.command?.actorSequence ?? 0));
+    return Math.max(fromMembership, pendingMaxSequence + 1);
   }
 
   #findProcessedReceipt(envelope: CommandEnvelope): CommandReceipt | undefined {
-    const exact = this.#world.commandLedger.recent.find((receipt) => receipt.commandId === envelope.commandId && receipt.actorId === envelope.actorId && receipt.actorSequence === envelope.actorSequence && receipt.fingerprint === this.#commandFingerprint(envelope));
-    if (exact) {
-      return exact;
-    }
-    return this.#world.commandLedger.recent.find((receipt) => receipt.commandId === envelope.commandId && receipt.actorId === envelope.actorId && receipt.actorSequence === envelope.actorSequence);
+    return this.#findMatchingReceipt(envelope) ?? this.#findConflictingReceipt(envelope);
+  }
+
+  #findMatchingReceipt(envelope: CommandEnvelope): CommandReceipt | undefined {
+    return findStableCommandReceipt(this.#world, envelope);
+  }
+
+  #findConflictingReceipt(envelope: CommandEnvelope): CommandReceipt | undefined {
+    return findConflictingCommandReceipt(this.#world, envelope);
   }
 
   #updateMembershipSequenceState(membership: MembershipRecord, envelope: CommandEnvelope): void {
@@ -1036,10 +1046,6 @@ export class Room {
       issuedTick,
       command,
     };
-  }
-
-  #commandFingerprint(envelope: CommandEnvelope): string {
-    return `${envelope.commandId}:${envelope.actorId}:${envelope.actorSequence}:${envelope.issuedTick}:${JSON.stringify(envelope.command)}`;
   }
 
   #clonePlayerState(playerState: PlayerState): PlayerState {
@@ -1124,6 +1130,7 @@ export class Room {
     }
     this.#closingFinalizationPromise = (async () => {
       await this.#drainHookChain();
+      await this.#drainAckQueue();
       try {
         await this.publishClosing(reason);
       } catch (error) {

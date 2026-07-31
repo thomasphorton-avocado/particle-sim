@@ -42,6 +42,17 @@ interface RateBucketState {
   lastRefillMs: number;
 }
 
+interface RateLimitResult {
+  accepted: boolean;
+  code?: "rate_limited" | "rate_state_capacity";
+}
+
+interface BucketPreviewResult {
+  accepted: boolean;
+  bucket?: RateBucketState;
+  code?: "rate_limited" | "rate_state_capacity";
+}
+
 interface BatchSelectionState {
   tick: number;
   totalUsed: number;
@@ -84,10 +95,11 @@ export class RoomAdmissionPolicy {
         message: "command payload is malformed",
       };
     }
-    if (!this.#consumeRateLimit(options.connectionId, options.playerId)) {
+    const rateLimitResult = this.#consumeRateLimit(options.connectionId, options.playerId);
+    if (!rateLimitResult.accepted) {
       return {
         accepted: false,
-        code: "rate_limited",
+        code: rateLimitResult.code ?? "rate_limited",
         message: "command rate limit exceeded",
       };
     }
@@ -255,24 +267,24 @@ export class RoomAdmissionPolicy {
       .map(([playerId]) => playerId);
   }
 
-  #consumeRateLimit(connectionId: string, playerId: PlayerId): boolean {
+  #consumeRateLimit(connectionId: string, playerId: PlayerId): RateLimitResult {
     const nowMs = Math.max(0, this.#clock.nowMs());
     this.#pruneBuckets(nowMs);
     const connectionBucket = this.#prepareBucketState(this.#connectionRateBuckets, connectionId, nowMs);
-    if (!connectionBucket) {
-      return false;
+    if (!connectionBucket.accepted) {
+      return { accepted: false, code: connectionBucket.code };
     }
     const playerBucket = this.#prepareBucketState(this.#playerRateBuckets, playerId, nowMs);
-    if (!playerBucket) {
-      return false;
+    if (!playerBucket.accepted) {
+      return { accepted: false, code: playerBucket.code };
     }
-    this.#connectionRateBuckets.set(connectionId, connectionBucket);
-    this.#playerRateBuckets.set(playerId, playerBucket);
+    this.#connectionRateBuckets.set(connectionId, connectionBucket.bucket!);
+    this.#playerRateBuckets.set(playerId, playerBucket.bucket!);
     this.#pruneBuckets(nowMs);
-    return true;
+    return { accepted: true };
   }
 
-  #prepareBucketState(buckets: Map<string, RateBucketState>, key: string, nowMs: number): RateBucketState | null {
+  #prepareBucketState(buckets: Map<string, RateBucketState>, key: string, nowMs: number): BucketPreviewResult {
     const capacity = Math.max(1, this.#config.rateLimit);
     const refillPerMs = capacity / Math.max(1, this.#config.rateWindowMs);
     const existing = buckets.get(key);
@@ -285,17 +297,21 @@ export class RoomAdmissionPolicy {
         lastRefillMs: effectiveNowMs,
       };
       if (nextBucket.tokens < 1) {
-        return null;
+        return { accepted: false, code: "rate_limited" };
       }
       nextBucket.tokens -= 1;
-      return nextBucket;
+      return { accepted: true, bucket: nextBucket };
+    }
+    const maxBuckets = Math.max(1, this.#config.maxRateBuckets);
+    if (buckets.size >= maxBuckets) {
+      return { accepted: false, code: "rate_state_capacity" };
     }
     const nextBucket: RateBucketState = { tokens: capacity, lastRefillMs: nowMs };
     if (nextBucket.tokens < 1) {
-      return null;
+      return { accepted: false, code: "rate_limited" };
     }
     nextBucket.tokens -= 1;
-    return nextBucket;
+    return { accepted: true, bucket: nextBucket };
   }
 
   #pruneBuckets(nowMs: number): void {
@@ -309,23 +325,6 @@ export class RoomAdmissionPolicy {
       if (nowMs - bucket.lastRefillMs > ttlMs) {
         this.#playerRateBuckets.delete(key);
       }
-    }
-    this.#pruneBucketMap(this.#connectionRateBuckets);
-    this.#pruneBucketMap(this.#playerRateBuckets);
-  }
-
-  #pruneBucketMap(buckets: Map<string, RateBucketState>): void {
-    const maxBuckets = Math.max(1, this.#config.maxRateBuckets);
-    if (buckets.size <= maxBuckets) {
-      return;
-    }
-    const sorted = Array.from(buckets.entries()).sort((left, right) => left[1].lastRefillMs - right[1].lastRefillMs);
-    while (buckets.size > maxBuckets) {
-      const oldest = sorted.shift();
-      if (!oldest) {
-        break;
-      }
-      buckets.delete(oldest[0]);
     }
   }
 }

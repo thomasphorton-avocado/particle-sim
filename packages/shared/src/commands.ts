@@ -350,7 +350,8 @@ export function findStableCommandReceipt(world: WorldState, envelope: CommandEnv
     receipt.actorId === envelope.actorId
     && receipt.actorSequence === envelope.actorSequence
     && receipt.commandId === envelope.commandId
-    && receipt.issuedTick === envelope.issuedTick,
+    && receipt.issuedTick === envelope.issuedTick
+    && receipt.fingerprint === getCommandFingerprint(envelope),
   );
 }
 
@@ -362,7 +363,7 @@ export function findConflictingCommandReceipt(world: WorldState, envelope: Comma
     if (receipt.commandId !== envelope.commandId || receipt.issuedTick !== envelope.issuedTick) {
       return true;
     }
-    return false;
+    return receipt.fingerprint !== getCommandFingerprint(envelope);
   });
 }
 

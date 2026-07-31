@@ -6,6 +6,7 @@ export type RoomLifecycleReason = "server_shutdown" | "idle_cleanup" | "manual_c
 export type RoomPolicyCode =
   | "malformed_message"
   | "rate_limited"
+  | "rate_state_capacity"
   | "player_backlog"
   | "room_backlog"
   | "join_pending"
@@ -70,6 +71,8 @@ export interface RoomIngress {
   readonly generation: number;
   readonly joinOrdinal?: number;
   readonly playerId?: PlayerId;
+  readonly actorSequence?: number;
+  readonly issuedTick?: number;
   readonly command?: CommandEnvelope;
 }
 

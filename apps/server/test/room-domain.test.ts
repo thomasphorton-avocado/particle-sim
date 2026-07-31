@@ -419,6 +419,7 @@ test("pending reservations keep an identity and reject duplicate joins", async (
   assert.equal(firstJoin.accepted, true);
   const duplicateJoin = room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-2", connectionOrdinal: 2 });
   assert.equal(duplicateJoin.accepted, false);
+  assert.equal(duplicateJoin.code, "join_pending");
 
   const command = room.room.enqueueCommand({
     membershipId: firstJoin.membership!.membershipId,
@@ -428,11 +429,12 @@ test("pending reservations keep an identity and reject duplicate joins", async (
     generation: firstJoin.membership!.generation,
     command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
   });
-  assert.equal(command.accepted, true);
+  assert.equal(command.accepted, false);
+  assert.equal(command.code, "join_pending");
   await room.room.flushPendingIngresses();
 
   assert.equal(room.room.memberships[0]?.membershipId, firstJoin.membership!.membershipId);
-  assert.equal(room.room.world.commandLedger.recent.length, 1);
+  assert.equal(room.room.world.commandLedger.recent.length, 0);
 });
 
 test("startServer rejects EADDRINUSE without uncaught errors", async () => {

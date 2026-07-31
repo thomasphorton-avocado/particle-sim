@@ -72,6 +72,22 @@ function enqueuePlayCommand(world: WorldState, command: GameplayCommand): void {
   enqueueCommand(world, envelope);
 }
 
+function getPlayCommandComposition(world: WorldState): { projectedInventoryRevision: number; projectedCellRevision: (x: number, y: number) => number } {
+  const transport = state.transport;
+  const player = world.players[state.localPlayerId];
+  if (transport) {
+    const composition = transport.getCommandCompositionState(state.localPlayerId);
+    return {
+      projectedInventoryRevision: composition?.projectedInventoryRevision ?? player?.inventoryRevision ?? 0,
+      projectedCellRevision: (x: number, y: number) => composition?.projectedCellRevision(x, y) ?? world.grid.cellRevisions[world.grid.index(x, y)] ?? 0,
+    };
+  }
+  return {
+    projectedInventoryRevision: player?.inventoryRevision ?? 0,
+    projectedCellRevision: (x: number, y: number) => world.grid.cellRevisions[world.grid.index(x, y)] ?? 0,
+  };
+}
+
 function getObjectOffsets(materialId: MaterialId): [number, number][] {
   const matDef = MATERIALS[materialId];
   if (matDef.placement.kind !== "object") return [];
@@ -119,7 +135,8 @@ export function handleHarvestInputAt(world: WorldState, gx: number, gy: number, 
     if (!cluster || cluster.size === 0) {
       return false;
     }
-    const targetRevision = world.grid.cellRevisions[world.grid.index(gx, gy)] ?? 0;
+    const composition = getPlayCommandComposition(world);
+    const targetRevision = composition.projectedCellRevision(gx, gy);
     enqueuePlayCommand(world, { type: "harvest", x: gx, y: gy, expectedTargetRevision: targetRevision });
     return true;
   }
@@ -144,14 +161,14 @@ export function handleHarvestInputAt(world: WorldState, gx: number, gy: number, 
 
 export function placeHotbarMaterialAt(world: WorldState, gx: number, gy: number, editor?: LocalTransportEditorCapability): boolean {
   if (state.toolMode === "play") {
-    const player = getLocalPlayer();
+    const composition = getPlayCommandComposition(world);
     enqueuePlayCommand(world, {
       type: "place",
       x: gx,
       y: gy,
       brushRadius: state.brushSize,
-      expectedInventoryRevision: player.inventoryRevision,
-      expectedAnchorRevision: world.grid.cellRevisions[world.grid.index(gx, gy)] ?? 0,
+      expectedInventoryRevision: composition.projectedInventoryRevision,
+      expectedAnchorRevision: composition.projectedCellRevision(gx, gy),
     });
     return true;
   }
@@ -310,14 +327,17 @@ export function attachInput(canvas: HTMLCanvasElement, cellSize: number, editor?
   const cycleFaucet = (gx: number, gy: number): boolean => {
     if (state.toolMode === "play") {
       const currentWorld = state.world;
+      const cellMaterial = currentWorld.grid.get(gx, gy);
+      if (cellMaterial !== MaterialId.Faucet) return false;
       const objectId = currentWorld.grid.getObjectId(gx, gy);
       if (!objectId) return false;
-      enqueuePlayCommand(currentWorld, {
+      const composition = state.transport.getCommandCompositionState(state.localPlayerId);
+      enqueuePlayCommand(state.world, {
         type: "cycle_faucet",
         x: gx,
         y: gy,
         objectId,
-        expectedTargetRevision: currentWorld.grid.cellRevisions[currentWorld.grid.index(gx, gy)] ?? 0,
+        expectedTargetRevision: composition?.projectedCellRevision(gx, gy) ?? currentWorld.grid.cellRevisions[currentWorld.grid.index(gx, gy)] ?? 0,
       });
       return true;
     }

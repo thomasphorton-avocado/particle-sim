@@ -1070,10 +1070,8 @@ export function commitValidatedPlan(world: WorldState, plan: ValidatedCommandPla
     }
   }
   for (const write of plan.gridWrites) {
-    world.grid.set(write.x, write.y, write.id, { shade: write.shade, objectId: write.objectId });
-    if (write.id === MaterialId.Faucet && write.auxiliary !== 0) {
-      world.grid.setAuxiliaryValue(write.x, write.y, write.auxiliary);
-    }
+    const index = world.grid.index(write.x, write.y);
+    world.grid.applyCellState(index, write.id, write.shade, write.auxiliary, write.objectId);
   }
   for (const fallingObject of plan.fallingObjects) {
     world.fallingObjects[fallingObject.id] = {

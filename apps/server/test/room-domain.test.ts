@@ -553,6 +553,40 @@ test("command before leave still processes in queue order and later commands are
   assert.equal(room.room.memberships.length, 0);
 });
 
+test("commands are rejected until the join reservation is realized", async () => {
+  const room = createTestRoom({ maxCapacity: 2 });
+
+  const commandBeforeJoin = room.room.enqueueCommand({
+    membershipId: "membership_1",
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 1,
+    generation: 1,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(commandBeforeJoin.accepted, false);
+  assert.equal(commandBeforeJoin.code, "not_joined");
+
+  const join = room.room.enqueueJoin({ sessionId: "one", connectionId: "conn-1", connectionOrdinal: 2 });
+  assert.equal(join.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  const membership = room.room.memberships[0];
+  assert.ok(membership);
+  const commandAfterJoin = room.room.enqueueCommand({
+    membershipId: membership!.membershipId,
+    sessionId: "one",
+    connectionId: "conn-1",
+    connectionOrdinal: 3,
+    generation: membership!.generation,
+    command: { type: "pause_world", expectedWorldRevision: room.room.state.worldRevision },
+  });
+  assert.equal(commandAfterJoin.accepted, true);
+  await room.room.flushPendingIngresses();
+
+  assert.equal(room.room.world.commandLedger.recent.length, 1);
+});
+
 test("same-boundary leave replacement clears old command sequence state", async () => {
   const room = createTestRoom({ maxCapacity: 2 });
 

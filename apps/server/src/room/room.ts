@@ -309,7 +309,8 @@ export class Room {
     if (reconnecting && tombstone) {
       this.#tombstonesBySession.delete(request.sessionId);
       this.#clearMembershipResidue(tombstone.membershipId, request.sessionId);
-    }    this.#ingressQueue.push(ingress);
+    }
+    this.#ingressQueue.push(ingress);
     return { accepted: true, membership: this.#membershipSummaryForIngress(ingress) };
   }
 
@@ -545,6 +546,8 @@ export class Room {
     if (!membership || !membership.connected) {
       return;
     }
+    this.#clearPendingCommandIngressesForSession(ingress.sessionId);
+    this.#admissionPolicy.clearPendingForSession(ingress.sessionId);
     if (membership.membershipId !== ingress.membershipId || membership.connectionId !== ingress.connectionId || membership.generation !== ingress.generation) {
       return;
     }
@@ -686,7 +689,8 @@ export class Room {
   }
 
   #clearPendingCommandIngressesForSession(sessionId: string): void {
-    this.#pendingCommandIngresses = this.#pendingCommandIngresses.filter((ingress) => ingress.sessionId !== sessionId);
+    this.#ingressQueue = this.#ingressQueue.filter((ingress) => ingress.kind !== "command" || ingress.sessionId !== sessionId);
+    this.#pendingCommandIngresses = this.#pendingCommandIngresses.filter((ingress) => ingress.kind !== "command" || ingress.sessionId !== sessionId);
   }
 
   #buildCommandAck(membership: MembershipRecord, ingress: RoomIngress, receipt: CommandReceipt, policyCode: string): RoomCommandAck {

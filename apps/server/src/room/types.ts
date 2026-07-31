@@ -1,7 +1,24 @@
-import type { CommandEnvelope, CommandReceipt, GameplayCommand, WorldSnapshot, CommandResultCode } from "@particle-sim/shared";
+import type { CommandEnvelope, GameplayCommand, WorldSnapshot, CommandResultCode } from "@particle-sim/shared";
 import type { PlayerId, RoomId } from "@particle-sim/shared";
 
 export type RoomLifecycleReason = "server_shutdown" | "idle_cleanup" | "manual_close";
+
+export type RoomPolicyCode =
+  | "malformed_message"
+  | "rate_limited"
+  | "player_backlog"
+  | "room_backlog"
+  | "stale_session"
+  | "room_closed"
+  | "room_closing"
+  | "leave_pending"
+  | "left_room"
+  | "not_joined"
+  | "stale_membership"
+  | "invalid_actor_sequence"
+  | "invalid_issued_tick"
+  | "future_sequence"
+  | "shutdown";
 
 export interface MembershipSummary {
   readonly membershipId: string;
@@ -33,7 +50,7 @@ export interface RoomTransportHooks {
   onJoined?(roomId: RoomId, membership: MembershipSummary): void | Promise<void>;
   onLeft?(roomId: RoomId, membership: MembershipSummary): void | Promise<void>;
   onClosed?(roomId: RoomId, reason: RoomLifecycleReason): void | Promise<void>;
-  onCommandAck?(roomId: RoomId, membership: MembershipSummary, receipt: CommandReceipt): void | Promise<void>;
+  onCommandAck?(roomId: RoomId, membership: MembershipSummary, ack: RoomCommandAck): void | Promise<void>;
   onError?(roomId: RoomId, error: unknown): void | Promise<void>;
 }
 
@@ -72,19 +89,22 @@ export interface CommandRequest {
   readonly connectionOrdinal: number;
   readonly generation?: number;
   readonly actorSequence?: number;
+  readonly issuedTick?: number;
   readonly command: GameplayCommand;
 }
 
-export interface RoomCommandAck {
+export interface RoomCommandAckBase {
+  readonly kind: "policy_rejection" | "gameplay_result";
   readonly membershipId: string;
   readonly sessionId: string;
   readonly connectionId: string;
   readonly generation: number;
   readonly playerId: PlayerId;
   readonly receiveOrdinal: number;
-  readonly actorSequence: number;
+  readonly actorSequence: number | null;
+  readonly issuedTick: number | null;
   readonly accepted: boolean;
-  readonly policyCode: string;
+  readonly policyCode: RoomPolicyCode | "gameplay_accepted" | "gameplay_rejected";
   readonly gameplayCode: CommandResultCode | null;
   readonly processedTick: number;
   readonly authorityOrder: number | null;
@@ -95,7 +115,23 @@ export interface RoomCommandAck {
   readonly beforeTargetRevision: number;
   readonly afterTargetRevision: number;
   readonly acceptedEffect: string | null;
+  readonly commandId: string | null;
 }
+
+export interface RoomCommandPolicyAck extends RoomCommandAckBase {
+  readonly kind: "policy_rejection";
+  readonly policyCode: RoomPolicyCode;
+  readonly gameplayCode: null;
+  readonly accepted: false;
+}
+
+export interface RoomCommandGameplayAck extends RoomCommandAckBase {
+  readonly kind: "gameplay_result";
+  readonly policyCode: "gameplay_accepted" | "gameplay_rejected";
+  readonly gameplayCode: CommandResultCode;
+}
+
+export type RoomCommandAck = RoomCommandPolicyAck | RoomCommandGameplayAck;
 
 export interface RoomCommandAdmissionResult {
   readonly accepted: boolean;

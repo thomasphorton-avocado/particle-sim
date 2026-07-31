@@ -34,17 +34,22 @@ interface EnqueueCommandOptions {
   readonly command: GameplayCommand;
 }
 
-interface RateWindowState {
-  windowStartMs: number;
-  count: number;
+interface RateBucketState {
+  tokens: number;
+  lastRefillMs: number;
+}
+
+interface BatchSelectionState {
+  totalUsed: number;
+  perPlayerCount: Map<PlayerId, number>;
 }
 
 export class RoomAdmissionPolicy {
   #config: RoomAdmissionPolicyConfig;
   #clock: Clock;
   #pendingCommands: PendingCommandEntry[];
-  #connectionRateWindows: Map<string, RateWindowState>;
-  #playerRateWindows: Map<string, RateWindowState>;
+  #connectionRateBuckets: Map<string, RateBucketState>;
+  #playerRateBuckets: Map<string, RateBucketState>;
   #ackHistory: RoomCommandAck[];
   #nextReceiveOrdinal: number;
   #drainCursor: number;
@@ -53,8 +58,8 @@ export class RoomAdmissionPolicy {
     this.#config = config;
     this.#clock = clock;
     this.#pendingCommands = [];
-    this.#connectionRateWindows = new Map();
-    this.#playerRateWindows = new Map();
+    this.#connectionRateBuckets = new Map();
+    this.#playerRateBuckets = new Map();
     this.#ackHistory = [];
     this.#nextReceiveOrdinal = 1;
     this.#drainCursor = 0;
@@ -113,7 +118,7 @@ export class RoomAdmissionPolicy {
     return { accepted: true, entry };
   }
 
-  takeNextBatch(maxCommandsPerTick: number, maxCommandsPerPlayerPerTick: number): PendingCommandEntry[] {
+  takeNextBatch(maxCommandsPerTick: number, maxCommandsPerPlayerPerTick: number, selectionState?: BatchSelectionState): PendingCommandEntry[] {
     if (this.#pendingCommands.length === 0) {
       return [];
     }
@@ -126,11 +131,12 @@ export class RoomAdmissionPolicy {
     }
 
     const selected: PendingCommandEntry[] = [];
-    const perPlayerCount = new Map<PlayerId, number>();
+    const perPlayerCount = selectionState?.perPlayerCount ?? new Map<PlayerId, number>();
+    let totalUsed = selectionState?.totalUsed ?? 0;
     let nextPlayerIndex = this.#drainCursor % players.length;
     const remaining = ordered.slice();
 
-    while (selected.length < effectiveMaxCommandsPerTick) {
+    while (selected.length < effectiveMaxCommandsPerTick && totalUsed < effectiveMaxCommandsPerTick) {
       let forwarded = false;
       for (let offset = 0; offset < players.length; offset += 1) {
         const playerId = players[(nextPlayerIndex + offset) % players.length];
@@ -145,6 +151,7 @@ export class RoomAdmissionPolicy {
         const [entry] = remaining.splice(entryIndex, 1);
         selected.push(entry);
         perPlayerCount.set(playerId, playerCount + 1);
+        totalUsed += 1;
         nextPlayerIndex = (nextPlayerIndex + 1) % players.length;
         forwarded = true;
         break;
@@ -156,6 +163,10 @@ export class RoomAdmissionPolicy {
 
     this.#pendingCommands = remaining;
     this.#drainCursor = (this.#drainCursor + 1) % players.length;
+    if (selectionState) {
+      selectionState.totalUsed = totalUsed;
+      selectionState.perPlayerCount = perPlayerCount;
+    }
     return selected;
   }
 
@@ -169,18 +180,18 @@ export class RoomAdmissionPolicy {
 
   clearPendingForConnection(connectionId: string): void {
     this.#pendingCommands = this.#pendingCommands.filter((entry) => entry.connectionId !== connectionId);
-    this.#connectionRateWindows.delete(connectionId);
+    this.#connectionRateBuckets.delete(connectionId);
   }
 
   clearPendingForPlayer(playerId: PlayerId): void {
     this.#pendingCommands = this.#pendingCommands.filter((entry) => entry.playerId !== playerId);
-    this.#playerRateWindows.delete(playerId);
+    this.#playerRateBuckets.delete(playerId);
   }
 
   clear(): void {
     this.#pendingCommands = [];
-    this.#connectionRateWindows.clear();
-    this.#playerRateWindows.clear();
+    this.#connectionRateBuckets.clear();
+    this.#playerRateBuckets.clear();
     this.#ackHistory = [];
     this.#nextReceiveOrdinal = 1;
     this.#drainCursor = 0;
@@ -213,30 +224,35 @@ export class RoomAdmissionPolicy {
 
   #consumeRateLimit(connectionId: string, playerId: PlayerId): boolean {
     const nowMs = this.#clock.nowMs();
-    const connectionWindow = this.#getOrCreateWindow(this.#connectionRateWindows, connectionId, nowMs);
-    if (!connectionWindow) {
+    const connectionBucket = this.#getOrCreateBucket(this.#connectionRateBuckets, connectionId, nowMs);
+    if (!connectionBucket) {
       return false;
     }
-    const playerWindow = this.#getOrCreateWindow(this.#playerRateWindows, playerId, nowMs);
-    if (!playerWindow) {
+    const playerBucket = this.#getOrCreateBucket(this.#playerRateBuckets, playerId, nowMs);
+    if (!playerBucket) {
       return false;
     }
     return true;
   }
 
-  #getOrCreateWindow(windows: Map<string, RateWindowState>, key: string, nowMs: number): RateWindowState | null {
-    const windowStartMs = Math.floor(nowMs / this.#config.rateWindowMs) * this.#config.rateWindowMs;
-    const existing = windows.get(key);
-    if (existing && existing.windowStartMs === windowStartMs) {
-      if (existing.count >= this.#config.rateLimit) {
+  #getOrCreateBucket(buckets: Map<string, RateBucketState>, key: string, nowMs: number): RateBucketState | null {
+    const capacity = Math.max(1, this.#config.rateLimit);
+    const refillPerMs = capacity / Math.max(1, this.#config.rateWindowMs);
+    const existing = buckets.get(key);
+    if (existing) {
+      const elapsedMs = Math.max(0, nowMs - existing.lastRefillMs);
+      const refillTokens = elapsedMs * refillPerMs;
+      existing.tokens = Math.min(capacity, existing.tokens + refillTokens);
+      existing.lastRefillMs = nowMs;
+      if (existing.tokens < 1) {
         return null;
       }
-      existing.count += 1;
+      existing.tokens -= 1;
       return existing;
     }
-    const nextWindow: RateWindowState = { windowStartMs, count: 1 };
-    windows.set(key, nextWindow);
-    return nextWindow;
+    const nextBucket: RateBucketState = { tokens: capacity - 1, lastRefillMs: nowMs };
+    buckets.set(key, nextBucket);
+    return nextBucket;
   }
 }
 

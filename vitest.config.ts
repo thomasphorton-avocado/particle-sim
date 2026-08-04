@@ -11,5 +11,10 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts'],
     exclude: ['src/**/*.benchmark.test.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['cobertura'],
+      reportsDirectory: './coverage',
+    },
   },
 });

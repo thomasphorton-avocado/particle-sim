@@ -83,3 +83,70 @@ describe("presentation snapshots", () => {
     expect(renderState.interpolatedPresentationSnapshot.players.get("player_1")).toEqual({ x: 9, y: 7, vy: 1.5 });
   });
 });
+
+describe("presentation snapshot edge cases", () => {
+  it("returns alpha=0 state when player only exists in current snapshot", () => {
+    const previous = createPresentationSnapshot(createDefaultWorldState("snapshot_new_player_prev"));
+    const current = createPresentationSnapshot(createDefaultWorldState("snapshot_new_player_curr"));
+    current.players.set("player_new", { x: 5, y: 8, vy: 1 });
+
+    const atZero = interpolatePresentationSnapshot(previous, current, 0);
+    expect(atZero.players.get("player_new")).toBeUndefined();
+
+    const atHalf = interpolatePresentationSnapshot(previous, current, 0.5);
+    expect(atHalf.players.get("player_new")).toEqual({ x: 5, y: 8, vy: 1 });
+  });
+
+  it("returns previous state when player only exists in previous snapshot and alpha < 1", () => {
+    const previous = createPresentationSnapshot(createDefaultWorldState("snapshot_leaving_prev"));
+    const current = createPresentationSnapshot(createDefaultWorldState("snapshot_leaving_curr"));
+    previous.players.set("player_leaving", { x: 3, y: 6, vy: 0 });
+
+    const atHalf = interpolatePresentationSnapshot(previous, current, 0.5);
+    expect(atHalf.players.get("player_leaving")).toEqual({ x: 3, y: 6, vy: 0 });
+
+    const atEnd = interpolatePresentationSnapshot(previous, current, 1);
+    expect(atEnd.players.get("player_leaving")).toBeUndefined();
+  });
+
+  it("clamps alpha values outside [0, 1]", () => {
+    const previous = createPresentationSnapshot(createDefaultWorldState("snapshot_clamp_prev"));
+    const current = createPresentationSnapshot(createDefaultWorldState("snapshot_clamp_curr"));
+    previous.players.set("player_clamp", { x: 0, y: 0, vy: 0 });
+    current.players.set("player_clamp", { x: 10, y: 10, vy: 2 });
+
+    const atNeg = interpolatePresentationSnapshot(previous, current, -5);
+    expect(atNeg.players.get("player_clamp")).toEqual({ x: 0, y: 0, vy: 0 });
+
+    const atOver = interpolatePresentationSnapshot(previous, current, 5);
+    expect(atOver.players.get("player_clamp")).toEqual({ x: 10, y: 10, vy: 2 });
+  });
+
+  it("uses current snapshot directly when shouldRenderCurrentSnapshot is true", () => {
+    const playerId = createPlayerId("player_render_current");
+    const world = createDefaultWorldState("snapshot_render_current");
+    const player = createDefaultPlayerState(playerId);
+    player.x = 4;
+    player.y = 7;
+    player.vy = 0.5;
+    world.players[playerId] = player;
+
+    const previous = createPresentationSnapshot(createDefaultWorldState("snapshot_render_current_prev"));
+    previous.players.set(playerId, { x: 0, y: 0, vy: 0 });
+    const current = createPresentationSnapshot(world);
+
+    const renderState = resolvePresentationRenderState(world, previous, current, playerId, 0, true);
+
+    expect(renderState.interpolatedPlayerSnapshot).toEqual({ x: 4, y: 7, vy: 0.5 });
+    expect(renderState.interpolatedPresentationSnapshot).toBe(current);
+  });
+
+  it("returns null interpolated player snapshot when player is absent from both snapshots", () => {
+    const world = createDefaultWorldState("snapshot_absent");
+    const previous = createPresentationSnapshot(world);
+    const current = createPresentationSnapshot(world);
+
+    const renderState = resolvePresentationRenderState(world, previous, current, "player_nonexistent", 0.5, false);
+    expect(renderState.interpolatedPlayerSnapshot).toBeNull();
+  });
+});

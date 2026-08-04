@@ -106,3 +106,68 @@ describe("build metadata", () => {
     expect(details.runLabel).toBe("run #13");
   });
 });
+
+describe("parseBuildMetadata", () => {
+  it("falls back to local defaults when rawMetadata is undefined", () => {
+    const metadata = parseBuildMetadata(undefined);
+    expect(metadata.loadedCodeId).toBe("local");
+    expect(metadata.displayVersion).toBe("local");
+    expect(metadata.source).toBe("local");
+  });
+
+  it("falls back to local defaults when rawMetadata is invalid JSON", () => {
+    const metadata = parseBuildMetadata("not-valid-json{{");
+    expect(metadata.loadedCodeId).toBe("local");
+    expect(metadata.source).toBe("local");
+  });
+
+  it("treats an unknown source value as local", () => {
+    const raw = JSON.stringify({ source: "unknown-source", commitSha: "", buildTimestamp: "2024-01-01T00:00:00.000Z" });
+    const metadata = parseBuildMetadata(raw);
+    expect(metadata.source).toBe("local");
+  });
+
+  it("derives shortCommitSha from commitSha when shortCommitSha is absent in payload", () => {
+    const sha = "aabbccdd11223344aabbccdd11223344aabbccdd";
+    const raw = JSON.stringify({ commitSha: sha, source: "github-actions", buildTimestamp: "2024-01-01T00:00:00.000Z" });
+    const metadata = parseBuildMetadata(raw);
+    expect(metadata.shortCommitSha).toBe(sha.slice(0, 7));
+    expect(metadata.displayVersion).toBe(`build-${sha.slice(0, 7)}`);
+  });
+
+  it("uses a provided buildTimestamp from the payload", () => {
+    const ts = "2025-06-15T12:34:56.000Z";
+    const raw = JSON.stringify({ buildTimestamp: ts });
+    const metadata = parseBuildMetadata(raw);
+    expect(metadata.buildTimestamp).toBe(ts);
+  });
+});
+
+describe("formatBuildTimestamp", () => {
+  it("returns unknown for an invalid timestamp string", () => {
+    expect(formatBuildTimestamp("not-a-date")).toBe("unknown");
+  });
+
+  it("formats a valid ISO timestamp to date and time", () => {
+    expect(formatBuildTimestamp("2024-03-14T09:26:53.000Z")).toBe("2024-03-14 09:26Z");
+  });
+});
+
+describe("createBuildMetadata options", () => {
+  it("accepts an explicit source option overriding the env", () => {
+    const metadata = createBuildMetadata({ GITHUB_ACTIONS: "true" }, { source: "local" });
+    expect(metadata.source).toBe("local");
+  });
+
+  it("accepts an explicit commitSha option overriding the env", () => {
+    const sha = "deadbeef00000000deadbeef00000000deadbeef";
+    const metadata = createBuildMetadata({}, { commitSha: sha });
+    expect(metadata.commitSha).toBe(sha);
+    expect(metadata.shortCommitSha).toBe(sha.slice(0, 7));
+  });
+
+  it("trims whitespace from GITHUB_SHA", () => {
+    const metadata = createBuildMetadata({ GITHUB_SHA: "  abc1234  " });
+    expect(metadata.commitSha).toBe("abc1234");
+  });
+});
